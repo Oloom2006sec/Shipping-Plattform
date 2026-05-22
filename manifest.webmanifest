@@ -1,6 +1,6 @@
 {
-  "name": "وصلة للشحن",
-  "short_name": "وصلة",
+  "name": "النخبة للشحن",
+  "short_name": "النخبة",
   "description": "تطبيق متابعة الشحنات للتاجر والمندوب والعميل",
   "start_url": "./index.html",
   "display": "standalone",
