@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasla-shipping-v1";
+const CACHE_NAME = "AL-NUKHBA-shipping-v1";
 const ASSETS = [
   "./",
   "./index.html",
