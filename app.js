@@ -178,7 +178,7 @@ function loginScreen() {
       <section class="login-panel">
         <div class="brand-mark">${icon("truck")}</div>
         <h1>النخبة للشحن السريع</h1>
-        <p>نظام واحد للتاجر والمندوب والعميل: تتبع، حسابات، تحصيل، وتشغيل يومي بسيط.</p>
+        <p>منصة ذكية متكاملة لإدارة الشحن والتوصيل والتتبع والتحصيل بأعلى كفاءة.</p>
         <form id="loginForm" class="login-form">
           <label>رقم الموبايل
             <input name="phone" inputmode="tel" value="01000000001" autocomplete="username" />
