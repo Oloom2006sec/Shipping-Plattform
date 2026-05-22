@@ -201,7 +201,7 @@ function loginScreen() {
           <strong>96%</strong>
         </div>
         <div class="route-line"></div>
-        <div class="preview-card"><b>WS-20419</b><span>خارج للتسليم</span></div>
+        <div class="preview-card"><b>ANE-20419</b><span>خارج للتسليم</span></div>
         <div class="preview-card"><b>تحصيل اليوم</b><span>${money(2100)}</span></div>
       </section>
     </main>
