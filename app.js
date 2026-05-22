@@ -7,7 +7,7 @@ const users = [
 
 const shipments = [
   {
-    id: "WS-20419",
+    id: "NE-20419",
     merchantId: "u1",
     courierId: "u2",
     customerId: "u3",
@@ -28,7 +28,7 @@ const shipments = [
     ]
   },
   {
-    id: "WS-20420",
+    id: "NE-20420",
     merchantId: "u1",
     courierId: "u2",
     customerId: "u3",
@@ -49,7 +49,7 @@ const shipments = [
     ]
   },
   {
-    id: "WS-20421",
+    id: "NE-20421",
     merchantId: "u1",
     courierId: null,
     customerId: null,
@@ -68,7 +68,7 @@ const shipments = [
     ]
   },
   {
-    id: "WS-20422",
+    id: "NE-20422",
     merchantId: "u1",
     courierId: "u2",
     customerId: null,
@@ -116,10 +116,10 @@ const labels = {
 };
 
 let state = {
-  user: JSON.parse(localStorage.getItem("wasla_user") || "null"),
+  user: JSON.parse(localStorage.getItem("_user") || "null"),
   view: "overview",
   query: "",
-  selectedShipment: "WS-20419"
+  selectedShipment: "NE-20419"
 };
 
 function money(value) {
@@ -177,7 +177,7 @@ function loginScreen() {
     <main class="login-shell">
       <section class="login-panel">
         <div class="brand-mark">${icon("truck")}</div>
-        <h1>وصلة للشحن</h1>
+        <h1>النخبة للشحن السريع</h1>
         <p>نظام واحد للتاجر والمندوب والعميل: تتبع، حسابات، تحصيل، وتشغيل يومي بسيط.</p>
         <form id="loginForm" class="login-form">
           <label>رقم الموبايل
@@ -435,7 +435,7 @@ function bindEvents() {
       setTimeout(() => event.currentTarget.classList.remove("shake"), 400);
       return;
     }
-    localStorage.setItem("wasla_user", JSON.stringify(user));
+    localStorage.setItem("AL NUKHBA EXPRESS_user", JSON.stringify(user));
     setState({ user, view: user.role === "customer" ? "track" : "overview" });
   });
 
@@ -451,7 +451,7 @@ function bindEvents() {
   });
 
   document.querySelector("#logoutBtn")?.addEventListener("click", () => {
-    localStorage.removeItem("wasla_user");
+    localStorage.removeItem("AL NUKHBA EXPRESS_user");
     setState({ user: null, view: "overview", query: "" });
   });
 
