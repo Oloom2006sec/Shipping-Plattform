@@ -6,5 +6,8 @@
   "scripts": {
     "start": "node server.mjs",
     "check": "node --check app.js && node --check server.mjs"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
   }
 }

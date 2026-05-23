@@ -3,11 +3,50 @@ const SUPABASE_URL = "https://urktddxiyzwsilddamci.supabase.co";
 
 const SUPABASE_KEY = "sb_publishable_-0wKJXXI18TuHK7pe-dKYw_HWyjH79u";
 
-const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);const users = [
-  { id: "u1", name: "أحمد الشرقاوي", role: "merchant", phone: "01000000001", password: "123456", balance: 18450 },
-  { id: "u2", name: "منى علي", role: "courier", phone: "01000000002", password: "123456", balance: 3250 },
-  { id: "u3", name: "كريم محمود", role: "customer", phone: "01000000003", password: "123456", balance: 0 },
-  { id: "u4", name: "مدير التشغيل", role: "admin", phone: "01000000000", password: "123456", balance: 0 }
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
+let users = JSON.parse(
+  localStorage.getItem(
+    "nukhba_users"
+  )
+) || [
+
+  {
+    id: "u1",
+    name: "أحمد الشرقاوي",
+    role: "merchant",
+    phone: "01000000001",
+    password: "123456",
+    balance: 18450
+  },
+
+  {
+    id: "u2",
+    name: "منى علي",
+    role: "courier",
+    phone: "01000000002",
+    password: "123456",
+    balance: 3250
+  },
+
+  {
+    id: "u3",
+    name: "كريم محمود",
+    role: "customer",
+    phone: "01000000003",
+    password: "123456",
+    balance: 0
+  },
+
+  {
+    id: "u4",
+    name: "مدير التشغيل",
+    role: "admin",
+    phone: "01000000000",
+    password: "123456",
+    balance: 0
+  }
+
 ];
 
 let shipments = [
@@ -31,6 +70,7 @@ let shipments = [
       ["في المخزن", "2026-05-06 8:05 م"],
       ["خرج للتسليم", "2026-05-07 11:20 ص"]
     ]
+    
   },
   {
     id: "NE-20420",
@@ -94,7 +134,7 @@ let shipments = [
     ]
   }
 ];
-
+let notifications = [];
 const statusMeta = {
 
   created: {
@@ -106,7 +146,10 @@ const statusMeta = {
     label: "تم استلام الشحنة",
     tone: "warning"
   },
-
+warehouse: {
+  label: "في المخزن",
+  tone: "warning"
+},
   hub: {
     label: "وصلت لمركز الفرز",
     tone: "primary"
@@ -125,7 +168,16 @@ const statusMeta = {
 };
 
 const navByRole = {
-  admin: ["overview", "shipments", "accounts", "reports"],
+  admin: [
+  "overview",
+  "shipments",
+  "tasks",
+  "accounts",
+  "reports",
+  "users",
+  "track"
+  
+],
   merchant: ["overview", "shipments", "accounts"],
   courier: ["overview", "tasks", "accounts"],
   customer: ["track", "accounts"]
@@ -137,9 +189,49 @@ const labels = {
   tasks: "المهام",
   accounts: "الحساب",
   reports: "التقارير",
+  users: "المستخدمين",
   track: "تتبع"
 };
+const permissions = {
 
+  admin: [
+    "create_shipment",
+    "edit_shipment",
+    "delete_shipment",
+    "assign_courier",
+    "view_reports",
+    "manage_users",
+    "export_excel",
+    "change_status",
+    "view_all"
+  ],
+
+  merchant: [
+    "create_shipment",
+    "view_own",
+    "track",
+    "view_accounts"
+  ],
+
+  courier: [
+    "view_assigned",
+    "change_status",
+    "upload_pod",
+    "navigation"
+  ],
+
+  customer: [
+    "track"
+  ]
+
+};
+function can(permission) {
+
+  return permissions[
+    state.user?.role
+  ]?.includes(permission);
+
+}
 let state = {
   user: JSON.parse(localStorage.getItem("AL NUKHBA EXPRESS_user") || "null"),
   view: "overview",
@@ -179,7 +271,7 @@ function visibleShipments() {
 
   let list = [...shipments];
   if (
-  state.user.role === "courier"
+  state.user?.role === "courier"
 ) {
 console.log(
   "USER ID:",
@@ -193,7 +285,7 @@ console.log(
   list = list.filter(
     shipment =>
       shipment.courierId ===
-      state.user.id
+state.user?.id
   );
 }
 
@@ -290,7 +382,36 @@ function shell(content) {
       <main class="content">
         <header class="topbar">
           <div>
-            <span class="eyebrow">${roleName(state.user.role)}</span>
+            <span class="eyebrow">${state.user.role === "admin" ? `
+
+<select
+  id="roleSwitcher"
+  class="role-switcher"
+>
+
+  <option value="">
+    تبديل الواجهة
+  </option>
+
+  <option value="admin">
+    Admin
+  </option>
+
+  <option value="merchant">
+    Merchant
+  </option>
+
+  <option value="courier">
+    Courier
+  </option>
+
+  <option value="customer">
+    Customer
+  </option>
+
+</select>
+
+` : ""}${roleName(state.user.role)}</span>
             <h2>أهلاً، ${state.user.name}</h2>
           </div>
           <div class="search-box">
@@ -326,7 +447,7 @@ function overview() {
 >
   📷 Scan QR
 </button>
-          ${state.user.role !== "customer" ? `<button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} شحنة جديدة</button>` : ""}
+          ${can("create_shipment") ? `<button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} شحنة جديدة</button>` : ""}
         </div>
         ${shipmentTable(list.slice(0, 6))}
       </div>
@@ -337,7 +458,50 @@ function overview() {
           <div><b>1</b><span>مرتجع ينتظر مراجعة التاجر</span></div>
           <div><b>4</b><span>تحصيلات جاهزة للمراجعة</span></div>
         </div>
+        <div class="notifications-card">
+
+  <h3>
+    🔔 الإشعارات
+  </h3>
+
+  ${
+    notifications.length
+      ? notifications
+          .slice(0,5)
+          .map(
+            n => `
+              <div
+                class="notification-item"
+              >
+
+                <strong>
+                  ${n.text}
+                </strong>
+
+                <small>
+                  ${n.time}
+                </small>
+
+              </div>
+            `
+          )
+          .join("")
+      : `
+        <p>
+          لا توجد إشعارات
+        </p>
+      `
+  }
+
+</div>
       </div>
+      <section class="panel charts-panel">
+
+  <div class="chart-box">
+    <canvas id="statusChart"></canvas>
+  </div>
+
+</section>
     </section>
   `;
 }
@@ -479,28 +643,34 @@ function shipmentsView(title = "إدارة الشحنات") {
 </div>
 
         <div
-          style="
-            display:flex;
-            gap:10px;
-          "
-        >
+  style="
+    display:flex;
+    gap:10px;
+  "
+>
 
-          <button
-            class="ghost-btn"
-            onclick="manualTrackShipment()"
-          >
-            📦 تتبع شحنة
-          </button>
+  <button
+    class="ghost-btn"
+    onclick="manualTrackShipment()"
+  >
+    📦 تتبع شحنة
+  </button>
 
-          <button
-            class="primary-btn compact"
-            id="newShipmentBtn"
-          >
-            ${icon("plus")} إضافة
-          </button>
+  <button
+    class="ghost-btn"
+    onclick="exportShipmentsExcel()"
+  >
+    📊 تصدير Excel
+  </button>
 
-        </div>
+  <button
+    class="primary-btn compact"
+    id="newShipmentBtn"
+  >
+    ${icon("plus")} إضافة
+  </button>
 
+</div>
       </div>
 
       ${shipmentTable(visibleShipments())}
@@ -813,13 +983,105 @@ function reportsView() {
     </section>
   `;
 }
+function usersView() {
 
+  if (!can("manage_users")) {
+
+    return `
+      <section class="panel">
+        <h3>
+          غير مصرح
+        </h3>
+      </section>
+    `;
+  }
+
+  return `
+
+    <section class="panel">
+
+      <div class="section-head">
+
+        <h3>
+          إدارة المستخدمين
+        </h3>
+
+        <button
+          class="primary-btn compact"
+          id="addUserBtn"
+        >
+          ${icon("plus")}
+          مستخدم جديد
+        </button>
+
+      </div>
+
+      <div class="table-wrap">
+
+        <table>
+
+          <thead>
+
+            <tr>
+              <th>الاسم</th>
+              <th>الدور</th>
+              <th>الهاتف</th>
+              <th>الإجراءات</th>
+            </tr>
+
+          </thead>
+
+          <tbody>
+
+            ${users.map(user => `
+
+              <tr>
+
+                <td>
+                  ${user.name}
+                </td>
+
+                <td>
+                  ${roleName(user.role)}
+                </td>
+
+                <td>
+                  ${user.phone}
+                </td>
+
+                <td>
+
+                  <button
+                    class="link-btn"
+                    onclick="deleteUser('${user.id}')"
+                  >
+                    حذف
+                  </button>
+
+                </td>
+
+              </tr>
+
+            `).join("")}
+
+          </tbody>
+
+        </table>
+
+      </div>
+
+    </section>
+
+  `;
+}
 function renderView() {
   if (state.view === "shipments") return shipmentsView();
   if (state.view === "tasks") return tasksView();
   if (state.view === "accounts") return accountsView();
   if (state.view === "reports") return reportsView();
   if (state.view === "track") return trackView();
+  if (state.view === "users")
+  return usersView();
   return overview();
 }
 
@@ -858,7 +1120,85 @@ if (trackId) {
     );
 
   bindEvents();
+  setTimeout(() => {
 
+  const canvas =
+    document.getElementById(
+      "statusChart"
+    );
+
+  if (!canvas) return;
+
+  const oldChart =
+    Chart.getChart(canvas);
+
+  if (oldChart) {
+    oldChart.destroy();
+  }
+
+  const delivered =
+    shipments.filter(
+      s => s.status === "delivered"
+    ).length;
+
+  const returned =
+    shipments.filter(
+      s => s.status === "returned"
+    ).length;
+
+  const out =
+    shipments.filter(
+      s =>
+        s.status ===
+        "out_for_delivery"
+    ).length;
+
+  new Chart(canvas, {
+
+    type: "doughnut",
+
+    data: {
+
+      labels: [
+        "تم التسليم",
+        "مرتجع",
+        "خرج للتسليم"
+      ],
+
+      datasets: [{
+
+        data: [
+          delivered,
+          returned,
+          out
+        ],
+
+        backgroundColor: [
+          "#22c55e",
+          "#ef4444",
+          "#3b82f6"
+        ]
+
+      }]
+    },
+
+    options: {
+
+      responsive: true,
+
+      plugins: {
+
+        legend: {
+          position: "bottom"
+        }
+
+      }
+
+    }
+
+  });
+
+}, 200);
   setTimeout(() => {
 
     visibleShipments().forEach((shipment) => {
@@ -1131,6 +1471,7 @@ document.querySelector("#openScanner")
       role,
       phone: email,
       balance: 0
+      
     };
 
     localStorage.setItem("AL NUKHBA EXPRESS_user", JSON.stringify(user));
@@ -1152,7 +1493,27 @@ document.querySelector("#openScanner")
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.addEventListener("click", () => setState({ view: button.dataset.view }));
   });
+document.querySelector(
+  "#roleSwitcher"
+)?.addEventListener(
+  "change",
+  (e) => {
 
+    const role =
+      e.target.value;
+
+    if (!role) return;
+
+    state.user.role =
+      role;
+
+    state.view =
+      role === "customer"
+        ? "track"
+        : "overview";
+
+    render();
+});
   document.querySelector("#logoutBtn")?.addEventListener("click", () => {
     localStorage.removeItem("AL NUKHBA EXPRESS_user");
     setState({ user: null, view: "overview", query: "" });
@@ -1421,10 +1782,13 @@ ${notes}
       ]);
 
     if (error) {
-      alert("خطأ في حفظ الشحنة");
-      console.error(error);
-      return;
-    }
+
+  console.error(error);
+
+  alert(error.message);
+
+  return;
+}
 
     modal.remove();
 
@@ -1432,6 +1796,166 @@ ${notes}
 
     alert("تم إضافة الشحنة بنجاح");
   };
+});
+document.querySelector("#addUserBtn")
+?.addEventListener("click", () => {
+
+  const modal =
+    document.createElement("div");
+
+  modal.className =
+    "shipment-modal";
+
+  modal.innerHTML = `
+
+    <div class="shipment-modal-box">
+
+      <h2>
+        مستخدم جديد
+      </h2>
+
+      <input
+        id="newUserName"
+        placeholder="الاسم"
+      />
+
+      <input
+        id="newUserPhone"
+        placeholder="الهاتف"
+      />
+
+      <input
+        id="newUserPassword"
+        placeholder="كلمة المرور"
+      />
+
+      <select id="newUserRole">
+
+        <option value="merchant">
+          تاجر
+        </option>
+
+        <option value="courier">
+          مندوب
+        </option>
+
+        <option value="customer">
+          عميل
+        </option>
+
+        <option value="admin">
+          إدارة
+        </option>
+
+      </select>
+
+      <div class="modal-actions">
+
+        <button
+          id="saveUserBtn"
+          class="primary-btn"
+        >
+          حفظ
+        </button>
+
+        <button
+          id="closeUserModal"
+          class="ghost-btn"
+        >
+          إلغاء
+        </button>
+
+      </div>
+
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  document.querySelector(
+    "#closeUserModal"
+  ).onclick = () => {
+    modal.remove();
+  };
+
+  document.querySelector(
+    "#saveUserBtn"
+  ).onclick = () => {
+
+    const user = {
+
+      id:
+        crypto.randomUUID(),
+
+      name:
+        document.querySelector(
+          "#newUserName"
+        ).value,
+
+      phone:
+        document.querySelector(
+          "#newUserPhone"
+        ).value,
+
+      password:
+        document.querySelector(
+          "#newUserPassword"
+        ).value,
+
+      role:
+        document.querySelector(
+          "#newUserRole"
+        ).value,
+
+      balance: 0
+
+};
+
+const generatedEmail =
+  `${user.phone}@nukhba.com`;
+
+    supabaseClient.auth.signUp({
+
+  email:
+  generatedEmail,
+
+  password:
+    user.password
+
+}).then(async ({ data, error }) => {
+
+  if (error) {
+
+    alert("خطأ في إنشاء المستخدم");
+
+    console.error(error);
+
+    return;
+  }
+
+  user.id =
+  data?.user?.id ||
+  crypto.randomUUID();
+
+  users.push(user);
+localStorage.setItem(
+  "nukhba_users",
+  JSON.stringify(users)
+);
+  alert("تم إنشاء المستخدم");
+
+  modal.remove();
+
+  render();
+
+});
+
+    modal.remove();
+
+    render();
+
+  };
+
 });
 }
 window.manualTrackShipment = function () {
@@ -1458,6 +1982,24 @@ window.updateShipmentStatus =
     if (!shipment) return;
 
     shipment.status = status;
+    notifications.unshift({
+
+  id: crypto.randomUUID(),
+
+  text:
+    `تم تحديث الشحنة ${shipment.id}
+     إلى ${
+       statusMeta[status]?.label
+     }`,
+
+  time:
+    new Date()
+      .toLocaleTimeString(),
+
+  role:
+    state.user?.role || "admin"
+
+});
 
     shipment.timeline.push([
       statusMeta[status].label,
@@ -1467,12 +2009,7 @@ window.updateShipmentStatus =
     if (status === "delivered") {
       shipment.eta = "تم التسليم";
     }
-    
-window.setStatusFilter =
-  function (status) {
-
-    state.statusFilter = status;
-const whatsappMessage = `
+    const whatsappMessage = `
 مرحبًا ${shipment.customerName}
 
 تم تحديث حالة الشحنة:
@@ -1491,8 +2028,7 @@ window.open(
     )
   }`
 );
-    render();
-};
+
     await supabaseClient
       .from("shipments")
       .update({
@@ -1645,3 +2181,73 @@ async function loadShipments() {
 }
 
 loadShipments();
+window.exportShipmentsExcel =
+  function () {
+
+    const data =
+      visibleShipments().map(
+        shipment => ({
+
+          "رقم الشحنة":
+            shipment.id,
+
+          "العميل":
+            shipment.customerName,
+
+          "الهاتف":
+            shipment.customerPhone,
+
+          "العنوان":
+            shipment.address,
+
+          "الحالة":
+            statusMeta[
+              shipment.status
+            ]?.label,
+
+          "المبلغ":
+            shipment.amount,
+
+          "رسوم الشحن":
+            shipment.deliveryFee,
+
+          "الحالة الحالية":
+            shipment.eta
+
+        })
+      );
+
+    const worksheet =
+      XLSX.utils.json_to_sheet(
+        data
+      );
+
+    const workbook =
+      XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(
+      workbook,
+      worksheet,
+      "Shipments"
+    );
+
+    XLSX.writeFile(
+      workbook,
+      "shipments.xlsx"
+    );
+};
+window.deleteUser =
+  function (id) {
+
+    const index =
+      users.findIndex(
+        u => u.id === id
+      );
+
+    if (index === -1) return;
+
+    users.splice(index, 1);
+
+    render();
+
+};

@@ -764,3 +764,40 @@ td span {
 .progress-line.done{
   background:#0f766e;
 }
+.role-switcher{
+  margin-top:10px;
+  padding:10px 14px;
+  border-radius:12px;
+  border:none;
+  background:#fff;
+  font-weight:600;
+}
+.notifications-card{
+  background:#fff;
+  border-radius:18px;
+  padding:18px;
+  margin-top:20px;
+  box-shadow:0 2px 10px rgba(0,0,0,.05);
+}
+
+.notification-item{
+  padding:12px;
+  border-bottom:1px solid #eee;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+
+.notification-item:last-child{
+  border-bottom:none;
+}
+.charts-panel{
+  margin-top:20px;
+}
+
+.chart-box{
+  background:#fff;
+  border-radius:18px;
+  padding:20px;
+  max-width:420px;
+}
