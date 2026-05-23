@@ -1,15 +1,20 @@
-const users = [
+
+const SUPABASE_URL = "https://urktddxiyzwsilddamci.supabase.co";
+
+const SUPABASE_KEY = "sb_publishable_-0wKJXXI18TuHK7pe-dKYw_HWyjH79u";
+
+const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);const users = [
   { id: "u1", name: "أحمد الشرقاوي", role: "merchant", phone: "01000000001", password: "123456", balance: 18450 },
   { id: "u2", name: "منى علي", role: "courier", phone: "01000000002", password: "123456", balance: 3250 },
   { id: "u3", name: "كريم محمود", role: "customer", phone: "01000000003", password: "123456", balance: 0 },
   { id: "u4", name: "مدير التشغيل", role: "admin", phone: "01000000000", password: "123456", balance: 0 }
 ];
 
-const shipments = [
+let shipments = [
   {
     id: "NE-20419",
     merchantId: "u1",
-    courierId: "u2",
+    courierId: null,
     customerId: "u3",
     customerName: "كريم محمود",
     customerPhone: "01000000003",
@@ -30,7 +35,7 @@ const shipments = [
   {
     id: "NE-20420",
     merchantId: "u1",
-    courierId: "u2",
+    courierId: null,
     customerId: "u3",
     customerName: "سارة ناصر",
     customerPhone: "01055512111",
@@ -70,7 +75,7 @@ const shipments = [
   {
     id: "NE-20422",
     merchantId: "u1",
-    courierId: "u2",
+    courierId: null,
     customerId: null,
     customerName: "هبة مصطفى",
     customerPhone: "01233377788",
@@ -91,12 +96,32 @@ const shipments = [
 ];
 
 const statusMeta = {
-  created: { label: "طلب جديد", tone: "info" },
-  picked: { label: "تم الاستلام", tone: "info" },
-  warehouse: { label: "في المخزن", tone: "warning" },
-  out_for_delivery: { label: "خارج للتسليم", tone: "primary" },
-  delivered: { label: "تم التسليم", tone: "success" },
-  returned: { label: "مرتجع", tone: "danger" }
+
+  created: {
+    label: "تم إنشاء الشحنة",
+    tone: "info"
+  },
+
+  received: {
+    label: "تم استلام الشحنة",
+    tone: "warning"
+  },
+
+  hub: {
+    label: "وصلت لمركز الفرز",
+    tone: "primary"
+  },
+
+  out_for_delivery: {
+    label: "خرجت للتسليم",
+    tone: "primary"
+  },
+
+  delivered: {
+    label: "تم التسليم",
+    tone: "success"
+  }
+
 };
 
 const navByRole = {
@@ -116,9 +141,10 @@ const labels = {
 };
 
 let state = {
-  user: JSON.parse(localStorage.getItem("_user") || "null"),
+  user: JSON.parse(localStorage.getItem("AL NUKHBA EXPRESS_user") || "null"),
   view: "overview",
   query: "",
+  statusFilter: "all",
   selectedShipment: "NE-20419"
 };
 
@@ -150,17 +176,56 @@ function setState(patch) {
 }
 
 function visibleShipments() {
-  const user = state.user;
-  const list = shipments.filter((shipment) => {
-    if (!user || user.role === "admin") return true;
-    if (user.role === "merchant") return shipment.merchantId === user.id;
-    if (user.role === "courier") return shipment.courierId === user.id;
-    return shipment.customerId === user.id || shipment.customerPhone === user.phone || shipment.id === state.selectedShipment;
-  });
+
+  let list = [...shipments];
+  if (
+  state.user.role === "courier"
+) {
+console.log(
+  "USER ID:",
+  state.user.id
+);
+
+console.log(
+  "SHIPMENTS:",
+  list
+);
+  list = list.filter(
+    shipment =>
+      shipment.courierId ===
+      state.user.id
+  );
+}
+
   return list.filter((shipment) => {
-    const text = `${shipment.id} ${shipment.customerName} ${shipment.customerPhone} ${shipment.address}`.toLowerCase();
-    return text.includes(state.query.trim().toLowerCase());
+
+    const text =
+      `
+        ${shipment.id}
+        ${shipment.customerName}
+        ${shipment.customerPhone}
+        ${shipment.address}
+      `.toLowerCase();
+
+    const matchesSearch =
+      text.includes(
+        state.query
+          .trim()
+          .toLowerCase()
+      );
+
+    const matchesStatus =
+      state.statusFilter === "all"
+        ? true
+        : shipment.status === state.statusFilter;
+
+    return (
+      matchesSearch &&
+      matchesStatus
+    );
+
   });
+
 }
 
 function stats(list) {
@@ -180,8 +245,8 @@ function loginScreen() {
         <h1>النخبة للشحن السريع</h1>
         <p>منصة ذكية متكاملة لإدارة الشحن والتوصيل والتتبع والتحصيل بأعلى كفاءة.</p>
         <form id="loginForm" class="login-form">
-          <label>رقم الموبايل
-            <input name="phone" inputmode="tel" value="01000000001" autocomplete="username" />
+          <label>البريد الإلكتروني
+            <input name="phone" type="email" inputmode="tel" value="merchant@nukhba.com" autocomplete="username" />
           </label>
           <label>كلمة المرور
             <input name="password" type="password" value="123456" autocomplete="current-password" />
@@ -189,11 +254,11 @@ function loginScreen() {
           <button class="primary-btn" type="submit">${icon("user")} دخول</button>
         </form>
         <div class="demo-users">
-          <button data-demo="01000000000">إدارة</button>
-          <button data-demo="01000000001">تاجر</button>
-          <button data-demo="01000000002">مندوب</button>
-          <button data-demo="01000000003">عميل</button>
-        </div>
+  <button data-demo="admin@nukhba.com">إدارة</button>
+  <button data-demo="merchant@nukhba.com">تاجر</button>
+  <button data-demo="courier@nukhba.com">مندوب</button>
+  <button data-demo="customer@nukhba.com">عميل</button>
+</div>
       </section>
       <section class="app-preview" aria-label="ملخص تشغيل">
         <div class="preview-top">
@@ -215,7 +280,7 @@ function shell(content) {
       <aside class="sidebar">
         <div class="brand">
           <div class="brand-mark small">${icon("truck")}</div>
-          <div><strong>وصلة</strong><span>لوحة الشحن</span></div>
+          <div><strong>النخبة للشحن السريع</strong><span>لوحة الشحن</span></div>
         </div>
         <nav>
           ${views.map((view) => `<button class="${state.view === view ? "active" : ""}" data-view="${view}">${labels[view]}</button>`).join("")}
@@ -255,6 +320,12 @@ function overview() {
       <div class="panel wide">
         <div class="section-head">
           <h3>آخر الشحنات</h3>
+          <button
+  class="ghost-btn"
+  id="openScanner"
+>
+  📷 Scan QR
+</button>
           ${state.user.role !== "customer" ? `<button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} شحنة جديدة</button>` : ""}
         </div>
         ${shipmentTable(list.slice(0, 6))}
@@ -275,18 +346,77 @@ function shipmentTable(list) {
   return `
     <div class="table-wrap">
       <table>
-        <thead><tr><th>الشحنة</th><th>العميل</th><th>العنوان</th><th>الحالة</th><th>المبلغ</th><th></th></tr></thead>
+        <thead>
+          <tr>
+            <th>الشحنة</th>
+            <th>العميل</th>
+            <th>العنوان</th>
+            <th>الحالة</th>
+            <th>المبلغ</th>
+            <th>الإجراءات</th>
+          </tr>
+        </thead>
+
         <tbody>
+
           ${list.map((shipment) => `
+
             <tr>
-              <td><b>${shipment.id}</b><span>${shipment.createdAt}</span></td>
-              <td>${shipment.customerName}<span>${shipment.customerPhone}</span></td>
-              <td>${shipment.address}</td>
-              <td><span class="badge ${statusMeta[shipment.status].tone}">${statusMeta[shipment.status].label}</span></td>
-              <td>${money(shipment.amount)}</td>
-              <td><button class="link-btn" data-open="${shipment.id}">عرض</button></td>
+
+              <td>
+                <b>${shipment.id}</b>
+                <span>${shipment.createdAt}</span>
+              </td>
+
+              <td>
+                ${shipment.customerName}
+                <span>${shipment.customerPhone}</span>
+              </td>
+
+              <td>
+                ${shipment.address}
+              </td>
+
+              <td>
+                <span class="badge ${statusMeta[shipment.status].tone}">
+                  ${statusMeta[shipment.status].label}
+                </span>
+              </td>
+
+              <td>
+                ${money(shipment.amount)}
+              </td>
+
+              <td>
+
+                <div class="shipment-actions">
+
+                  <button
+                    class="link-btn"
+                    data-open="${shipment.id}"
+                  >
+                    عرض
+                  </button>
+
+                  <button
+                    class="link-btn"
+                    onclick="printShipment('${shipment.id}')"
+                  >
+                    طباعة
+                  </button>
+
+                  <div class="qr-box">
+                    <canvas id="qr-${shipment.id}"></canvas>
+                  </div>
+
+                </div>
+
+              </td>
+
             </tr>
+
           `).join("")}
+
         </tbody>
       </table>
     </div>
@@ -294,15 +424,96 @@ function shipmentTable(list) {
 }
 
 function shipmentsView(title = "إدارة الشحنات") {
+
   return `
+
     <section class="panel">
+
       <div class="section-head">
+
         <h3>${title}</h3>
-        <button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} إضافة</button>
+         <div class="filter-row">
+
+  <button
+    onclick="setStatusFilter('all')"
+    class="ghost-btn"
+  >
+    الكل
+  </button>
+
+  <button
+    onclick="setStatusFilter('created')"
+    class="ghost-btn"
+  >
+    جديد
+  </button>
+
+  <button
+    onclick="setStatusFilter('warehouse')"
+    class="ghost-btn"
+  >
+    المخزن
+  </button>
+
+  <button
+    onclick="setStatusFilter('out_for_delivery')"
+    class="ghost-btn"
+  >
+    خرج للتسليم
+  </button>
+
+  <button
+    onclick="setStatusFilter('delivered')"
+    class="ghost-btn"
+  >
+    تم التسليم
+  </button>
+
+  <button
+    onclick="setStatusFilter('returned')"
+    class="ghost-btn"
+  >
+    مرتجع
+  </button>
+
+</div>
+
+        <div
+          style="
+            display:flex;
+            gap:10px;
+          "
+        >
+
+          <button
+            class="ghost-btn"
+            onclick="manualTrackShipment()"
+          >
+            📦 تتبع شحنة
+          </button>
+
+          <button
+            class="primary-btn compact"
+            id="newShipmentBtn"
+          >
+            ${icon("plus")} إضافة
+          </button>
+
+        </div>
+
       </div>
+
       ${shipmentTable(visibleShipments())}
+
     </section>
-    ${detailsPanel(shipments.find((shipment) => shipment.id === state.selectedShipment) || visibleShipments()[0])}
+
+    ${detailsPanel(
+      shipments.find(
+        (shipment) =>
+          shipment.id === state.selectedShipment
+      ) || visibleShipments()[0]
+    )}
+
   `;
 }
 
@@ -318,9 +529,45 @@ function tasksView() {
             <p>${shipment.address}</p>
           </div>
           <div class="task-actions">
-            <a class="ghost-btn" href="tel:${shipment.customerPhone}">اتصال</a>
-            <button class="primary-btn compact" data-deliver="${shipment.id}">تم التسليم</button>
-          </div>
+
+  <a
+    class="ghost-btn"
+    href="tel:${shipment.customerPhone}"
+  >
+    اتصال
+  </a>
+<a
+  class="ghost-btn"
+  target="_blank"
+  href="
+https://www.google.com/maps/dir/?api=1&destination=
+${encodeURIComponent(shipment.address)}
+  "
+>
+  🚚 ابدأ الملاحة
+</a>
+</a>
+  <input
+    type="file"
+    id="pod-${shipment.id}"
+    accept="image/*"
+  />
+
+  <button
+    class="ghost-btn"
+    onclick="uploadPOD('${shipment.id}','pod-${shipment.id}')"
+  >
+    رفع إثبات
+  </button>
+
+  <button
+    class="primary-btn compact"
+    data-deliver="${shipment.id}"
+  >
+    تم التسليم
+  </button>
+
+</div>
         </article>
       `).join("")}
     </section>
@@ -343,15 +590,170 @@ function detailsPanel(shipment) {
         <div><span>قيمة الطلب</span><b>${money(shipment.amount)}</b></div>
         <div><span>رسوم الشحن</span><b>${money(shipment.deliveryFee)}</b></div>
       </div>
-      <ol class="timeline">
-        ${shipment.timeline.map((item) => `<li><b>${item[0]}</b><span>${item[1]}</span></li>`).join("")}
-      </ol>
+      <div class="assign-box">
+
+  <select id="assignCourier">
+
+    <option value="">
+      اختر مندوب
+    </option>
+
+    <option value="f8805493-c40e-450f-a5d7-9b18842d7016">
+  المندوب الرئيسي
+</option>
+
+  </select>
+
+  <button
+    class="ghost-btn"
+    onclick="assignCourier('${shipment.id}')"
+  >
+    تعيين
+  </button>
+
+</div>
+${state.user?.role === "courier" ? `
+
+<div class="pod-upload">
+
+  <input
+    type="file"
+    id="podImage"
+    accept="image/*"
+  />
+
+  <button
+    class="ghost-btn"
+    onclick="uploadPOD('${shipment.id}')"
+  >
+    رفع إثبات التسليم
+  </button>
+
+</div>
+
+` : ""}
+      <div class="status-actions">
+
+  <button
+    onclick="updateShipmentStatus('${shipment.id}','received')"
+    class="ghost-btn"
+  >
+    تم الاستلام
+  </button>
+
+  <button
+    onclick="updateShipmentStatus('${shipment.id}','hub')"
+    class="ghost-btn"
+  >
+    مركز الفرز
+  </button>
+
+  <button
+    onclick="updateShipmentStatus('${shipment.id}','out_for_delivery')"
+    class="ghost-btn"
+  >
+    خرج للتسليم
+  </button>
+
+  <button
+    onclick="updateShipmentStatus('${shipment.id}','delivered')"
+    class="primary-btn compact"
+  >
+    تم التسليم
+  </button>
+
+</div>
+${shipment.podImage ? `
+
+  <div class="pod-preview">
+
+    <h4>إثبات التسليم</h4>
+
+    <img
+      src="${shipment.podImage}"
+      style="
+        width:220px;
+        border-radius:12px;
+        margin-top:10px;
+      "
+    />
+
+  </div>
+
+` : ""}
+      <div class="tracking-progress">
+
+  ${[
+    "created",
+    "received",
+    "hub",
+    "out_for_delivery",
+    "delivered"
+  ].map((step, index, arr) => {
+
+    const currentIndex =
+      arr.indexOf(shipment.status);
+
+    const done =
+      index <= currentIndex;
+
+    return `
+
+      <div class="progress-step">
+
+        <div
+          class="
+            progress-circle
+            ${done ? "done" : ""}
+          "
+        >
+          ${done ? "✓" : ""}
+        </div>
+
+        <span>
+          ${statusMeta[step].label}
+        </span>
+
+      </div>
+
+      ${
+        index < arr.length - 1
+        ? `
+          <div
+            class="
+              progress-line
+              ${index < currentIndex ? "done" : ""}
+            "
+          ></div>
+        `
+        : ""
+      }
+
+    `;
+
+  }).join("")}
+
+</div>
     </section>
   `;
 }
 
 function trackView() {
-  const shipment = shipments.find((item) => item.id === state.selectedShipment) || visibleShipments()[0];
+
+  const shipment =
+    shipments.find(
+      (item) =>
+        item.id === state.selectedShipment
+    );
+  if (!shipment) {
+    return `
+      <section class="panel">
+        <h3>لا توجد شحنات حالياً</h3>
+        <p>لم يتم ربط أي شحنة بهذا الحساب بعد.</p>
+      </section>
+    `;
+  }
+
   return `
     <section class="track-hero">
       <div>
@@ -359,7 +761,9 @@ function trackView() {
         <h2>${shipment.id}</h2>
         <p>${shipment.customerName} - ${shipment.address}</p>
       </div>
-      <span class="badge ${statusMeta[shipment.status].tone}">${statusMeta[shipment.status].label}</span>
+      <span class="badge ${statusMeta[shipment.status].tone}">
+        ${statusMeta[shipment.status].label}
+      </span>
     </section>
     ${detailsPanel(shipment)}
   `;
@@ -420,23 +824,322 @@ function renderView() {
 }
 
 function render() {
-  const app = document.querySelector("#app");
-  app.innerHTML = state.user ? shell(renderView()) : loginScreen();
-  bindEvents();
+const params =
+  new URLSearchParams(
+    window.location.search
+  );
+
+const trackId =
+  params.get("track");
+
+if (trackId) {
+
+  state.selectedShipment =
+    trackId;
+
+  state.view = "track";
+
+  state.user = {
+    role: "customer",
+    id: "guest",
+    name: "عميل"
+  };
 }
 
+  const app = document.querySelector("#app");
+
+  app.innerHTML =
+    trackId
+  ? renderView()
+  : (
+      state.user
+        ? shell(renderView())
+        : loginScreen()
+    );
+
+  bindEvents();
+
+  setTimeout(() => {
+
+    visibleShipments().forEach((shipment) => {
+
+      const qrCanvas =
+        document.getElementById(`qr-${shipment.id}`);
+
+      if (!qrCanvas) return;
+
+      const trackingUrl =
+        `${window.location.origin}?track=${shipment.id}`;
+
+      QRCode.toCanvas(
+        qrCanvas,
+        trackingUrl,
+        {
+          width: 70
+        }
+      );
+
+    });
+
+  }, 100);
+}
+async function printShipment(id) {
+
+  const shipment =
+    shipments.find(s => s.id === id);
+
+  if (!shipment) return;
+
+  const label =
+    document.createElement("div");
+
+  label.style.width = "700px";
+
+  label.style.padding = "30px";
+
+  label.style.background = "#fff";
+
+  label.style.direction = "rtl";
+
+  label.style.fontFamily =
+    "Arial";
+
+  label.innerHTML = `
+
+    <div
+      style="
+        border:2px solid #000;
+        padding:20px;
+        border-radius:14px;
+      "
+    >
+
+      <h1
+        style="
+          text-align:center;
+          margin-bottom:20px;
+        "
+      >
+        النخبة إكسبريس
+      </h1>
+
+      <div
+        style="
+          display:flex;
+          justify-content:space-between;
+          align-items:center;
+        "
+      >
+
+        <div>
+
+          <p>
+            <b>رقم الشحنة:</b>
+            ${shipment.id}
+          </p>
+
+          <p>
+            <b>العميل:</b>
+            ${shipment.customerName}
+          </p>
+
+          <p>
+            <b>الهاتف:</b>
+            ${shipment.customerPhone}
+          </p>
+
+          <p>
+            <b>المبلغ:</b>
+            ${shipment.amount} جنيه
+          </p>
+
+          <p>
+            <b>العنوان:</b>
+            ${shipment.address}
+          </p>
+
+        </div>
+
+        <canvas id="printQR"></canvas>
+
+      </div>
+
+    </div>
+  `;
+
+  document.body.appendChild(label);
+
+  await QRCode.toCanvas(
+    document.querySelector("#printQR"),
+    `${window.location.origin}?track=${shipment.id}`,
+    {
+      width: 150
+    }
+  );
+
+  const canvas =
+    await html2canvas(label);
+
+  const imgData =
+    canvas.toDataURL("image/png");
+
+  const { jsPDF } = window.jspdf;
+
+  const pdf =
+    new jsPDF("p", "mm", "a4");
+
+  pdf.addImage(
+    imgData,
+    "PNG",
+    10,
+    10,
+    190,
+    120
+  );
+
+  pdf.save(`${shipment.id}.pdf`);
+
+  label.remove();
+}
 function bindEvents() {
   document.querySelector("#loginForm")?.addEventListener("submit", (event) => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    const user = users.find((item) => item.phone === data.get("phone") && item.password === data.get("password"));
-    if (!user) {
-      event.currentTarget.classList.add("shake");
-      setTimeout(() => event.currentTarget.classList.remove("shake"), 400);
+    const email = data.get("phone");
+const password = data.get("password");
+
+supabaseClient.auth
+  .signInWithPassword({
+    email,
+    password
+  })
+  .then(({ data: authData, error }) => {
+    if (error) {
+      document.querySelector("#loginForm")?.classList.add("shake");
+
+setTimeout(() => {
+  document.querySelector("#loginForm")?.classList.remove("shake");
+}, 400);
+      alert("بيانات الدخول غير صحيحة");
       return;
+     
+
+document.querySelector("#openScanner")
+  ?.addEventListener("click", async () => {
+
+    try {
+
+      const modal =
+        document.createElement("div");
+
+      modal.className =
+        "shipment-modal";
+
+      modal.innerHTML = `
+        <div class="shipment-modal-box">
+
+          <h2>QR Scanner</h2>
+
+          <div id="reader"></div>
+
+          <button
+            id="manualTrack"
+            class="primary-btn"
+          >
+            إدخال كود يدوي
+          </button>
+
+          <button
+            id="closeScanner"
+            class="ghost-btn"
+          >
+            إغلاق
+          </button>
+
+        </div>
+      `;
+
+      document.body.appendChild(modal);
+
+      document.querySelector("#manualTrack")
+        .onclick = () => {
+
+          const code =
+            prompt("أدخل كود الشحنة");
+
+          if (code) {
+
+            window.location.href =
+              `${window.location.origin}?track=${code}`;
+          }
+        };
+
+      const scanner =
+        new Html5Qrcode("reader");
+
+      await scanner.start(
+        { facingMode: "environment" },
+        {
+          fps: 10,
+          qrbox: 250
+        },
+        (decodedText) => {
+
+          scanner.stop();
+
+          modal.remove();
+
+          window.location.href =
+            decodedText;
+        }
+      );
+
+      document.querySelector("#closeScanner")
+        .onclick = async () => {
+
+          await scanner.stop();
+
+          modal.remove();
+        };
+
+    } catch (err) {
+
+      const code =
+        prompt("أدخل كود الشحنة");
+
+      if (code) {
+
+        window.location.href =
+          `${window.location.origin}?track=${code}`;
+      }
     }
+
+  });
+    }
+
+    const email = authData.user.email;
+
+    let role = "customer";
+
+    if (email.includes("admin")) role = "admin";
+    else if (email.includes("merchant")) role = "merchant";
+    else if (email.includes("courier")) role = "courier";
+
+    const user = {
+     id: authData.user.id,
+      name: email.split("@")[0],
+      role,
+      phone: email,
+      balance: 0
+    };
+
     localStorage.setItem("AL NUKHBA EXPRESS_user", JSON.stringify(user));
-    setState({ user, view: user.role === "customer" ? "track" : "overview" });
+
+    setState({
+      user,
+      view: role === "customer" ? "track" : "overview"
+    });
+  });
   });
 
   document.querySelectorAll("[data-demo]").forEach((button) => {
@@ -465,23 +1168,480 @@ function bindEvents() {
     button.addEventListener("click", () => setState({ selectedShipment: button.dataset.open, view: state.user.role === "customer" ? "track" : state.view }));
   });
 
-  document.querySelectorAll("[data-deliver]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const shipment = shipments.find((item) => item.id === button.dataset.deliver);
-      shipment.status = "delivered";
-      shipment.eta = "تم التسليم الآن";
-      shipment.timeline.push(["تم التسليم", new Date().toLocaleString("ar-EG")]);
-      render();
-    });
-  });
+  document.querySelectorAll("[data-deliver]")
+  .forEach((button) => {
+
+    button.addEventListener(
+      "click",
+      async () => {
+
+        const shipment =
+          shipments.find(
+            item =>
+              item.id ===
+              button.dataset.deliver
+          );
+
+        if (!shipment) return;
+
+        shipment.status =
+          "delivered";
+
+        shipment.eta =
+          "تم التسليم الآن";
+
+        shipment.timeline.push([
+          "تم التسليم",
+          new Date()
+            .toLocaleString("ar-EG")
+        ]);
+
+        await supabaseClient
+          .from("shipments")
+          .update({
+            status: "delivered",
+            eta: "تم التسليم الآن"
+          })
+          .eq(
+            "shipment_code",
+            shipment.id
+          );
+
+        await loadShipments();
+
+      }
+    );
+
+});
 
   document.querySelector("#newShipmentBtn")?.addEventListener("click", () => {
-    alert("في النسخة المتصلة بقاعدة بيانات سيتم فتح نموذج إضافة شحنة. النموذج جاهز كخطوة التطوير التالية.");
-  });
+  const modal = document.createElement("div");
+
+  modal.className = "shipment-modal";
+
+  modal.innerHTML = `
+  <div class="shipment-modal-box large">
+    <h2>إضافة شحنة جديدة</h2>
+
+    <div class="form-grid">
+
+      <input id="shipmentName" placeholder="اسم الشحنة" />
+
+      <input id="shipmentCodeInput" placeholder="كود الشحنة" />
+
+      <input id="customerName" placeholder="اسم العميل" />
+
+      <input id="customerPhone" placeholder="رقم الموبايل" />
+
+      <input id="shipmentAmount" type="number" placeholder="قيمة الشحنة" />
+
+      <select id="governorate">
+  <option value="">جاري تحميل المحافظات...</option>
+</select>
+
+      <select id="center">
+  <option value="">اختر المركز</option>
+</select>
+
+      <input id="street" placeholder="اسم الشارع" />
+
+      <input id="building" placeholder="رقم العمارة" />
+
+      <input id="floor" placeholder="رقم الدور" />
+
+      <input id="apartment" placeholder="رقم الشقة" />
+
+    </div>
+
+    <textarea id="notes" placeholder="ملاحظات إضافية"></textarea>
+
+    <div class="modal-actions">
+      <button id="saveShipment" class="primary-btn">
+        حفظ الشحنة
+      </button>
+
+      <button id="closeModal" class="ghost-btn">
+        إلغاء
+      </button>
+    </div>
+  </div>
+`;
+
+  document.body.appendChild(modal);
+  async function loadGovernorates() {
+
+  const response = await fetch("./cities.json");
+
+  const data = await response.json();
+
+  window.egyptData = data[2].data;
+
+  const governoratesNames = {
+    1: "القاهرة",
+    2: "الجيزة",
+    3: "الإسكندرية",
+    4: "الدقهلية",
+    5: "البحر الأحمر",
+    6: "البحيرة",
+    7: "الفيوم",
+    8: "الغربية",
+    9: "الإسماعيلية",
+    10: "المنوفية",
+    11: "المنيا",
+    12: "القليوبية",
+    13: "الوادي الجديد",
+    14: "السويس",
+    15: "أسوان",
+    16: "أسيوط",
+    17: "بني سويف",
+    18: "بورسعيد",
+    19: "دمياط",
+    20: "الشرقية",
+    21: "جنوب سيناء",
+    22: "كفر الشيخ"
+  };
+
+  document.querySelector("#governorate").innerHTML =
+    `
+      <option value="">اختر المحافظة</option>
+
+      ${Object.entries(governoratesNames).map(
+        ([id, name]) =>
+          `<option value="${id}">
+            ${name}
+          </option>`
+      ).join("")}
+    `;
 }
 
+loadGovernorates();
+document.querySelector("#governorate")
+  .addEventListener("change", async (e) => {
+
+    const governorateId =
+      e.target.value;
+
+    const cities =
+      window.egyptData.filter(
+        item =>
+          item.governorate_id == governorateId
+      );
+
+    document.querySelector("#center").innerHTML =
+      `
+        <option value="">اختر المركز</option>
+
+        ${cities.map(
+          (city) =>
+            `<option value="${city.city_name_ar}">
+              ${city.city_name_ar}
+            </option>`
+        ).join("")}
+      `;
+  });
+  document.querySelector("#closeModal").onclick = () => {
+    modal.remove();
+  };
+
+  document.querySelector("#saveShipment").onclick = async () => {
+    const shipmentName =
+  document.querySelector("#shipmentName").value;
+
+const shipmentCodeInput =
+  document.querySelector("#shipmentCodeInput").value;
+
+const customerName =
+  document.querySelector("#customerName").value;
+
+const customerPhone =
+  document.querySelector("#customerPhone").value;
+
+const amount =
+  Number(document.querySelector("#shipmentAmount").value);
+
+const governorate =
+  document.querySelector("#governorate").value;
+
+const center =
+  document.querySelector("#center").value;
+
+const street =
+  document.querySelector("#street").value;
+
+const building =
+  document.querySelector("#building").value;
+
+const floor =
+  document.querySelector("#floor").value;
+
+const apartment =
+  document.querySelector("#apartment").value;
+
+const notes =
+  document.querySelector("#notes").value;
+
+const address = `
+${governorate} - ${center}
+شارع ${street}
+عمارة ${building}
+الدور ${floor}
+شقة ${apartment}
+`;
+
+if (
+  !shipmentName ||
+  !shipmentCodeInput ||
+  !customerName ||
+  !customerPhone
+) {
+  alert("أكمل البيانات المطلوبة");
+  return;
+}
+
+    const shipmentCode = shipmentCodeInput;
+
+    const { error } = await supabaseClient
+      .from("shipments")
+      .insert([
+        {
+          shipment_code: shipmentCode,
+          customer_name: customerName,
+          customer_phone: customerPhone,
+          address,
+          amount,
+          delivery_fee: 60,
+          status: "created",
+          eta: "قيد التجهيز",
+          notes: `
+اسم الشحنة: ${shipmentName}
+
+${notes}
+`
+        }
+      ]);
+
+    if (error) {
+      alert("خطأ في حفظ الشحنة");
+      console.error(error);
+      return;
+    }
+
+    modal.remove();
+
+    await loadShipments();
+
+    alert("تم إضافة الشحنة بنجاح");
+  };
+});
+}
+window.manualTrackShipment = function () {
+
+  const code =
+    prompt("أدخل كود الشحنة");
+
+  if (!code) return;
+
+  window.location.href =
+    `${window.location.origin}?track=${code}`;
+};
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("./sw.js").catch(() => {});
 }
+window.updateShipmentStatus =
+  async function (id, status) {
 
-render();
+    const shipment =
+      shipments.find(
+        s => s.id === id
+      );
+
+    if (!shipment) return;
+
+    shipment.status = status;
+
+    shipment.timeline.push([
+      statusMeta[status].label,
+      new Date().toLocaleString("ar-EG")
+    ]);
+
+    if (status === "delivered") {
+      shipment.eta = "تم التسليم";
+    }
+    
+window.setStatusFilter =
+  function (status) {
+
+    state.statusFilter = status;
+const whatsappMessage = `
+مرحبًا ${shipment.customerName}
+
+تم تحديث حالة الشحنة:
+${shipment.id}
+
+الحالة الجديدة:
+${statusMeta[status].label}
+
+شركة النخبة للشحن السريع
+`;
+
+window.open(
+  `https://wa.me/2${shipment.customerPhone}?text=${
+    encodeURIComponent(
+      whatsappMessage
+    )
+  }`
+);
+    render();
+};
+    await supabaseClient
+      .from("shipments")
+      .update({
+        status,
+        eta: shipment.eta
+      })
+      .eq("shipment_code", id);
+
+    render();
+};
+window.assignCourier =
+  async function (id) {
+
+    const courierId =
+      document.querySelector(
+        "#assignCourier"
+      ).value;
+
+    if (!courierId) {
+
+      alert("اختر مندوب");
+
+      return;
+    }
+
+    const shipment =
+      shipments.find(
+        s => s.id === id
+      );
+
+    if (!shipment) return;
+
+    shipment.courierId =
+      courierId;
+      console.log("assigned", shipment);
+localStorage.setItem(
+  `courier_${id}`,
+  courierId
+);
+    alert("تم تعيين المندوب");
+
+    render();
+};
+window.uploadPOD =
+  async function (id, inputId) {
+
+    const file =
+      document.querySelector(
+        `#${inputId}`
+      )?.files[0];
+
+    if (!file) {
+
+      alert("اختر صورة");
+
+      return;
+    }
+
+    const reader =
+      new FileReader();
+
+    reader.onload = function () {
+
+      const shipment =
+        shipments.find(
+          s => s.id === id
+        );
+
+      if (!shipment) return;
+
+      shipment.podImage =
+        reader.result;
+localStorage.setItem(
+  `pod_${id}`,
+  reader.result
+);
+      shipment.timeline.push([
+        "تم رفع إثبات التسليم",
+        new Date().toLocaleString("ar-EG")
+      ]);
+
+      alert("تم رفع الصورة");
+
+      render();
+    };
+
+    reader.readAsDataURL(file);
+};
+window.setStatusFilter =
+  function (status) {
+
+    state.statusFilter = status;
+
+    render();
+};
+async function loadShipments() {
+  const { data, error } = await supabaseClient
+    .from("shipments")
+    .select("*");
+
+  if (error) {
+    console.error(error);
+    return;
+  }
+
+  shipments = data.map((item) => ({
+    id: item.shipment_code,
+    merchantId: item.merchant_id,
+    courierId:
+  localStorage.getItem(
+    `courier_${item.shipment_code}`
+  ) || null,
+    customerId: null,
+    customerName: item.customer_name,
+    customerPhone: item.customer_phone,
+    address: item.address,
+    status:
+  item.status === "warehouse"
+    ? "hub"
+    : item.status,
+    amount: item.amount,
+    deliveryFee: item.delivery_fee,
+    createdAt: item.created_at,
+    eta: item.eta,
+    notes: item.notes,
+    podImage:
+  localStorage.getItem(
+    `pod_${item.shipment_code}`
+  ) || null,
+    timeline: [
+
+  ["تم إنشاء الشحنة", item.created_at],
+
+  ...(item.status === "hub"
+    ? [["وصلت لمركز الفرز", item.created_at]]
+    : []),
+
+  ...(item.status === "out_for_delivery"
+    ? [["خرجت للتسليم", item.created_at]]
+    : []),
+
+  ...(item.status === "delivered"
+    ? [["تم التسليم", item.created_at]]
+    : [])
+
+]
+  }));
+
+  render();
+}
+
+loadShipments();
