@@ -1,333 +1,129 @@
+// ══════════════════════════════════════════════════
+// AL-NUKHBA EXPRESS — app.js
+// ══════════════════════════════════════════════════
 
 const SUPABASE_URL = "https://urktddxiyzwsilddamci.supabase.co";
-
 const SUPABASE_KEY = "sb_publishable_-0wKJXXI18TuHK7pe-dKYw_HWyjH79u";
+const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-
-let users = JSON.parse(
-  localStorage.getItem(
-    "nukhba_users"
-  )
-) || [
-
-  {
-    id: "u1",
-    name: "أحمد الشرقاوي",
-    role: "merchant",
-    phone: "01000000001",
-    password: "123456",
-    balance: 18450
-  },
-
-  {
-    id: "u2",
-    name: "منى علي",
-    role: "courier",
-    phone: "01000000002",
-    password: "123456",
-    balance: 3250
-  },
-
-  {
-    id: "u3",
-    name: "كريم محمود",
-    role: "customer",
-    phone: "01000000003",
-    password: "123456",
-    balance: 0
-  },
-
-  {
-    id: "u4",
-    name: "مدير التشغيل",
-    role: "admin",
-    phone: "01000000000",
-    password: "123456",
-    balance: 0
-  }
-
+// ─── Local demo users (UI only — Auth في Supabase) ───
+let users = JSON.parse(localStorage.getItem("nukhba_users")) || [
+  { id: "u1", name: "أحمد الشرقاوي", role: "merchant", phone: "01000000001", balance: 18450 },
+  { id: "u2", name: "منى علي",        role: "courier",  phone: "01000000002", balance: 3250  },
+  { id: "u3", name: "كريم محمود",     role: "customer", phone: "01000000003", balance: 0     },
+  { id: "u4", name: "مدير التشغيل",   role: "admin",    phone: "01000000000", balance: 0     }
 ];
 
-let shipments = [
-  {
-    id: "NE-20419",
-    merchantId: "u1",
-    courierId: null,
-    customerId: "u3",
-    customerName: "كريم محمود",
-    customerPhone: "01000000003",
-    address: "مدينة نصر، القاهرة",
-    status: "out_for_delivery",
-    amount: 850,
-    deliveryFee: 65,
-    createdAt: "2026-05-06",
-    eta: "اليوم 7:30 م",
-    notes: "اتصال قبل الوصول",
-    timeline: [
-      ["تم إنشاء الطلب", "2026-05-06 10:15 ص"],
-      ["استلام من التاجر", "2026-05-06 3:40 م"],
-      ["في المخزن", "2026-05-06 8:05 م"],
-      ["خرج للتسليم", "2026-05-07 11:20 ص"]
-    ]
-    
-  },
-  {
-    id: "NE-20420",
-    merchantId: "u1",
-    courierId: null,
-    customerId: "u3",
-    customerName: "سارة ناصر",
-    customerPhone: "01055512111",
-    address: "الهرم، الجيزة",
-    status: "delivered",
-    amount: 1250,
-    deliveryFee: 75,
-    createdAt: "2026-05-05",
-    eta: "تم التسليم",
-    notes: "دفع نقدي",
-    timeline: [
-      ["تم إنشاء الطلب", "2026-05-05 9:15 ص"],
-      ["استلام من التاجر", "2026-05-05 12:10 م"],
-      ["خرج للتسليم", "2026-05-06 10:00 ص"],
-      ["تم التسليم", "2026-05-06 2:25 م"]
-    ]
-  },
-  {
-    id: "NE-20421",
-    merchantId: "u1",
-    courierId: null,
-    customerId: null,
-    customerName: "محمد سمير",
-    customerPhone: "01122245454",
-    address: "طنطا، الغربية",
-    status: "warehouse",
-    amount: 420,
-    deliveryFee: 55,
-    createdAt: "2026-05-07",
-    eta: "غدًا",
-    notes: "قابل للكسر",
-    timeline: [
-      ["تم إنشاء الطلب", "2026-05-07 9:45 ص"],
-      ["في المخزن", "2026-05-07 1:10 م"]
-    ]
-  },
-  {
-    id: "NE-20422",
-    merchantId: "u1",
-    courierId: null,
-    customerId: null,
-    customerName: "هبة مصطفى",
-    customerPhone: "01233377788",
-    address: "الإسكندرية، سموحة",
-    status: "returned",
-    amount: 690,
-    deliveryFee: 60,
-    createdAt: "2026-05-04",
-    eta: "راجع للتاجر",
-    notes: "العميل غير متاح",
-    timeline: [
-      ["تم إنشاء الطلب", "2026-05-04 1:00 م"],
-      ["خرج للتسليم", "2026-05-05 12:30 م"],
-      ["محاولة تسليم فاشلة", "2026-05-05 5:40 م"],
-      ["راجع للتاجر", "2026-05-06 10:20 ص"]
-    ]
-  }
-];
+let shipments     = [];
 let notifications = [];
+
+// ─── Status meta ─────────────────────────────────
 const statusMeta = {
-
-  created: {
-    label: "تم إنشاء الشحنة",
-    tone: "info"
-  },
-
-  received: {
-    label: "تم استلام الشحنة",
-    tone: "warning"
-  },
-warehouse: {
-  label: "في المخزن",
-  tone: "warning"
-},
-  hub: {
-    label: "وصلت لمركز الفرز",
-    tone: "primary"
-  },
-
-  out_for_delivery: {
-    label: "خرجت للتسليم",
-    tone: "primary"
-  },
-
-  delivered: {
-    label: "تم التسليم",
-    tone: "success"
-  }
-
+  created:          { label: "تم إنشاء الشحنة",  tone: "info"    },
+  received:         { label: "تم استلام الشحنة", tone: "warning" },
+  warehouse:        { label: "في المخزن",          tone: "warning" },
+  hub:              { label: "مركز الفرز",         tone: "primary" },
+  out_for_delivery: { label: "خرجت للتسليم",      tone: "primary" },
+  delivered:        { label: "تم التسليم",         tone: "success" },
+  returned:         { label: "مرتجع",              tone: "danger"  }
 };
 
+// ─── Nav per role ────────────────────────────────
 const navByRole = {
-  admin: [
-  "overview",
-  "shipments",
-  "tasks",
-  "accounts",
-  "reports",
-  "users",
-  "track"
-  
-],
-  merchant: ["overview", "shipments", "accounts"],
-  courier: ["overview", "tasks", "accounts"],
-  customer: ["track", "accounts"]
+  admin:    ["overview","shipments","tasks","accounts","reports","users","track"],
+  merchant: ["overview","shipments","accounts"],
+  courier:  ["overview","tasks","accounts"],
+  customer: ["track","accounts"]
 };
 
 const labels = {
-  overview: "الرئيسية",
-  shipments: "الشحنات",
-  tasks: "المهام",
-  accounts: "الحساب",
-  reports: "التقارير",
-  users: "المستخدمين",
-  track: "تتبع"
+  overview:"الرئيسية", shipments:"الشحنات", tasks:"المهام",
+  accounts:"الحساب",  reports:"التقارير", users:"المستخدمين", track:"تتبع"
 };
+
+// ─── RBAC ────────────────────────────────────────
 const permissions = {
-
-  admin: [
-    "create_shipment",
-    "edit_shipment",
-    "delete_shipment",
-    "assign_courier",
-    "view_reports",
-    "manage_users",
-    "export_excel",
-    "change_status",
-    "view_all"
-  ],
-
-  merchant: [
-    "create_shipment",
-    "view_own",
-    "track",
-    "view_accounts"
-  ],
-
-  courier: [
-    "view_assigned",
-    "change_status",
-    "upload_pod",
-    "navigation"
-  ],
-
-  customer: [
-    "track"
-  ]
-
+  admin:    ["create_shipment","edit_shipment","delete_shipment","assign_courier",
+             "view_reports","manage_users","export_excel","change_status","view_all","print_shipment"],
+  merchant: ["create_shipment","view_own","track","view_accounts","print_shipment"],
+  courier:  ["view_assigned","change_status","upload_pod","navigation"],
+  customer: ["track"]
 };
-function can(permission) {
 
-  return permissions[
-    state.user?.role
-  ]?.includes(permission);
+function can(p) { return !!permissions[state.user?.role]?.includes(p); }
 
-}
+// ─── State ───────────────────────────────────────
 let state = {
-  user: JSON.parse(localStorage.getItem("AL NUKHBA EXPRESS_user") || "null"),
-  view: "overview",
-  query: "",
-  statusFilter: "all",
-  selectedShipment: "NE-20419"
+  user:             JSON.parse(localStorage.getItem("nukhba_session") || "null"),
+  view:             "overview",
+  query:            "",
+  statusFilter:     "all",
+  selectedShipment: null
 };
 
-function money(value) {
-  return new Intl.NumberFormat("ar-EG", { style: "currency", currency: "EGP", maximumFractionDigits: 0 }).format(value);
+// ─── Helpers ─────────────────────────────────────
+const money = v => new Intl.NumberFormat("ar-EG",{style:"currency",currency:"EGP",maximumFractionDigits:0}).format(v);
+
+function escapeHtml(s) {
+  if (!s) return "";
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+                  .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
 }
 
 function icon(name) {
-  const icons = {
-    box: "M20.5 7.3 12 2.5 3.5 7.3 12 12.1l8.5-4.8ZM3.5 7.3v9.4L12 21.5v-9.4L3.5 7.3Zm17 0L12 12.1v9.4l8.5-4.8V7.3Z",
-    truck: "M3 7h11v9H3V7Zm11 3h4l3 4v2h-7v-6ZM6 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
-    user: "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 9a7 7 0 0 1 14 0H5Z",
+  const d = {
+    box:    "M20.5 7.3 12 2.5 3.5 7.3 12 12.1l8.5-4.8ZM3.5 7.3v9.4L12 21.5v-9.4L3.5 7.3Zm17 0L12 12.1v9.4l8.5-4.8V7.3Z",
+    truck:  "M3 7h11v9H3V7Zm11 3h4l3 4v2h-7v-6ZM6 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
+    user:   "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 9a7 7 0 0 1 14 0H5Z",
     wallet: "M4 6h15a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6Zm13 7h4v-2h-4a2 2 0 0 0 0 4h4v-2h-4Z",
     search: "M10 4a6 6 0 1 0 3.7 10.7l4.8 4.8 1.4-1.4-4.8-4.8A6 6 0 0 0 10 4Z",
-    plus: "M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z",
-    chart: "M4 19V5h2v14H4Zm7 0V9h2v10h-2Zm7 0V3h2v16h-2Z",
-    logout: "M5 4h8v2H7v12h6v2H5V4Zm10.5 4.5L20 13l-4.5 4.5-1.4-1.4 2.1-2.1H10v-2h6.2l-2.1-2.1 1.4-1.4Z"
+    plus:   "M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z",
+    chart:  "M4 19V5h2v14H4Zm7 0V9h2v10h-2Zm7 0V3h2v16h-2Z",
+    logout: "M5 4h8v2H7v12h6v2H5V4Zm10.5 4.5L20 13l-4.5 4.5-1.4-1.4 2.1-2.1H10v-2h6.2l-2.1-2.1 1.4-1.4Z",
+    bell:   "M12 2a7 7 0 0 1 7 7v4l2 2v1H3v-1l2-2V9a7 7 0 0 1 7-7Zm0 20a2 2 0 0 1-2-2h4a2 2 0 0 1-2 2Z"
   };
-  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${icons[name]}"/></svg>`;
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${d[name]}"/></svg>`;
 }
 
-function roleName(role) {
-  return { admin: "إدارة", merchant: "تاجر", courier: "مندوب", customer: "عميل" }[role];
+function roleName(r) {
+  return {admin:"إدارة",merchant:"تاجر",courier:"مندوب",customer:"عميل"}[r] || r;
 }
 
-function setState(patch) {
-  state = { ...state, ...patch };
-  render();
+function setState(patch) { state = {...state,...patch}; render(); }
+
+function determineRole(email) {
+  if (!email) return "customer";
+  const e = email.toLowerCase();
+  if (e.startsWith("admin"))    return "admin";
+  if (e.startsWith("merchant")) return "merchant";
+  if (e.startsWith("courier"))  return "courier";
+  return "customer";
 }
 
+// ─── Visible shipments ───────────────────────────
 function visibleShipments() {
-
   let list = [...shipments];
-  if (
-  state.user?.role === "courier"
-) {
-console.log(
-  "USER ID:",
-  state.user.id
-);
-
-console.log(
-  "SHIPMENTS:",
-  list
-);
-  list = list.filter(
-    shipment =>
-      shipment.courierId ===
-state.user?.id
-  );
-}
-
-  return list.filter((shipment) => {
-
-    const text =
-      `
-        ${shipment.id}
-        ${shipment.customerName}
-        ${shipment.customerPhone}
-        ${shipment.address}
-      `.toLowerCase();
-
-    const matchesSearch =
-      text.includes(
-        state.query
-          .trim()
-          .toLowerCase()
-      );
-
-    const matchesStatus =
-      state.statusFilter === "all"
-        ? true
-        : shipment.status === state.statusFilter;
-
-    return (
-      matchesSearch &&
-      matchesStatus
-    );
-
+  if (state.user?.role === "courier")  list = list.filter(s => s.courierId === state.user?.id);
+  if (state.user?.role === "merchant") list = list.filter(s => s.merchantId === state.user?.id);
+  return list.filter(s => {
+    const txt = `${s.id} ${s.customerName} ${s.customerPhone} ${s.address}`.toLowerCase();
+    return txt.includes(state.query.trim().toLowerCase()) &&
+           (state.statusFilter === "all" || s.status === state.statusFilter);
   });
-
 }
 
 function stats(list) {
   return [
-    { label: "كل الشحنات", value: list.length, icon: "box" },
-    { label: "خارج للتسليم", value: list.filter((s) => s.status === "out_for_delivery").length, icon: "truck" },
-    { label: "تم التسليم", value: list.filter((s) => s.status === "delivered").length, icon: "chart" },
-    { label: "المستحق", value: money(list.reduce((sum, s) => sum + (s.status === "delivered" ? s.amount - s.deliveryFee : 0), 0)), icon: "wallet" }
+    { label:"كل الشحنات",    value:list.length,                                                              icon:"box"    },
+    { label:"خارج للتسليم",  value:list.filter(s=>s.status==="out_for_delivery").length,                    icon:"truck"  },
+    { label:"تم التسليم",    value:list.filter(s=>s.status==="delivered").length,                           icon:"chart"  },
+    { label:"إجمالي المبالغ",value:money(list.reduce((sum,s)=>sum+(s.amount||0),0)),                        icon:"wallet" }
   ];
 }
+
+// ══════════════════════════════════════════════════
+// VIEWS
+// ══════════════════════════════════════════════════
 
 function loginScreen() {
   return `
@@ -335,38 +131,36 @@ function loginScreen() {
       <section class="login-panel">
         <div class="brand-mark">${icon("truck")}</div>
         <h1>النخبة للشحن السريع</h1>
-        <p>منصة ذكية متكاملة لإدارة الشحن والتوصيل والتتبع والتحصيل بأعلى كفاءة.</p>
+        <p>منصة متكاملة لإدارة الشحن والتوصيل والتتبع.</p>
         <form id="loginForm" class="login-form">
           <label>البريد الإلكتروني
-            <input name="phone" type="email" inputmode="tel" value="merchant@nukhba.com" autocomplete="username" />
+            <input name="email" type="email" value="merchant@nukhba.com" autocomplete="username"/>
           </label>
           <label>كلمة المرور
-            <input name="password" type="password" value="123456" autocomplete="current-password" />
+            <input name="password" type="password" value="123456" autocomplete="current-password"/>
           </label>
+          <div id="loginError" class="login-error" style="display:none;color:#c0392b;font-size:13px;margin-top:4px;"></div>
           <button class="primary-btn" type="submit">${icon("user")} دخول</button>
         </form>
         <div class="demo-users">
-  <button data-demo="admin@nukhba.com">إدارة</button>
-  <button data-demo="merchant@nukhba.com">تاجر</button>
-  <button data-demo="courier@nukhba.com">مندوب</button>
-  <button data-demo="customer@nukhba.com">عميل</button>
-</div>
-      </section>
-      <section class="app-preview" aria-label="ملخص تشغيل">
-        <div class="preview-top">
-          <span>تحديث مباشر</span>
-          <strong>96%</strong>
+          <button data-demo="admin@nukhba.com">إدارة</button>
+          <button data-demo="merchant@nukhba.com">تاجر</button>
+          <button data-demo="courier@nukhba.com">مندوب</button>
+          <button data-demo="customer@nukhba.com">عميل</button>
         </div>
+      </section>
+      <section class="app-preview" aria-label="ملخص">
+        <div class="preview-top"><span>تحديث مباشر</span><strong>96%</strong></div>
         <div class="route-line"></div>
-        <div class="preview-card"><b>ANE-20419</b><span>خارج للتسليم</span></div>
+        <div class="preview-card"><b>ANE-54558</b><span>خارج للتسليم</span></div>
         <div class="preview-card"><b>تحصيل اليوم</b><span>${money(2100)}</span></div>
       </section>
-    </main>
-  `;
+    </main>`;
 }
 
 function shell(content) {
   const views = navByRole[state.user.role];
+  const unread = notifications.filter(n => !n.read).length;
   return `
     <div class="layout">
       <aside class="sidebar">
@@ -375,582 +169,303 @@ function shell(content) {
           <div><strong>النخبة للشحن السريع</strong><span>لوحة الشحن</span></div>
         </div>
         <nav>
-          ${views.map((view) => `<button class="${state.view === view ? "active" : ""}" data-view="${view}">${labels[view]}</button>`).join("")}
+          ${views.map(v=>`<button class="${state.view===v?"active":""}" data-view="${v}">${labels[v]}</button>`).join("")}
         </nav>
         <button class="ghost-btn logout" id="logoutBtn">${icon("logout")} خروج</button>
       </aside>
       <main class="content">
         <header class="topbar">
           <div>
-            <span class="eyebrow">${state.user.role === "admin" ? `
-
-<select
-  id="roleSwitcher"
-  class="role-switcher"
->
-
-  <option value="">
-    تبديل الواجهة
-  </option>
-
-  <option value="admin">
-    Admin
-  </option>
-
-  <option value="merchant">
-    Merchant
-  </option>
-
-  <option value="courier">
-    Courier
-  </option>
-
-  <option value="customer">
-    Customer
-  </option>
-
-</select>
-
-` : ""}${roleName(state.user.role)}</span>
-            <h2>أهلاً، ${state.user.name}</h2>
+            ${state.user.role==="admin" ? `
+              <select id="roleSwitcher" class="role-switcher">
+                <option value="">تبديل الواجهة</option>
+                <option value="admin">Admin</option>
+                <option value="merchant">Merchant</option>
+                <option value="courier">Courier</option>
+                <option value="customer">Customer</option>
+              </select>` : `<span class="eyebrow">${roleName(state.user.role)}</span>`}
+            <h2>أهلاً، ${escapeHtml(state.user.name)}</h2>
           </div>
-          <div class="search-box">
-            ${icon("search")}
-            <input id="searchInput" value="${state.query}" placeholder="ابحث برقم الشحنة أو العميل" />
+          <div style="display:flex;gap:12px;align-items:center;">
+            <button class="ghost-btn notif-btn" id="toggleNotif" title="الإشعارات">
+              ${icon("bell")}
+              ${unread>0?`<span class="notif-badge">${unread}</span>`:""}
+            </button>
+            <div class="search-box">
+              ${icon("search")}
+              <input id="searchInput" value="${escapeHtml(state.query)}" placeholder="ابحث برقم الشحنة أو العميل"/>
+            </div>
           </div>
         </header>
+        <div id="notifPanel" class="notif-panel" style="display:none;">
+          <div class="notif-header">
+            <h4>الإشعارات</h4>
+            <button class="link-btn" id="clearNotif">مسح الكل</button>
+          </div>
+          ${notifications.length
+            ? notifications.slice(0,10).map(n=>`
+                <div class="notification-item ${n.read?"":"unread"}">
+                  <span>${escapeHtml(n.text)}</span>
+                  <small>${escapeHtml(n.time)}</small>
+                </div>`).join("")
+            : `<p style="padding:1rem;color:#888;text-align:center;">لا توجد إشعارات</p>`}
+        </div>
         ${content}
       </main>
-    </div>
-  `;
+    </div>`;
 }
 
+// ─── Overview ────────────────────────────────────
 function overview() {
   const list = visibleShipments();
   return `
     <section class="stats-grid">
-      ${stats(list).map((item) => `
+      ${stats(list).map(item=>`
         <article class="stat">
           <div>${icon(item.icon)}</div>
           <span>${item.label}</span>
           <strong>${item.value}</strong>
-        </article>
-      `).join("")}
+        </article>`).join("")}
     </section>
     <section class="work-grid">
       <div class="panel wide">
         <div class="section-head">
           <h3>آخر الشحنات</h3>
-          <button
-  class="ghost-btn"
-  id="openScanner"
->
-  📷 Scan QR
-</button>
-          ${can("create_shipment") ? `<button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} شحنة جديدة</button>` : ""}
+          <div style="display:flex;gap:8px;">
+            <button class="ghost-btn" id="openScanner">📷 Scan QR</button>
+            ${can("create_shipment")?`<button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} شحنة جديدة</button>`:""}
+          </div>
         </div>
-        ${shipmentTable(list.slice(0, 6))}
+        ${shipmentTable(list.slice(0,6))}
       </div>
       <div class="panel">
         <h3>تنبيهات التشغيل</h3>
         <div class="alert-list">
-          <div><b>2</b><span>شحنات تحتاج تأكيد عنوان</span></div>
-          <div><b>1</b><span>مرتجع ينتظر مراجعة التاجر</span></div>
-          <div><b>4</b><span>تحصيلات جاهزة للمراجعة</span></div>
+          <div><b>${list.filter(s=>s.status==="created").length}</b><span>شحنات جديدة</span></div>
+          <div><b>${list.filter(s=>s.status==="returned").length}</b><span>مرتجعات</span></div>
+          <div><b>${list.filter(s=>s.status==="delivered").length}</b><span>تم تسليمها</span></div>
         </div>
-        <div class="notifications-card">
-
-  <h3>
-    🔔 الإشعارات
-  </h3>
-
-  ${
-    notifications.length
-      ? notifications
-          .slice(0,5)
-          .map(
-            n => `
-              <div
-                class="notification-item"
-              >
-
-                <strong>
-                  ${n.text}
-                </strong>
-
-                <small>
-                  ${n.time}
-                </small>
-
-              </div>
-            `
-          )
-          .join("")
-      : `
-        <p>
-          لا توجد إشعارات
-        </p>
-      `
-  }
-
-</div>
+        <section class="panel charts-panel" style="margin-top:16px;">
+          <div class="chart-box"><canvas id="statusChart"></canvas></div>
+        </section>
       </div>
-      <section class="panel charts-panel">
-
-  <div class="chart-box">
-    <canvas id="statusChart"></canvas>
-  </div>
-
-</section>
-    </section>
-  `;
+    </section>`;
 }
 
+// ─── Shipment Table ──────────────────────────────
 function shipmentTable(list) {
+  if (!list.length) return `<p style="padding:1rem;color:#888">لا توجد شحنات</p>`;
   return `
     <div class="table-wrap">
       <table>
         <thead>
-          <tr>
-            <th>الشحنة</th>
-            <th>العميل</th>
-            <th>العنوان</th>
-            <th>الحالة</th>
-            <th>المبلغ</th>
-            <th>الإجراءات</th>
-          </tr>
+          <tr><th>الشحنة</th><th>العميل</th><th>العنوان</th><th>الحالة</th><th>المبلغ</th><th>الإجراءات</th></tr>
         </thead>
-
         <tbody>
-
-          ${list.map((shipment) => `
-
+          ${list.map(s=>`
             <tr>
-
+              <td><b>${escapeHtml(s.id)}</b><br><small>${escapeHtml(s.createdAt)}</small></td>
+              <td>${escapeHtml(s.customerName)}<br><small>${escapeHtml(s.customerPhone)}</small></td>
+              <td>${escapeHtml(s.address)}</td>
+              <td><span class="badge ${statusMeta[s.status]?.tone||"info"}">${statusMeta[s.status]?.label||s.status}</span></td>
+              <td>${money(s.amount)}</td>
               <td>
-                <b>${shipment.id}</b>
-                <span>${shipment.createdAt}</span>
-              </td>
-
-              <td>
-                ${shipment.customerName}
-                <span>${shipment.customerPhone}</span>
-              </td>
-
-              <td>
-                ${shipment.address}
-              </td>
-
-              <td>
-                <span class="badge ${statusMeta[shipment.status].tone}">
-                  ${statusMeta[shipment.status].label}
-                </span>
-              </td>
-
-              <td>
-                ${money(shipment.amount)}
-              </td>
-
-              <td>
-
                 <div class="shipment-actions">
-
-                  <button
-                    class="link-btn"
-                    data-open="${shipment.id}"
-                  >
-                    عرض
-                  </button>
-
-                  <button
-                    class="link-btn"
-                    onclick="printShipment('${shipment.id}')"
-                  >
-                    طباعة
-                  </button>
-
-                  <div class="qr-box">
-                    <canvas id="qr-${shipment.id}"></canvas>
-                  </div>
-
+                  <button class="link-btn" data-open="${escapeHtml(s.id)}">عرض</button>
+                  ${can("print_shipment")?`<button class="link-btn" onclick="printShipment('${escapeHtml(s.id)}')">طباعة</button>`:""}
+                  <div class="qr-box"><canvas id="qr-${escapeHtml(s.id)}"></canvas></div>
                 </div>
-
               </td>
-
-            </tr>
-
-          `).join("")}
-
+            </tr>`).join("")}
         </tbody>
       </table>
-    </div>
-  `;
+    </div>`;
 }
 
-function shipmentsView(title = "إدارة الشحنات") {
-
+// ─── Shipments View ──────────────────────────────
+function shipmentsView() {
+  const selected = shipments.find(s=>s.id===state.selectedShipment) || visibleShipments()[0] || null;
   return `
-
     <section class="panel">
-
       <div class="section-head">
-
-        <h3>${title}</h3>
-         <div class="filter-row">
-
-  <button
-    onclick="setStatusFilter('all')"
-    class="ghost-btn"
-  >
-    الكل
-  </button>
-
-  <button
-    onclick="setStatusFilter('created')"
-    class="ghost-btn"
-  >
-    جديد
-  </button>
-
-  <button
-    onclick="setStatusFilter('warehouse')"
-    class="ghost-btn"
-  >
-    المخزن
-  </button>
-
-  <button
-    onclick="setStatusFilter('out_for_delivery')"
-    class="ghost-btn"
-  >
-    خرج للتسليم
-  </button>
-
-  <button
-    onclick="setStatusFilter('delivered')"
-    class="ghost-btn"
-  >
-    تم التسليم
-  </button>
-
-  <button
-    onclick="setStatusFilter('returned')"
-    class="ghost-btn"
-  >
-    مرتجع
-  </button>
-
-</div>
-
-        <div
-  style="
-    display:flex;
-    gap:10px;
-  "
->
-
-  <button
-    class="ghost-btn"
-    onclick="manualTrackShipment()"
-  >
-    📦 تتبع شحنة
-  </button>
-
-  <button
-    class="ghost-btn"
-    onclick="exportShipmentsExcel()"
-  >
-    📊 تصدير Excel
-  </button>
-
-  <button
-    class="primary-btn compact"
-    id="newShipmentBtn"
-  >
-    ${icon("plus")} إضافة
-  </button>
-
-</div>
+        <h3>إدارة الشحنات</h3>
+        <div class="filter-row">
+          ${["all","created","received","warehouse","hub","out_for_delivery","delivered","returned"].map(st=>`
+            <button onclick="setStatusFilter('${st}')" class="ghost-btn ${state.statusFilter===st?"active":""}">
+              ${st==="all"?"الكل":statusMeta[st]?.label||st}
+            </button>`).join("")}
+        </div>
+        <div style="display:flex;gap:10px;">
+          <button class="ghost-btn" onclick="manualTrackShipment()">📦 تتبع</button>
+          ${can("export_excel")?`<button class="ghost-btn" onclick="exportShipmentsExcel()">📊 Excel</button>`:""}
+          ${can("create_shipment")?`<button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} إضافة</button>`:""}
+        </div>
       </div>
-
       ${shipmentTable(visibleShipments())}
-
     </section>
-
-    ${detailsPanel(
-      shipments.find(
-        (shipment) =>
-          shipment.id === state.selectedShipment
-      ) || visibleShipments()[0]
-    )}
-
-  `;
+    ${selected?detailsPanel(selected):""}`;
 }
 
+// ─── Tasks View ──────────────────────────────────
 function tasksView() {
-  const list = visibleShipments().filter((shipment) => shipment.status !== "delivered");
+  const list = visibleShipments().filter(s=>s.status!=="delivered"&&s.status!=="returned");
+  if (!list.length) return `<section class="panel"><p style="padding:1rem">لا توجد مهام حالية</p></section>`;
   return `
     <section class="task-list">
-      ${list.map((shipment) => `
+      ${list.map(s=>`
         <article class="task-card">
           <div>
-            <span class="badge ${statusMeta[shipment.status].tone}">${statusMeta[shipment.status].label}</span>
-            <h3>${shipment.customerName}</h3>
-            <p>${shipment.address}</p>
+            <span class="badge ${statusMeta[s.status]?.tone||"info"}">${statusMeta[s.status]?.label||s.status}</span>
+            <h3>${escapeHtml(s.customerName)}</h3>
+            <p>${escapeHtml(s.address)}</p>
+            <small>${escapeHtml(s.customerPhone)}</small>
           </div>
           <div class="task-actions">
-
-  <a
-    class="ghost-btn"
-    href="tel:${shipment.customerPhone}"
-  >
-    اتصال
-  </a>
-<a
-  class="ghost-btn"
-  target="_blank"
-  href="
-https://www.google.com/maps/dir/?api=1&destination=
-${encodeURIComponent(shipment.address)}
-  "
->
-  🚚 ابدأ الملاحة
-</a>
-</a>
-  <input
-    type="file"
-    id="pod-${shipment.id}"
-    accept="image/*"
-  />
-
-  <button
-    class="ghost-btn"
-    onclick="uploadPOD('${shipment.id}','pod-${shipment.id}')"
-  >
-    رفع إثبات
-  </button>
-
-  <button
-    class="primary-btn compact"
-    data-deliver="${shipment.id}"
-  >
-    تم التسليم
-  </button>
-
-</div>
-        </article>
-      `).join("")}
-    </section>
-  `;
+            <a class="ghost-btn" href="tel:${escapeHtml(s.customerPhone)}">📞 اتصال</a>
+            <a class="ghost-btn" target="_blank"
+               href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(s.address)}">
+              🗺 ملاحة
+            </a>
+            ${can("upload_pod")?`
+              <label class="ghost-btn" style="cursor:pointer;">
+                📷 رفع إثبات
+                <input type="file" id="pod-${escapeHtml(s.id)}" accept="image/*" style="display:none"
+                       onchange="uploadPOD('${escapeHtml(s.id)}','pod-${escapeHtml(s.id)}')"/>
+              </label>`:""
+            }
+            ${can("change_status")?`
+              <button class="primary-btn compact" onclick="updateShipmentStatus('${escapeHtml(s.id)}','delivered')">
+                ✅ تم التسليم
+              </button>
+              <button class="ghost-btn" style="color:#c0392b"
+                      onclick="updateShipmentStatus('${escapeHtml(s.id)}','returned')">
+                ↩ مرتجع
+              </button>`:""
+            }
+          </div>
+          ${s.podUrl?`<img src="${escapeHtml(s.podUrl)}" style="width:100%;max-width:200px;border-radius:8px;margin-top:8px;"/>`:""
+          }
+        </article>`).join("")}
+    </section>`;
 }
 
-function detailsPanel(shipment) {
-  if (!shipment) return "";
+// ─── Details Panel ───────────────────────────────
+function detailsPanel(s) {
+  if (!s) return "";
+  const meta = statusMeta[s.status]||{label:s.status,tone:"info"};
+  const couriers = users.filter(u=>u.role==="courier");
+  const steps = ["created","received","warehouse","hub","out_for_delivery","delivered"];
+  const currentIdx = steps.indexOf(s.status);
+
   return `
     <section class="panel details">
       <div class="section-head">
-        <h3>${shipment.id}</h3>
-        <span class="badge ${statusMeta[shipment.status].tone}">${statusMeta[shipment.status].label}</span>
+        <h3>${escapeHtml(s.id)}</h3>
+        <span class="badge ${meta.tone}">${meta.label}</span>
       </div>
+
       <div class="detail-grid">
-        <div><span>العميل</span><b>${shipment.customerName}</b></div>
-        <div><span>الهاتف</span><b>${shipment.customerPhone}</b></div>
-        <div><span>العنوان</span><b>${shipment.address}</b></div>
-        <div><span>الوصول المتوقع</span><b>${shipment.eta}</b></div>
-        <div><span>قيمة الطلب</span><b>${money(shipment.amount)}</b></div>
-        <div><span>رسوم الشحن</span><b>${money(shipment.deliveryFee)}</b></div>
+        <div><span>العميل</span><b>${escapeHtml(s.customerName)}</b></div>
+        <div><span>الهاتف</span><b>${escapeHtml(s.customerPhone)}</b></div>
+        <div><span>العنوان</span><b>${escapeHtml(s.address)}</b></div>
+        <div><span>موعد التسليم</span><b>${escapeHtml(s.eta)||"قيد التجهيز"}</b></div>
+        <div><span>قيمة الطلب</span><b>${money(s.amount)}</b></div>
+        <div><span>رسوم الشحن</span><b>${money(s.deliveryFee)}</b></div>
+        ${s.notes?`<div style="grid-column:1/-1"><span>ملاحظات</span><b>${escapeHtml(s.notes)}</b></div>`:""}
       </div>
-      <div class="assign-box">
 
-  <select id="assignCourier">
+      ${can("assign_courier")?`
+        <div class="assign-box">
+          <select id="assignCourier">
+            <option value="">اختر مندوب</option>
+            ${couriers.map(c=>`<option value="${escapeHtml(c.id)}" ${s.courierId===c.id?"selected":""}>${escapeHtml(c.name)}</option>`).join("")}
+          </select>
+          <button class="ghost-btn" onclick="assignCourier('${escapeHtml(s.id)}')">تعيين</button>
+        </div>`:""}
 
-    <option value="">
-      اختر مندوب
-    </option>
+      ${can("change_status")?`
+        <div class="status-actions">
+          ${["received","warehouse","hub","out_for_delivery"].map(st=>`
+            <button onclick="updateShipmentStatus('${escapeHtml(s.id)}','${st}')" class="ghost-btn">
+              ${statusMeta[st].label}
+            </button>`).join("")}
+          <button onclick="updateShipmentStatus('${escapeHtml(s.id)}','delivered')" class="primary-btn compact">✅ تم التسليم</button>
+          <button onclick="updateShipmentStatus('${escapeHtml(s.id)}','returned')"  class="ghost-btn" style="color:#c0392b">↩ مرتجع</button>
+        </div>`:""}
 
-    <option value="f8805493-c40e-450f-a5d7-9b18842d7016">
-  المندوب الرئيسي
-</option>
+      ${can("upload_pod")?`
+        <div class="pod-upload">
+          <label class="ghost-btn" style="cursor:pointer;">
+            📷 رفع إثبات التسليم
+            <input type="file" id="podImage" accept="image/*" style="display:none"
+                   onchange="uploadPOD('${escapeHtml(s.id)}','podImage')"/>
+          </label>
+        </div>`:""}
 
-  </select>
+      ${s.podUrl?`
+        <div class="pod-preview">
+          <h4>إثبات التسليم</h4>
+          <img src="${escapeHtml(s.podUrl)}" style="width:220px;border-radius:12px;margin-top:8px;"/>
+        </div>`:""}
 
-  <button
-    class="ghost-btn"
-    onclick="assignCourier('${shipment.id}')"
-  >
-    تعيين
-  </button>
-
-</div>
-${state.user?.role === "courier" ? `
-
-<div class="pod-upload">
-
-  <input
-    type="file"
-    id="podImage"
-    accept="image/*"
-  />
-
-  <button
-    class="ghost-btn"
-    onclick="uploadPOD('${shipment.id}')"
-  >
-    رفع إثبات التسليم
-  </button>
-
-</div>
-
-` : ""}
-      <div class="status-actions">
-
-  <button
-    onclick="updateShipmentStatus('${shipment.id}','received')"
-    class="ghost-btn"
-  >
-    تم الاستلام
-  </button>
-
-  <button
-    onclick="updateShipmentStatus('${shipment.id}','hub')"
-    class="ghost-btn"
-  >
-    مركز الفرز
-  </button>
-
-  <button
-    onclick="updateShipmentStatus('${shipment.id}','out_for_delivery')"
-    class="ghost-btn"
-  >
-    خرج للتسليم
-  </button>
-
-  <button
-    onclick="updateShipmentStatus('${shipment.id}','delivered')"
-    class="primary-btn compact"
-  >
-    تم التسليم
-  </button>
-
-</div>
-${shipment.podImage ? `
-
-  <div class="pod-preview">
-
-    <h4>إثبات التسليم</h4>
-
-    <img
-      src="${shipment.podImage}"
-      style="
-        width:220px;
-        border-radius:12px;
-        margin-top:10px;
-      "
-    />
-
-  </div>
-
-` : ""}
       <div class="tracking-progress">
-
-  ${[
-    "created",
-    "received",
-    "hub",
-    "out_for_delivery",
-    "delivered"
-  ].map((step, index, arr) => {
-
-    const currentIndex =
-      arr.indexOf(shipment.status);
-
-    const done =
-      index <= currentIndex;
-
-    return `
-
-      <div class="progress-step">
-
-        <div
-          class="
-            progress-circle
-            ${done ? "done" : ""}
-          "
-        >
-          ${done ? "✓" : ""}
-        </div>
-
-        <span>
-          ${statusMeta[step].label}
-        </span>
-
+        ${steps.map((step,i)=>`
+          <div class="progress-step">
+            <div class="progress-circle ${i<=currentIdx?"done":""}">${i<=currentIdx?"✓":i+1}</div>
+            <span>${statusMeta[step]?.label||step}</span>
+          </div>
+          ${i<steps.length-1?`<div class="progress-line ${i<currentIdx?"done":""}"></div>`:""}`
+        ).join("")}
       </div>
 
-      ${
-        index < arr.length - 1
-        ? `
-          <div
-            class="
-              progress-line
-              ${index < currentIndex ? "done" : ""}
-            "
-          ></div>
-        `
-        : ""
-      }
-
-    `;
-
-  }).join("")}
-
-</div>
-    </section>
-  `;
+      <div class="timeline" id="timeline-${escapeHtml(s.id)}">
+        <h4>سجل الشحنة</h4>
+        <p style="color:#888;font-size:13px">جاري التحميل...</p>
+      </div>
+    </section>`;
 }
 
+// ─── Track View ──────────────────────────────────
 function trackView() {
-
-  const shipment =
-    shipments.find(
-      (item) =>
-        item.id === state.selectedShipment
-    );
-  if (!shipment) {
-    return `
-      <section class="panel">
-        <h3>لا توجد شحنات حالياً</h3>
-        <p>لم يتم ربط أي شحنة بهذا الحساب بعد.</p>
-      </section>
-    `;
-  }
-
+  const s = shipments.find(x=>x.id===state.selectedShipment);
+  if (!s) return `
+    <section class="panel" style="text-align:center;padding:2rem;">
+      <h3>الشحنة غير موجودة</h3>
+      <p style="color:#888;margin:1rem 0;">تأكد من رقم الشحنة</p>
+      <button class="primary-btn" onclick="manualTrackShipment()">تتبع شحنة أخرى</button>
+    </section>`;
   return `
     <section class="track-hero">
       <div>
         <span class="eyebrow">تتبع الشحنة</span>
-        <h2>${shipment.id}</h2>
-        <p>${shipment.customerName} - ${shipment.address}</p>
+        <h2>${escapeHtml(s.id)}</h2>
+        <p>${escapeHtml(s.customerName)} — ${escapeHtml(s.address)}</p>
       </div>
-      <span class="badge ${statusMeta[shipment.status].tone}">
-        ${statusMeta[shipment.status].label}
-      </span>
+      <span class="badge ${statusMeta[s.status]?.tone||"info"}">${statusMeta[s.status]?.label||s.status}</span>
     </section>
-    ${detailsPanel(shipment)}
-  `;
+    ${detailsPanel(s)}`;
 }
 
+// ─── Accounts View ───────────────────────────────
 function accountsView() {
-  const list = visibleShipments();
-  const delivered = list.filter((shipment) => shipment.status === "delivered");
-  const revenue = delivered.reduce((sum, shipment) => sum + shipment.amount, 0);
-  const fees = delivered.reduce((sum, shipment) => sum + shipment.deliveryFee, 0);
-  const payable = state.user.role === "courier" ? delivered.length * 25 + state.user.balance : revenue - fees + state.user.balance;
+  if (state.user.role==="customer") return `
+    <section class="panel" style="text-align:center;padding:2rem;">
+      <h3>حسابي</h3>
+      <p style="color:#888;margin:1rem 0;">تتبع شحنتك برقم الشحنة</p>
+      <button class="primary-btn" onclick="manualTrackShipment()">📦 تتبع شحنة</button>
+    </section>`;
+
+  const list      = visibleShipments();
+  const delivered = list.filter(s=>s.status==="delivered");
+  const revenue   = delivered.reduce((sum,s)=>sum+(s.amount||0),0);
+  const fees      = delivered.reduce((sum,s)=>sum+(s.deliveryFee||0),0);
+  const payable   = state.user.role==="courier"
+    ? delivered.length*25+(state.user.balance||0)
+    : revenue-fees+(state.user.balance||0);
+
   return `
     <section class="account-band">
-      <div>
-        <span>الرصيد الحالي</span>
-        <strong>${money(payable)}</strong>
-      </div>
+      <div><span>الرصيد الحالي</span><strong>${money(payable)}</strong></div>
       <button class="primary-btn compact">طلب تسوية</button>
     </section>
     <section class="stats-grid two">
@@ -960,1294 +475,652 @@ function accountsView() {
     <section class="panel">
       <h3>كشف الحساب</h3>
       ${shipmentTable(delivered)}
-    </section>
-  `;
+    </section>`;
 }
 
+// ─── Reports View ────────────────────────────────
 function reportsView() {
   const list = visibleShipments();
+  const total = list.length || 1;
   return `
     <section class="stats-grid">
-      ${Object.keys(statusMeta).map((status) => `
-        <article class="stat mini"><span>${statusMeta[status].label}</span><strong>${list.filter((s) => s.status === status).length}</strong></article>
-      `).join("")}
+      ${Object.keys(statusMeta).map(st=>`
+        <article class="stat mini">
+          <span>${statusMeta[st].label}</span>
+          <strong>${list.filter(s=>s.status===st).length}</strong>
+        </article>`).join("")}
     </section>
     <section class="panel">
-      <h3>اقتراحات احترافية للنسخة النهائية</h3>
+      <h3>تقارير الأداء</h3>
       <div class="feature-list">
-        <div>رسائل واتساب تلقائية عند تغيير حالة الشحنة.</div>
-        <div>خريطة خطوط سير للمندوبين وتوزيع تلقائي حسب المنطقة.</div>
-        <div>طباعة بوليصة شحن وملصق QR لكل طلب.</div>
-        <div>ربط دفع إلكتروني وتحويلات لحسابات التجار.</div>
+        <div>إجمالي الشحنات: <b>${list.length}</b></div>
+        <div>نسبة التسليم: <b>${Math.round(list.filter(s=>s.status==="delivered").length/total*100)}%</b></div>
+        <div>نسبة المرتجع: <b>${Math.round(list.filter(s=>s.status==="returned").length/total*100)}%</b></div>
+        <div>إجمالي المبالغ: <b>${money(list.reduce((s,x)=>s+(x.amount||0),0))}</b></div>
       </div>
-    </section>
-  `;
+    </section>`;
 }
+
+// ─── Users View ──────────────────────────────────
 function usersView() {
-
-  if (!can("manage_users")) {
-
-    return `
-      <section class="panel">
-        <h3>
-          غير مصرح
-        </h3>
-      </section>
-    `;
-  }
-
+  if (!can("manage_users")) return `<section class="panel"><h3>غير مصرح</h3></section>`;
   return `
-
     <section class="panel">
-
       <div class="section-head">
-
-        <h3>
-          إدارة المستخدمين
-        </h3>
-
-        <button
-          class="primary-btn compact"
-          id="addUserBtn"
-        >
-          ${icon("plus")}
-          مستخدم جديد
-        </button>
-
+        <h3>إدارة المستخدمين</h3>
+        <button class="primary-btn compact" id="addUserBtn">${icon("plus")} مستخدم جديد</button>
       </div>
-
       <div class="table-wrap">
-
         <table>
-
-          <thead>
-
-            <tr>
-              <th>الاسم</th>
-              <th>الدور</th>
-              <th>الهاتف</th>
-              <th>الإجراءات</th>
-            </tr>
-
-          </thead>
-
+          <thead><tr><th>الاسم</th><th>الدور</th><th>الهاتف</th><th>الإجراءات</th></tr></thead>
           <tbody>
-
-            ${users.map(user => `
-
+            ${users.map(u=>`
               <tr>
-
-                <td>
-                  ${user.name}
-                </td>
-
-                <td>
-                  ${roleName(user.role)}
-                </td>
-
-                <td>
-                  ${user.phone}
-                </td>
-
-                <td>
-
-                  <button
-                    class="link-btn"
-                    onclick="deleteUser('${user.id}')"
-                  >
-                    حذف
-                  </button>
-
-                </td>
-
-              </tr>
-
-            `).join("")}
-
+                <td>${escapeHtml(u.name)}</td>
+                <td>${roleName(u.role)}</td>
+                <td>${escapeHtml(u.phone)}</td>
+                <td><button class="link-btn" onclick="deleteUser('${escapeHtml(u.id)}')">حذف</button></td>
+              </tr>`).join("")}
           </tbody>
-
         </table>
-
       </div>
-
-    </section>
-
-  `;
+    </section>`;
 }
+
 function renderView() {
-  if (state.view === "shipments") return shipmentsView();
-  if (state.view === "tasks") return tasksView();
-  if (state.view === "accounts") return accountsView();
-  if (state.view === "reports") return reportsView();
-  if (state.view === "track") return trackView();
-  if (state.view === "users")
-  return usersView();
+  const v = state.view;
+  if (v==="shipments") return shipmentsView();
+  if (v==="tasks")     return tasksView();
+  if (v==="accounts")  return accountsView();
+  if (v==="reports")   return reportsView();
+  if (v==="track")     return trackView();
+  if (v==="users")     return usersView();
   return overview();
 }
 
+// ══════════════════════════════════════════════════
+// RENDER
+// ══════════════════════════════════════════════════
 function render() {
-const params =
-  new URLSearchParams(
-    window.location.search
-  );
-
-const trackId =
-  params.get("track");
-
-if (trackId) {
-
-  state.selectedShipment =
-    trackId;
-
-  state.view = "track";
-
-  state.user = {
-    role: "customer",
-    id: "guest",
-    name: "عميل"
-  };
-}
+  const params  = new URLSearchParams(window.location.search);
+  const trackId = params.get("track");
+  if (trackId) { state.selectedShipment=trackId; state.view="track"; if (!state.user) state.user={role:"customer",id:"guest",name:"عميل"}; }
 
   const app = document.querySelector("#app");
+  if (!app) return;
 
-  app.innerHTML =
-    trackId
-  ? renderView()
-  : (
-      state.user
-        ? shell(renderView())
-        : loginScreen()
-    );
-
-  bindEvents();
-  setTimeout(() => {
-
-  const canvas =
-    document.getElementById(
-      "statusChart"
-    );
-
-  if (!canvas) return;
-
-  const oldChart =
-    Chart.getChart(canvas);
-
-  if (oldChart) {
-    oldChart.destroy();
+  if (trackId || state.user) {
+    app.innerHTML = state.user ? shell(renderView()) : loginScreen();
+  } else {
+    app.innerHTML = loginScreen();
   }
 
-  const delivered =
-    shipments.filter(
-      s => s.status === "delivered"
-    ).length;
+  bindEvents();
 
-  const returned =
-    shipments.filter(
-      s => s.status === "returned"
-    ).length;
+  // ─── Lazy load timeline after render ───
+  const selectedShipment = shipments.find(s=>s.id===state.selectedShipment);
+  if (selectedShipment) {
+    loadTimeline(selectedShipment.id);
+  }
 
-  const out =
-    shipments.filter(
-      s =>
-        s.status ===
-        "out_for_delivery"
-    ).length;
-
-  new Chart(canvas, {
-
-    type: "doughnut",
-
-    data: {
-
-      labels: [
-        "تم التسليم",
-        "مرتجع",
-        "خرج للتسليم"
-      ],
-
-      datasets: [{
-
-        data: [
-          delivered,
-          returned,
-          out
-        ],
-
-        backgroundColor: [
-          "#22c55e",
-          "#ef4444",
-          "#3b82f6"
-        ]
-
-      }]
-    },
-
-    options: {
-
-      responsive: true,
-
-      plugins: {
-
-        legend: {
-          position: "bottom"
-        }
-
-      }
-
-    }
-
-  });
-
-}, 200);
-  setTimeout(() => {
-
-    visibleShipments().forEach((shipment) => {
-
-      const qrCanvas =
-        document.getElementById(`qr-${shipment.id}`);
-
-      if (!qrCanvas) return;
-
-      const trackingUrl =
-        `${window.location.origin}?track=${shipment.id}`;
-
-      QRCode.toCanvas(
-        qrCanvas,
-        trackingUrl,
-        {
-          width: 70
-        }
-      );
-
+  // ─── Chart ───
+  setTimeout(()=>{
+    const canvas = document.getElementById("statusChart");
+    if (!canvas) return;
+    const old = Chart.getChart(canvas);
+    if (old) old.destroy();
+    new Chart(canvas,{
+      type:"doughnut",
+      data:{
+        labels:["تم التسليم","مرتجع","خرج للتسليم","في المخزن","جديد"],
+        datasets:[{
+          data:[
+            shipments.filter(s=>s.status==="delivered").length,
+            shipments.filter(s=>s.status==="returned").length,
+            shipments.filter(s=>s.status==="out_for_delivery").length,
+            shipments.filter(s=>s.status==="warehouse").length,
+            shipments.filter(s=>s.status==="created").length,
+          ],
+          backgroundColor:["#22c55e","#ef4444","#3b82f6","#f59e0b","#a855f7"]
+        }]
+      },
+      options:{responsive:true,plugins:{legend:{position:"bottom"}}}
     });
+  },200);
 
-  }, 100);
+  // ─── QR Codes ───
+  setTimeout(()=>{
+    visibleShipments().forEach(s=>{
+      const c = document.getElementById(`qr-${s.id}`);
+      if (!c) return;
+      QRCode.toCanvas(c,`${location.origin}${location.pathname}?track=${s.id}`,{width:70});
+    });
+  },100);
 }
-async function printShipment(id) {
 
-  const shipment =
-    shipments.find(s => s.id === id);
-
-  if (!shipment) return;
-
-  const label =
-    document.createElement("div");
-
-  label.style.width = "700px";
-
-  label.style.padding = "30px";
-
-  label.style.background = "#fff";
-
-  label.style.direction = "rtl";
-
-  label.style.fontFamily =
-    "Arial";
-
-  label.innerHTML = `
-
-    <div
-      style="
-        border:2px solid #000;
-        padding:20px;
-        border-radius:14px;
-      "
-    >
-
-      <h1
-        style="
-          text-align:center;
-          margin-bottom:20px;
-        "
-      >
-        النخبة إكسبريس
-      </h1>
-
-      <div
-        style="
-          display:flex;
-          justify-content:space-between;
-          align-items:center;
-        "
-      >
-
-        <div>
-
-          <p>
-            <b>رقم الشحنة:</b>
-            ${shipment.id}
-          </p>
-
-          <p>
-            <b>العميل:</b>
-            ${shipment.customerName}
-          </p>
-
-          <p>
-            <b>الهاتف:</b>
-            ${shipment.customerPhone}
-          </p>
-
-          <p>
-            <b>المبلغ:</b>
-            ${shipment.amount} جنيه
-          </p>
-
-          <p>
-            <b>العنوان:</b>
-            ${shipment.address}
-          </p>
-
-        </div>
-
-        <canvas id="printQR"></canvas>
-
-      </div>
-
-    </div>
-  `;
-
-  document.body.appendChild(label);
-
-  await QRCode.toCanvas(
-    document.querySelector("#printQR"),
-    `${window.location.origin}?track=${shipment.id}`,
-    {
-      width: 150
-    }
-  );
-
-  const canvas =
-    await html2canvas(label);
-
-  const imgData =
-    canvas.toDataURL("image/png");
-
-  const { jsPDF } = window.jspdf;
-
-  const pdf =
-    new jsPDF("p", "mm", "a4");
-
-  pdf.addImage(
-    imgData,
-    "PNG",
-    10,
-    10,
-    190,
-    120
-  );
-
-  pdf.save(`${shipment.id}.pdf`);
-
-  label.remove();
-}
+// ══════════════════════════════════════════════════
+// BIND EVENTS
+// ══════════════════════════════════════════════════
 function bindEvents() {
-  document.querySelector("#loginForm")?.addEventListener("submit", (event) => {
-    event.preventDefault();
-    const data = new FormData(event.currentTarget);
-    const email = data.get("phone");
-const password = data.get("password");
 
-supabaseClient.auth
-  .signInWithPassword({
-    email,
-    password
-  })
-  .then(({ data: authData, error }) => {
-    if (error) {
-      document.querySelector("#loginForm")?.classList.add("shake");
+  // ── Login ──
+  document.querySelector("#loginForm")?.addEventListener("submit", e=>{
+    e.preventDefault();
+    const fd       = new FormData(e.currentTarget);
+    const email    = fd.get("email");
+    const password = fd.get("password");
+    const errEl    = document.querySelector("#loginError");
+    const btn      = e.currentTarget.querySelector("button[type=submit]");
+    btn.disabled=true; btn.textContent="جاري الدخول...";
 
-setTimeout(() => {
-  document.querySelector("#loginForm")?.classList.remove("shake");
-}, 400);
-      alert("بيانات الدخول غير صحيحة");
-      return;
-     
-
-document.querySelector("#openScanner")
-  ?.addEventListener("click", async () => {
-
-    try {
-
-      const modal =
-        document.createElement("div");
-
-      modal.className =
-        "shipment-modal";
-
-      modal.innerHTML = `
-        <div class="shipment-modal-box">
-
-          <h2>QR Scanner</h2>
-
-          <div id="reader"></div>
-
-          <button
-            id="manualTrack"
-            class="primary-btn"
-          >
-            إدخال كود يدوي
-          </button>
-
-          <button
-            id="closeScanner"
-            class="ghost-btn"
-          >
-            إغلاق
-          </button>
-
-        </div>
-      `;
-
-      document.body.appendChild(modal);
-
-      document.querySelector("#manualTrack")
-        .onclick = () => {
-
-          const code =
-            prompt("أدخل كود الشحنة");
-
-          if (code) {
-
-            window.location.href =
-              `${window.location.origin}?track=${code}`;
-          }
-        };
-
-      const scanner =
-        new Html5Qrcode("reader");
-
-      await scanner.start(
-        { facingMode: "environment" },
-        {
-          fps: 10,
-          qrbox: 250
-        },
-        (decodedText) => {
-
-          scanner.stop();
-
-          modal.remove();
-
-          window.location.href =
-            decodedText;
-        }
-      );
-
-      document.querySelector("#closeScanner")
-        .onclick = async () => {
-
-          await scanner.stop();
-
-          modal.remove();
-        };
-
-    } catch (err) {
-
-      const code =
-        prompt("أدخل كود الشحنة");
-
-      if (code) {
-
-        window.location.href =
-          `${window.location.origin}?track=${code}`;
+    db.auth.signInWithPassword({email,password}).then(({data,error})=>{
+      btn.disabled=false; btn.innerHTML=`${icon("user")} دخول`;
+      if (error) {
+        if (errEl){errEl.style.display="block";errEl.textContent="بيانات الدخول غير صحيحة";}
+        e.currentTarget.classList.add("shake");
+        setTimeout(()=>e.currentTarget.classList.remove("shake"),400);
+        return;
       }
-    }
-
-  });
-    }
-
-    const email = authData.user.email;
-
-    let role = "customer";
-
-    if (email.includes("admin")) role = "admin";
-    else if (email.includes("merchant")) role = "merchant";
-    else if (email.includes("courier")) role = "courier";
-
-    const user = {
-     id: authData.user.id,
-      name: email.split("@")[0],
-      role,
-      phone: email,
-      balance: 0
-      
-    };
-
-    localStorage.setItem("AL NUKHBA EXPRESS_user", JSON.stringify(user));
-
-    setState({
-      user,
-      view: role === "customer" ? "track" : "overview"
+      const role = determineRole(data.user.email);
+      const user = { id:data.user.id, name:data.user.email.split("@")[0], role, phone:data.user.email, balance:0 };
+      localStorage.setItem("nukhba_session", JSON.stringify(user));
+      setState({user, view: role==="customer"?"track":"overview"});
     });
   });
-  });
 
-  document.querySelectorAll("[data-demo]").forEach((button) => {
-    button.addEventListener("click", () => {
-      document.querySelector("[name='phone']").value = button.dataset.demo;
+  // ── Demo buttons ──
+  document.querySelectorAll("[data-demo]").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      document.querySelector("[name='email']").value    = btn.dataset.demo;
       document.querySelector("[name='password']").value = "123456";
     });
   });
 
-  document.querySelectorAll("[data-view]").forEach((button) => {
-    button.addEventListener("click", () => setState({ view: button.dataset.view }));
+  // ── Nav ──
+  document.querySelectorAll("[data-view]").forEach(btn=>{
+    btn.addEventListener("click",()=>setState({view:btn.dataset.view}));
   });
-document.querySelector(
-  "#roleSwitcher"
-)?.addEventListener(
-  "change",
-  (e) => {
 
-    const role =
-      e.target.value;
+  // ── Role switcher ──
+  document.querySelector("#roleSwitcher")?.addEventListener("change",e=>{
+    const role=e.target.value; if(!role) return;
+    state.user.role=role; state.view=role==="customer"?"track":"overview"; render();
+  });
 
-    if (!role) return;
+  // ── Logout ──
+  document.querySelector("#logoutBtn")?.addEventListener("click",()=>{
+    db.auth.signOut();
+    localStorage.removeItem("nukhba_session");
+    setState({user:null,view:"overview",query:""});
+  });
 
-    state.user.role =
-      role;
+  // ── Search debounced ──
+  const si = document.querySelector("#searchInput");
+  if (si) {
+    let t;
+    si.addEventListener("input",e=>{
+      clearTimeout(t);
+      t=setTimeout(()=>{state.query=e.target.value;render();document.querySelector("#searchInput")?.focus();},250);
+    });
+  }
 
-    state.view =
-      role === "customer"
-        ? "track"
-        : "overview";
+  // ── Open detail ──
+  document.querySelectorAll("[data-open]").forEach(btn=>{
+    btn.addEventListener("click",()=>setState({selectedShipment:btn.dataset.open}));
+  });
 
+  // ── Deliver button ──
+  document.querySelectorAll("[data-deliver]").forEach(btn=>{
+    btn.addEventListener("click",()=>updateShipmentStatus(btn.dataset.deliver,"delivered"));
+  });
+
+  // ── New shipment ──
+  document.querySelector("#newShipmentBtn")?.addEventListener("click", openNewShipmentModal);
+
+  // ── Add user ──
+  document.querySelector("#addUserBtn")?.addEventListener("click", openAddUserModal);
+
+  // ── Scanner ──
+  document.querySelector("#openScanner")?.addEventListener("click", openQRScanner);
+
+  // ── Notifications toggle ──
+  document.querySelector("#toggleNotif")?.addEventListener("click",()=>{
+    const panel = document.querySelector("#notifPanel");
+    if (!panel) return;
+    const isOpen = panel.style.display!=="none";
+    panel.style.display = isOpen?"none":"block";
+    if (!isOpen) {
+      notifications.forEach(n=>n.read=true);
+      document.querySelector(".notif-badge")?.remove();
+    }
+  });
+
+  // ── Clear notifications ──
+  document.querySelector("#clearNotif")?.addEventListener("click",async()=>{
+    notifications=[];
+    await db.from("notifications").delete().neq("id","00000000-0000-0000-0000-000000000000");
     render();
-});
-  document.querySelector("#logoutBtn")?.addEventListener("click", () => {
-    localStorage.removeItem("AL NUKHBA EXPRESS_user");
-    setState({ user: null, view: "overview", query: "" });
   });
-
-  document.querySelector("#searchInput")?.addEventListener("input", (event) => {
-    state.query = event.target.value;
-    render();
-    document.querySelector("#searchInput")?.focus();
-  });
-
-  document.querySelectorAll("[data-open]").forEach((button) => {
-    button.addEventListener("click", () => setState({ selectedShipment: button.dataset.open, view: state.user.role === "customer" ? "track" : state.view }));
-  });
-
-  document.querySelectorAll("[data-deliver]")
-  .forEach((button) => {
-
-    button.addEventListener(
-      "click",
-      async () => {
-
-        const shipment =
-          shipments.find(
-            item =>
-              item.id ===
-              button.dataset.deliver
-          );
-
-        if (!shipment) return;
-
-        shipment.status =
-          "delivered";
-
-        shipment.eta =
-          "تم التسليم الآن";
-
-        shipment.timeline.push([
-          "تم التسليم",
-          new Date()
-            .toLocaleString("ar-EG")
-        ]);
-
-        await supabaseClient
-          .from("shipments")
-          .update({
-            status: "delivered",
-            eta: "تم التسليم الآن"
-          })
-          .eq(
-            "shipment_code",
-            shipment.id
-          );
-
-        await loadShipments();
-
-      }
-    );
-
-});
-
-  document.querySelector("#newShipmentBtn")?.addEventListener("click", () => {
-  const modal = document.createElement("div");
-
-  modal.className = "shipment-modal";
-
-  modal.innerHTML = `
-  <div class="shipment-modal-box large">
-    <h2>إضافة شحنة جديدة</h2>
-
-    <div class="form-grid">
-
-      <input id="shipmentName" placeholder="اسم الشحنة" />
-
-      <input id="shipmentCodeInput" placeholder="كود الشحنة" />
-
-      <input id="customerName" placeholder="اسم العميل" />
-
-      <input id="customerPhone" placeholder="رقم الموبايل" />
-
-      <input id="shipmentAmount" type="number" placeholder="قيمة الشحنة" />
-
-      <select id="governorate">
-  <option value="">جاري تحميل المحافظات...</option>
-</select>
-
-      <select id="center">
-  <option value="">اختر المركز</option>
-</select>
-
-      <input id="street" placeholder="اسم الشارع" />
-
-      <input id="building" placeholder="رقم العمارة" />
-
-      <input id="floor" placeholder="رقم الدور" />
-
-      <input id="apartment" placeholder="رقم الشقة" />
-
-    </div>
-
-    <textarea id="notes" placeholder="ملاحظات إضافية"></textarea>
-
-    <div class="modal-actions">
-      <button id="saveShipment" class="primary-btn">
-        حفظ الشحنة
-      </button>
-
-      <button id="closeModal" class="ghost-btn">
-        إلغاء
-      </button>
-    </div>
-  </div>
-`;
-
-  document.body.appendChild(modal);
-  async function loadGovernorates() {
-
-  const response = await fetch("./cities.json");
-
-  const data = await response.json();
-
-  window.egyptData = data[2].data;
-
-  const governoratesNames = {
-    1: "القاهرة",
-    2: "الجيزة",
-    3: "الإسكندرية",
-    4: "الدقهلية",
-    5: "البحر الأحمر",
-    6: "البحيرة",
-    7: "الفيوم",
-    8: "الغربية",
-    9: "الإسماعيلية",
-    10: "المنوفية",
-    11: "المنيا",
-    12: "القليوبية",
-    13: "الوادي الجديد",
-    14: "السويس",
-    15: "أسوان",
-    16: "أسيوط",
-    17: "بني سويف",
-    18: "بورسعيد",
-    19: "دمياط",
-    20: "الشرقية",
-    21: "جنوب سيناء",
-    22: "كفر الشيخ"
-  };
-
-  document.querySelector("#governorate").innerHTML =
-    `
-      <option value="">اختر المحافظة</option>
-
-      ${Object.entries(governoratesNames).map(
-        ([id, name]) =>
-          `<option value="${id}">
-            ${name}
-          </option>`
-      ).join("")}
-    `;
 }
 
-loadGovernorates();
-document.querySelector("#governorate")
-  .addEventListener("change", async (e) => {
+// ══════════════════════════════════════════════════
+// MODALS
+// ══════════════════════════════════════════════════
+function openQRScanner() {
+  const modal = document.createElement("div");
+  modal.className="shipment-modal";
+  modal.innerHTML=`
+    <div class="shipment-modal-box">
+      <h2>QR Scanner</h2>
+      <div id="reader"></div>
+      <button id="manualTrackBtn" class="ghost-btn">إدخال كود يدوي</button>
+      <button id="closeScanner"   class="ghost-btn">إغلاق</button>
+    </div>`;
+  document.body.appendChild(modal);
 
-    const governorateId =
-      e.target.value;
+  document.querySelector("#manualTrackBtn").onclick=()=>{
+    const code=prompt("أدخل كود الشحنة"); if(code) location.href=`${location.origin}${location.pathname}?track=${code}`;
+  };
 
-    const cities =
-      window.egyptData.filter(
-        item =>
-          item.governorate_id == governorateId
-      );
+  let scanner;
+  try {
+    scanner=new Html5Qrcode("reader");
+    scanner.start({facingMode:"environment"},{fps:10,qrbox:250},txt=>{scanner.stop();modal.remove();location.href=txt;}).catch(()=>{});
+  } catch(e){}
 
-    document.querySelector("#center").innerHTML =
-      `
-        <option value="">اختر المركز</option>
-
-        ${cities.map(
-          (city) =>
-            `<option value="${city.city_name_ar}">
-              ${city.city_name_ar}
-            </option>`
-        ).join("")}
-      `;
-  });
-  document.querySelector("#closeModal").onclick = () => {
+  document.querySelector("#closeScanner").onclick=async()=>{
+    try{if(scanner)await scanner.stop();}catch(e){}
     modal.remove();
   };
-
-  document.querySelector("#saveShipment").onclick = async () => {
-    const shipmentName =
-  document.querySelector("#shipmentName").value;
-
-const shipmentCodeInput =
-  document.querySelector("#shipmentCodeInput").value;
-
-const customerName =
-  document.querySelector("#customerName").value;
-
-const customerPhone =
-  document.querySelector("#customerPhone").value;
-
-const amount =
-  Number(document.querySelector("#shipmentAmount").value);
-
-const governorate =
-  document.querySelector("#governorate").value;
-
-const center =
-  document.querySelector("#center").value;
-
-const street =
-  document.querySelector("#street").value;
-
-const building =
-  document.querySelector("#building").value;
-
-const floor =
-  document.querySelector("#floor").value;
-
-const apartment =
-  document.querySelector("#apartment").value;
-
-const notes =
-  document.querySelector("#notes").value;
-
-const address = `
-${governorate} - ${center}
-شارع ${street}
-عمارة ${building}
-الدور ${floor}
-شقة ${apartment}
-`;
-
-if (
-  !shipmentName ||
-  !shipmentCodeInput ||
-  !customerName ||
-  !customerPhone
-) {
-  alert("أكمل البيانات المطلوبة");
-  return;
 }
 
-    const shipmentCode = shipmentCodeInput;
+function openNewShipmentModal() {
+  const modal=document.createElement("div");
+  modal.className="shipment-modal";
+  modal.innerHTML=`
+    <div class="shipment-modal-box large">
+      <h2>إضافة شحنة جديدة</h2>
+      <div class="form-grid">
+        <input id="shipmentName"      placeholder="اسم الشحنة (وصف)"/>
+        <input id="shipmentCodeInput" placeholder="كود الشحنة (مثال: ANE-001)"/>
+        <input id="customerName"      placeholder="اسم العميل"/>
+        <input id="customerPhone"     placeholder="رقم الموبايل"/>
+        <input id="shipmentAmount"    type="number" placeholder="قيمة الشحنة (جنيه)"/>
+        <input id="deliveryFeeInput"  type="number" placeholder="رسوم الشحن" value="60"/>
+        <select id="governorate"><option value="">جاري تحميل المحافظات...</option></select>
+        <select id="center"><option value="">اختر المركز</option></select>
+        <input id="street"    placeholder="اسم الشارع"/>
+        <input id="building"  placeholder="رقم العمارة"/>
+        <input id="floor"     placeholder="رقم الدور"/>
+        <input id="apartment" placeholder="رقم الشقة"/>
+      </div>
+      <textarea id="notes" placeholder="ملاحظات إضافية" style="width:100%;margin-top:8px;padding:8px;border-radius:8px;border:1px solid #ddd;"></textarea>
+      <div class="modal-actions">
+        <button id="saveShipment" class="primary-btn">💾 حفظ الشحنة</button>
+        <button id="closeModal"   class="ghost-btn">إلغاء</button>
+      </div>
+      <div id="saveError" style="color:#c0392b;font-size:13px;margin-top:8px;display:none;"></div>
+    </div>`;
+  document.body.appendChild(modal);
 
-    const { error } = await supabaseClient
-      .from("shipments")
-      .insert([
-        {
-          shipment_code: shipmentCode,
-          customer_name: customerName,
-          customer_phone: customerPhone,
-          address,
-          amount,
-          delivery_fee: 60,
-          status: "created",
-          eta: "قيد التجهيز",
-          notes: `
-اسم الشحنة: ${shipmentName}
+  fetch("./cities.json").then(r=>r.json()).then(data=>{
+    window.egyptData=data[2].data;
+    const govNames={1:"القاهرة",2:"الجيزة",3:"الإسكندرية",4:"الدقهلية",5:"البحر الأحمر",6:"البحيرة",7:"الفيوم",8:"الغربية",9:"الإسماعيلية",10:"المنوفية",11:"المنيا",12:"القليوبية",13:"الوادي الجديد",14:"السويس",15:"أسوان",16:"أسيوط",17:"بني سويف",18:"بورسعيد",19:"دمياط",20:"الشرقية",21:"جنوب سيناء",22:"كفر الشيخ"};
+    document.querySelector("#governorate").innerHTML=`<option value="">اختر المحافظة</option>${Object.entries(govNames).map(([id,name])=>`<option value="${id}">${name}</option>`).join("")}`;
+  }).catch(()=>{ document.querySelector("#governorate").innerHTML=`<option value="">تعذر التحميل</option>`; });
 
-${notes}
-`
-        }
-      ]);
+  document.querySelector("#governorate").addEventListener("change",e=>{
+    const cities=(window.egyptData||[]).filter(x=>x.governorate_id==e.target.value);
+    document.querySelector("#center").innerHTML=`<option value="">اختر المركز</option>${cities.map(c=>`<option value="${c.city_name_ar}">${c.city_name_ar}</option>`).join("")}`;
+  });
+
+  document.querySelector("#closeModal").onclick=()=>modal.remove();
+
+  document.querySelector("#saveShipment").onclick=async()=>{
+    const name      = document.querySelector("#shipmentName").value.trim();
+    const code      = document.querySelector("#shipmentCodeInput").value.trim();
+    const custName  = document.querySelector("#customerName").value.trim();
+    const custPhone = document.querySelector("#customerPhone").value.trim();
+    const amount    = Number(document.querySelector("#shipmentAmount").value)||0;
+    const fee       = Number(document.querySelector("#deliveryFeeInput").value)||60;
+    const center    = document.querySelector("#center").value;
+    const street    = document.querySelector("#street").value.trim();
+    const building  = document.querySelector("#building").value.trim();
+    const floor     = document.querySelector("#floor").value.trim();
+    const apartment = document.querySelector("#apartment").value.trim();
+    const notes     = document.querySelector("#notes").value.trim();
+    const errEl     = document.querySelector("#saveError");
+
+    if (!code||!custName||!custPhone) {
+      errEl.style.display="block"; errEl.textContent="أكمل البيانات المطلوبة (الكود، اسم العميل، الهاتف)"; return;
+    }
+
+    const address=`${center?center+' - ':""}شارع ${street} - عمارة ${building} - دور ${floor} - شقة ${apartment}`;
+    const btn=document.querySelector("#saveShipment");
+    btn.disabled=true; btn.textContent="جاري الحفظ...";
+
+    const {error}=await db.from("shipments").insert([{
+      shipment_code:  code,
+      customer_name:  custName,
+      customer_phone: custPhone,
+      address,
+      amount,
+      delivery_fee:   fee,
+      status:         "created",
+      eta:            "قيد التجهيز",
+      merchant_id:    state.user.role==="merchant"?state.user.id:null,
+      notes:          `${name?'اسم الشحنة: '+name+'\n':''}${notes}`
+    }]);
 
     if (error) {
+      errEl.style.display="block"; errEl.textContent="خطأ: "+error.message;
+      btn.disabled=false; btn.textContent="💾 حفظ الشحنة"; return;
+    }
 
-  console.error(error);
-
-  alert(error.message);
-
-  return;
-}
+    // إضافة timeline entry
+    await addTimelineEntry(code,"تم إنشاء الشحنة");
+    // إضافة notification
+    await addNotification(`شحنة جديدة: ${code} للعميل ${custName}`,"admin");
 
     modal.remove();
-
     await loadShipments();
-
-    alert("تم إضافة الشحنة بنجاح");
+    alert("✅ تم إضافة الشحنة بنجاح");
   };
-});
-document.querySelector("#addUserBtn")
-?.addEventListener("click", () => {
+}
 
-  const modal =
-    document.createElement("div");
-
-  modal.className =
-    "shipment-modal";
-
-  modal.innerHTML = `
-
+function openAddUserModal() {
+  const modal=document.createElement("div");
+  modal.className="shipment-modal";
+  modal.innerHTML=`
     <div class="shipment-modal-box">
-
-      <h2>
-        مستخدم جديد
-      </h2>
-
-      <input
-        id="newUserName"
-        placeholder="الاسم"
-      />
-
-      <input
-        id="newUserPhone"
-        placeholder="الهاتف"
-      />
-
-      <input
-        id="newUserPassword"
-        placeholder="كلمة المرور"
-      />
-
-      <select id="newUserRole">
-
-        <option value="merchant">
-          تاجر
-        </option>
-
-        <option value="courier">
-          مندوب
-        </option>
-
-        <option value="customer">
-          عميل
-        </option>
-
-        <option value="admin">
-          إدارة
-        </option>
-
+      <h2>مستخدم جديد</h2>
+      <input id="newUserName"     placeholder="الاسم الكامل" style="width:100%;margin:6px 0;padding:8px;border-radius:8px;border:1px solid #ddd;"/>
+      <input id="newUserPhone"    placeholder="الهاتف أو الاسم قبل @nukhba.com" style="width:100%;margin:6px 0;padding:8px;border-radius:8px;border:1px solid #ddd;"/>
+      <input id="newUserPassword" placeholder="كلمة المرور" type="password" style="width:100%;margin:6px 0;padding:8px;border-radius:8px;border:1px solid #ddd;"/>
+      <select id="newUserRole" style="width:100%;margin:6px 0;padding:8px;border-radius:8px;border:1px solid #ddd;">
+        <option value="merchant">تاجر</option>
+        <option value="courier">مندوب</option>
+        <option value="customer">عميل</option>
+        <option value="admin">إدارة</option>
       </select>
-
+      <div id="userSaveError" style="color:#c0392b;font-size:13px;margin-top:4px;display:none;"></div>
       <div class="modal-actions">
-
-        <button
-          id="saveUserBtn"
-          class="primary-btn"
-        >
-          حفظ
-        </button>
-
-        <button
-          id="closeUserModal"
-          class="ghost-btn"
-        >
-          إلغاء
-        </button>
-
+        <button id="saveUserBtn"    class="primary-btn">حفظ</button>
+        <button id="closeUserModal" class="ghost-btn">إلغاء</button>
       </div>
-
-    </div>
-  `;
-
+    </div>`;
   document.body.appendChild(modal);
 
-  document.querySelector(
-    "#closeUserModal"
-  ).onclick = () => {
-    modal.remove();
+  document.querySelector("#closeUserModal").onclick=()=>modal.remove();
+
+  document.querySelector("#saveUserBtn").onclick=async()=>{
+    const name     = document.querySelector("#newUserName").value.trim();
+    const phone    = document.querySelector("#newUserPhone").value.trim();
+    const password = document.querySelector("#newUserPassword").value;
+    const role     = document.querySelector("#newUserRole").value;
+    const errEl    = document.querySelector("#userSaveError");
+
+    if (!name||!phone||!password) { errEl.style.display="block"; errEl.textContent="أكمل جميع البيانات"; return; }
+    if (password.length<6)        { errEl.style.display="block"; errEl.textContent="كلمة المرور 6 أحرف على الأقل"; return; }
+
+    const email=`${phone}@nukhba.com`;
+    const btn=document.querySelector("#saveUserBtn");
+    btn.disabled=true; btn.textContent="جاري الإنشاء...";
+
+    const {data,error}=await db.auth.signUp({email,password});
+    if (error) { errEl.style.display="block"; errEl.textContent="خطأ: "+error.message; btn.disabled=false; btn.textContent="حفظ"; return; }
+
+    const newUser={id:data?.user?.id||crypto.randomUUID(),name,phone,role,balance:0};
+    users.push(newUser);
+    localStorage.setItem("nukhba_users",JSON.stringify(users));
+
+    modal.remove(); render();
+    alert(`✅ تم إنشاء المستخدم\nEmail: ${email}`);
   };
+}
 
-  document.querySelector(
-    "#saveUserBtn"
-  ).onclick = () => {
+// ══════════════════════════════════════════════════
+// SUPABASE — Timeline & Notifications
+// ══════════════════════════════════════════════════
+async function addTimelineEntry(shipmentCode, event) {
+  try {
+    await db.from("shipment_timeline").insert([{ shipment_code: shipmentCode, event }]);
+  } catch(e) { console.warn("timeline insert failed:", e); }
+}
 
-    const user = {
+async function loadTimeline(shipmentCode) {
+  const el = document.querySelector(`#timeline-${shipmentCode}`);
+  if (!el) return;
+  try {
+    const {data,error} = await db.from("shipment_timeline")
+      .select("*")
+      .eq("shipment_code", shipmentCode)
+      .order("created_at", {ascending: true});
+    if (error) throw error;
+    if (!data||!data.length) { el.innerHTML=`<h4>سجل الشحنة</h4><p style="color:#888;font-size:13px">لا يوجد سجل بعد</p>`; return; }
+    el.innerHTML=`
+      <h4>سجل الشحنة</h4>
+      ${data.map(entry=>`
+        <div class="timeline-item">
+          <span class="tl-dot"></span>
+          <div>
+            <b>${escapeHtml(entry.event)}</b>
+            <small>${new Date(entry.created_at).toLocaleString("ar-EG")}</small>
+          </div>
+        </div>`).join("")}`;
+  } catch(e) { el.innerHTML=`<h4>سجل الشحنة</h4><p style="color:#888;font-size:13px">تعذر تحميل السجل</p>`; }
+}
 
-      id:
-        crypto.randomUUID(),
+async function addNotification(text, role="admin") {
+  try {
+    await db.from("notifications").insert([{text,role}]);
+    notifications.unshift({text, role, time:new Date().toLocaleTimeString("ar-EG"), read:false});
+  } catch(e) { console.warn("notification insert failed:", e); }
+}
 
-      name:
-        document.querySelector(
-          "#newUserName"
-        ).value,
+async function loadNotifications() {
+  try {
+    const {data} = await db.from("notifications")
+      .select("*").order("created_at",{ascending:false}).limit(20);
+    if (data) {
+      notifications = data.map(n=>({
+        text:n.text, role:n.role,
+        time:new Date(n.created_at).toLocaleTimeString("ar-EG"),
+        read:false
+      }));
+    }
+  } catch(e) { console.warn("load notifications failed:", e); }
+}
 
-      phone:
-        document.querySelector(
-          "#newUserPhone"
-        ).value,
-
-      password:
-        document.querySelector(
-          "#newUserPassword"
-        ).value,
-
-      role:
-        document.querySelector(
-          "#newUserRole"
-        ).value,
-
-      balance: 0
-
+// ══════════════════════════════════════════════════
+// GLOBAL FUNCTIONS
+// ══════════════════════════════════════════════════
+window.manualTrackShipment = () => {
+  const code=prompt("أدخل كود الشحنة"); if(code) location.href=`${location.origin}${location.pathname}?track=${code}`;
 };
 
-const generatedEmail =
-  `${user.phone}@nukhba.com`;
+window.updateShipmentStatus = async (id, status) => {
+  const s=shipments.find(x=>x.id===id); if(!s) return;
+  s.status=status;
+  if(status==="delivered") s.eta="تم التسليم";
 
-    supabaseClient.auth.signUp({
+  // حفظ في Supabase
+  const {error}=await db.from("shipments").update({status, eta:s.eta}).eq("shipment_code",id);
+  if(error){console.error("update status error:",error);alert("خطأ في التحديث: "+error.message);return;}
 
-  email:
-  generatedEmail,
+  // سجل Timeline في Supabase
+  await addTimelineEntry(id, statusMeta[status]?.label||status);
 
-  password:
-    user.password
+  // إشعار في Supabase
+  await addNotification(`تم تحديث شحنة ${id} إلى: ${statusMeta[status]?.label||status}`, state.user?.role||"admin");
 
-}).then(async ({ data, error }) => {
-
-  if (error) {
-
-    alert("خطأ في إنشاء المستخدم");
-
-    console.error(error);
-
-    return;
+  // WhatsApp — اختياري فقط عند التسليم
+  if (status==="delivered"||status==="returned") {
+    const msg=`مرحبًا ${s.customerName}\n\nشحنتك رقم: ${s.id}\nالحالة: ${statusMeta[status]?.label||status}\n\nشركة النخبة للشحن السريع`;
+    if(confirm("إرسال إشعار واتساب للعميل؟")) window.open(`https://wa.me/2${s.customerPhone}?text=${encodeURIComponent(msg)}`);
   }
-
-  user.id =
-  data?.user?.id ||
-  crypto.randomUUID();
-
-  users.push(user);
-localStorage.setItem(
-  "nukhba_users",
-  JSON.stringify(users)
-);
-  alert("تم إنشاء المستخدم");
-
-  modal.remove();
 
   render();
+};
 
-});
+window.assignCourier = async (id) => {
+  const courierId=document.querySelector("#assignCourier")?.value;
+  if(!courierId){alert("اختر مندوب أولاً");return;}
+  const s=shipments.find(x=>x.id===id); if(!s) return;
+  s.courierId=courierId;
 
-    modal.remove();
+  const {error}=await db.from("shipments").update({courier_id:courierId}).eq("shipment_code",id);
+  if(error){console.error("assign courier error:",error);alert("تعذر حفظ التعيين: "+error.message);return;}
 
+  const courierName=users.find(u=>u.id===courierId)?.name||courierId;
+  await addTimelineEntry(id,`تم تعيين المندوب: ${courierName}`);
+  await addNotification(`تم تعيين ${courierName} لشحنة ${id}`,"admin");
+
+  alert("✅ تم تعيين المندوب");
+  render();
+};
+
+window.uploadPOD = async (id, inputId) => {
+  const file=document.querySelector(`#${inputId}`)?.files[0];
+  if(!file){alert("اختر صورة أولاً");return;}
+  if(file.size>5*1024*1024){alert("حجم الصورة كبير جداً. الحد الأقصى 5MB");return;}
+
+  const btn = document.querySelector(`[onclick*="${id}"]`);
+  if(btn){btn.textContent="جاري الرفع...";}
+
+  try {
+    // رفع الصورة لـ Supabase Storage
+    const fileName=`pod_${id}_${Date.now()}.${file.name.split('.').pop()}`;
+    const {data:uploadData, error:uploadError}=await db.storage.from("pod-images").upload(fileName,file,{upsert:true});
+
+    if(uploadError) throw uploadError;
+
+    // جلب الـ public URL
+    const {data:urlData}=db.storage.from("pod-images").getPublicUrl(fileName);
+    const publicUrl=urlData.publicUrl;
+
+    // تحديث الشحنة في Supabase بالـ URL
+    const {error:updateError}=await db.from("shipments").update({pod_url:publicUrl}).eq("shipment_code",id);
+    if(updateError) throw updateError;
+
+    // تحديث الـ local state
+    const s=shipments.find(x=>x.id===id);
+    if(s) s.podUrl=publicUrl;
+
+    await addTimelineEntry(id,"تم رفع إثبات التسليم");
+    await addNotification(`تم رفع إثبات تسليم شحنة ${id}`,"admin");
+
+    alert("✅ تم رفع الصورة بنجاح وحفظها في السحابة");
     render();
-
-  };
-
-});
-}
-window.manualTrackShipment = function () {
-
-  const code =
-    prompt("أدخل كود الشحنة");
-
-  if (!code) return;
-
-  window.location.href =
-    `${window.location.origin}?track=${code}`;
-};
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("./sw.js").catch(() => {});
-}
-window.updateShipmentStatus =
-  async function (id, status) {
-
-    const shipment =
-      shipments.find(
-        s => s.id === id
-      );
-
-    if (!shipment) return;
-
-    shipment.status = status;
-    notifications.unshift({
-
-  id: crypto.randomUUID(),
-
-  text:
-    `تم تحديث الشحنة ${shipment.id}
-     إلى ${
-       statusMeta[status]?.label
-     }`,
-
-  time:
-    new Date()
-      .toLocaleTimeString(),
-
-  role:
-    state.user?.role || "admin"
-
-});
-
-    shipment.timeline.push([
-      statusMeta[status].label,
-      new Date().toLocaleString("ar-EG")
-    ]);
-
-    if (status === "delivered") {
-      shipment.eta = "تم التسليم";
-    }
-    const whatsappMessage = `
-مرحبًا ${shipment.customerName}
-
-تم تحديث حالة الشحنة:
-${shipment.id}
-
-الحالة الجديدة:
-${statusMeta[status].label}
-
-شركة النخبة للشحن السريع
-`;
-
-window.open(
-  `https://wa.me/2${shipment.customerPhone}?text=${
-    encodeURIComponent(
-      whatsappMessage
-    )
-  }`
-);
-
-    await supabaseClient
-      .from("shipments")
-      .update({
-        status,
-        eta: shipment.eta
-      })
-      .eq("shipment_code", id);
-
-    render();
-};
-window.assignCourier =
-  async function (id) {
-
-    const courierId =
-      document.querySelector(
-        "#assignCourier"
-      ).value;
-
-    if (!courierId) {
-
-      alert("اختر مندوب");
-
-      return;
-    }
-
-    const shipment =
-      shipments.find(
-        s => s.id === id
-      );
-
-    if (!shipment) return;
-
-    shipment.courierId =
-      courierId;
-      console.log("assigned", shipment);
-localStorage.setItem(
-  `courier_${id}`,
-  courierId
-);
-    alert("تم تعيين المندوب");
-
-    render();
-};
-window.uploadPOD =
-  async function (id, inputId) {
-
-    const file =
-      document.querySelector(
-        `#${inputId}`
-      )?.files[0];
-
-    if (!file) {
-
-      alert("اختر صورة");
-
-      return;
-    }
-
-    const reader =
-      new FileReader();
-
-    reader.onload = function () {
-
-      const shipment =
-        shipments.find(
-          s => s.id === id
-        );
-
-      if (!shipment) return;
-
-      shipment.podImage =
-        reader.result;
-localStorage.setItem(
-  `pod_${id}`,
-  reader.result
-);
-      shipment.timeline.push([
-        "تم رفع إثبات التسليم",
-        new Date().toLocaleString("ar-EG")
-      ]);
-
-      alert("تم رفع الصورة");
-
-      render();
-    };
-
-    reader.readAsDataURL(file);
-};
-window.setStatusFilter =
-  function (status) {
-
-    state.statusFilter = status;
-
-    render();
-};
-async function loadShipments() {
-  const { data, error } = await supabaseClient
-    .from("shipments")
-    .select("*");
-
-  if (error) {
-    console.error(error);
-    return;
+  } catch(err) {
+    console.error("POD upload error:",err);
+    alert("خطأ في رفع الصورة: "+err.message);
+    if(btn){btn.textContent="📷 رفع إثبات";}
   }
+};
 
-  shipments = data.map((item) => ({
-    id: item.shipment_code,
-    merchantId: item.merchant_id,
-    courierId:
-  localStorage.getItem(
-    `courier_${item.shipment_code}`
-  ) || null,
-    customerId: null,
-    customerName: item.customer_name,
-    customerPhone: item.customer_phone,
-    address: item.address,
-    status:
-  item.status === "warehouse"
-    ? "hub"
-    : item.status,
-    amount: item.amount,
-    deliveryFee: item.delivery_fee,
-    createdAt: item.created_at,
-    eta: item.eta,
-    notes: item.notes,
-    podImage:
-  localStorage.getItem(
-    `pod_${item.shipment_code}`
-  ) || null,
-    timeline: [
+window.setStatusFilter = status => { state.statusFilter=status; render(); };
 
-  ["تم إنشاء الشحنة", item.created_at],
-
-  ...(item.status === "hub"
-    ? [["وصلت لمركز الفرز", item.created_at]]
-    : []),
-
-  ...(item.status === "out_for_delivery"
-    ? [["خرجت للتسليم", item.created_at]]
-    : []),
-
-  ...(item.status === "delivered"
-    ? [["تم التسليم", item.created_at]]
-    : [])
-
-]
+window.exportShipmentsExcel = () => {
+  if(!can("export_excel")){alert("غير مصرح");return;}
+  const data=visibleShipments().map(s=>({
+    "رقم الشحنة":     s.id,
+    "العميل":          s.customerName,
+    "الهاتف":          s.customerPhone,
+    "العنوان":         s.address,
+    "الحالة":          statusMeta[s.status]?.label||s.status,
+    "المبلغ (جنيه)":  s.amount,
+    "رسوم الشحن":     s.deliveryFee,
+    "موعد التسليم":   s.eta,
+    "إثبات التسليم":  s.podUrl||"لا يوجد"
   }));
+  const ws=XLSX.utils.json_to_sheet(data);
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,"Shipments");
+  XLSX.writeFile(wb,`nukhba_${new Date().toLocaleDateString("en-GB").replace(/\//g,"-")}.xlsx`);
+};
 
+window.deleteUser = id => {
+  if(!confirm("هل تريد حذف هذا المستخدم؟")) return;
+  users=users.filter(u=>u.id!==id);
+  localStorage.setItem("nukhba_users",JSON.stringify(users));
   render();
+};
+
+window.printShipment = async id => {
+  if(!can("print_shipment")){alert("غير مصرح");return;}
+  const s=shipments.find(x=>x.id===id); if(!s) return;
+  const label=document.createElement("div");
+  label.style.cssText="width:700px;padding:30px;background:#fff;direction:rtl;font-family:Arial;position:fixed;top:-9999px;left:0;";
+  label.innerHTML=`
+    <div style="border:2px solid #000;padding:20px;border-radius:14px;">
+      <h1 style="text-align:center;margin-bottom:20px;">النخبة إكسبريس</h1>
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div>
+          <p><b>رقم الشحنة:</b> ${escapeHtml(s.id)}</p>
+          <p><b>العميل:</b> ${escapeHtml(s.customerName)}</p>
+          <p><b>الهاتف:</b> ${escapeHtml(s.customerPhone)}</p>
+          <p><b>المبلغ:</b> ${s.amount} جنيه</p>
+          <p><b>رسوم الشحن:</b> ${s.deliveryFee} جنيه</p>
+          <p><b>العنوان:</b> ${escapeHtml(s.address)}</p>
+        </div>
+        <canvas id="printQR"></canvas>
+      </div>
+    </div>`;
+  document.body.appendChild(label);
+  await QRCode.toCanvas(document.querySelector("#printQR"),`${location.origin}${location.pathname}?track=${s.id}`,{width:150});
+  const canvas=await html2canvas(label);
+  const {jsPDF}=window.jspdf;
+  const pdf=new jsPDF("p","mm","a4");
+  pdf.addImage(canvas.toDataURL("image/png"),"PNG",10,10,190,120);
+  pdf.save(`${s.id}.pdf`);
+  label.remove();
+};
+
+// ══════════════════════════════════════════════════
+// LOAD DATA
+// ══════════════════════════════════════════════════
+async function loadShipments() {
+  try {
+    const {data,error}=await db.from("shipments").select("*").order("created_at",{ascending:false});
+    if(error) throw error;
+
+    shipments=data.map(item=>({
+      id:            item.shipment_code,
+      merchantId:    item.merchant_id,
+      courierId:     item.courier_id||null,
+      customerName:  item.customer_name||"",
+      customerPhone: item.customer_phone||"",
+      address:       item.address||"",
+      status:        item.status||"created",
+      amount:        item.amount||0,
+      deliveryFee:   item.delivery_fee||60,
+      eta:           item.eta||"",
+      notes:         item.notes||"",
+      podUrl:        item.pod_url||null,
+      createdAt:     item.created_at?new Date(item.created_at).toLocaleDateString("ar-EG"):"",
+    }));
+
+    if(!state.selectedShipment&&shipments.length) state.selectedShipment=shipments[0].id;
+    render();
+  } catch(err) {
+    console.error("loadShipments error:",err);
+    const app=document.querySelector("#app");
+    if(app&&state.user){
+      const bar=document.createElement("div");
+      bar.style.cssText="background:#fef2f2;color:#991b1b;padding:10px 16px;font-size:13px;text-align:center;";
+      bar.textContent="تعذر تحميل الشحنات. تحقق من الاتصال وأعد تحميل الصفحة.";
+      app.prepend(bar);
+    }
+    render();
+  }
 }
 
-loadShipments();
-window.exportShipmentsExcel =
-  function () {
+// ─── PWA ─────────────────────────────────────────
+if("serviceWorker"in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
 
-    const data =
-      visibleShipments().map(
-        shipment => ({
-
-          "رقم الشحنة":
-            shipment.id,
-
-          "العميل":
-            shipment.customerName,
-
-          "الهاتف":
-            shipment.customerPhone,
-
-          "العنوان":
-            shipment.address,
-
-          "الحالة":
-            statusMeta[
-              shipment.status
-            ]?.label,
-
-          "المبلغ":
-            shipment.amount,
-
-          "رسوم الشحن":
-            shipment.deliveryFee,
-
-          "الحالة الحالية":
-            shipment.eta
-
-        })
-      );
-
-    const worksheet =
-      XLSX.utils.json_to_sheet(
-        data
-      );
-
-    const workbook =
-      XLSX.utils.book_new();
-
-    XLSX.utils.book_append_sheet(
-      workbook,
-      worksheet,
-      "Shipments"
-    );
-
-    XLSX.writeFile(
-      workbook,
-      "shipments.xlsx"
-    );
-};
-window.deleteUser =
-  function (id) {
-
-    const index =
-      users.findIndex(
-        u => u.id === id
-      );
-
-    if (index === -1) return;
-
-    users.splice(index, 1);
-
-    render();
-
-};
+// ─── START ───────────────────────────────────────
+(async()=>{
+  await loadNotifications();
+  await loadShipments();
+})();
