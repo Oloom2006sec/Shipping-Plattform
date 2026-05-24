@@ -88,12 +88,22 @@ function roleName(r) {
 function setState(patch) { state={...state,...patch}; render(); }
 
 function determineRole(email) {
+  // fallback فقط لو مش لاقيين الـ profile — الـ role الحقيقي بييجي من profiles table
   if (!email) return "customer";
   const e = email.toLowerCase();
   if (e.startsWith("admin"))    return "admin";
   if (e.startsWith("merchant")) return "merchant";
   if (e.startsWith("courier"))  return "courier";
   return "customer";
+}
+
+// جيب الـ role من profiles table — ده الـ source of truth
+async function getRoleFromProfile(userId) {
+  try {
+    const {data,error} = await db.from("profiles").select("role,full_name,phone").eq("id",userId).single();
+    if (error || !data) return null;
+    return data;
+  } catch(e) { return null; }
 }
 
 // ─── Visible shipments ────────────────────────────
@@ -105,7 +115,8 @@ function visibleShipments() {
   // كل role يشوف بياناته بس
   if (role==="courier")  list = list.filter(s=>s.courierId===uid);
   if (role==="merchant") list = list.filter(s=>s.merchantId===uid);
-  if (role==="customer") list = list.filter(s=>s.customerId===uid || s.customerPhone===state.user?.phone);
+  // Customer مش بيشوف قائمة شحنات — بس يتتبع برقم الشحنة
+  if (role==="customer") list = [];
 
   return list.filter(s=>{
     const txt = `${s.id} ${s.customerName} ${s.customerPhone} ${s.address}`.toLowerCase();
@@ -237,7 +248,7 @@ function adminShell(content, views, unread) {
             </select>
             <div>
               <span class="eyebrow">مدير النظام</span>
-              <h2>أهلاً، ${escapeHtml(state.user.name)}</h2>
+              <h2>أهلاً، ${escapeHtml(state.user.name?.split(" ")[0]||state.user.name)}</h2>
             </div>
           </div>
           ${topbarRight(unread)}
@@ -249,18 +260,23 @@ function adminShell(content, views, unread) {
 }
 
 function simpleShell(content, views, unread) {
+  // اختصر الاسم لو طويل
+  const displayName = state.user.name?.length > 12
+    ? state.user.name.split(" ")[0]   // أول كلمة بس
+    : state.user.name;
+
   return `
     <div class="simple-layout">
       <header class="simple-topbar">
         <div class="brand-inline">
           ${icon("truck")}
           <strong>النخبة للشحن السريع</strong>
-          <span class="role-tag">${roleName(state.user.role)}</span>
         </div>
-        <div style="display:flex;align-items:center;gap:10px;">
-          <span style="font-size:13px;color:#666;">${escapeHtml(state.user.name)}</span>
+        <div class="topbar-user">
+          <span class="role-tag ${state.user.role}">${roleName(state.user.role)}</span>
+          <span class="user-name">${escapeHtml(displayName)}</span>
           ${topbarRight(unread)}
-          <button class="ghost-btn logout" id="logoutBtn" style="margin:0;">${icon("logout")}</button>
+          <button class="icon-btn" id="logoutBtn" title="خروج">${icon("logout")}</button>
         </div>
       </header>
       <nav class="tab-nav">
@@ -536,11 +552,17 @@ function detailsPanel(s) {
 function trackView() {
   const s = shipments.find(x=>x.id===state.selectedShipment);
   if (!s) return `
-    <section class="panel" style="text-align:center;padding:2rem;">
-      <h2 style="font-size:2rem;">📦</h2>
-      <h3>${state.selectedShipment?"الشحنة غير موجودة":"تتبع شحنتك"}</h3>
-      <p style="color:#888;margin:1rem 0;">أدخل رقم الشحنة لمعرفة حالتها</p>
-      <button class="primary-btn" onclick="manualTrackShipment()">🔍 تتبع شحنة</button>
+    <section class="panel" style="text-align:center;padding:3rem 2rem;">
+      <div style="font-size:4rem;margin-bottom:1rem;">📦</div>
+      <h2>${state.selectedShipment?"الشحنة غير موجودة":"تتبع شحنتك"}</h2>
+      <p style="color:#888;margin:1rem 0;font-size:15px;">
+        ${state.selectedShipment
+          ? "تأكد من رقم الشحنة وحاول مرة أخرى"
+          : "أدخل رقم الشحنة الذي أرسله لك التاجر"}
+      </p>
+      <button class="primary-btn" style="font-size:16px;padding:14px 32px;" onclick="manualTrackShipment()">
+        🔍 تتبع شحنة
+      </button>
     </section>`;
 
   const meta  = statusMeta[s.status]||{label:s.status,tone:"info"};
@@ -780,18 +802,24 @@ function bindEvents() {
       if(err){err.style.display="block";err.textContent="بيانات الدخول غير صحيحة";}
       return;
     }
-    const role = determineRole(data.user.email);
+    // جيب الـ role من profiles table أولاً
+    const profile = await getRoleFromProfile(data.user.id);
+    const role = profile?.role || determineRole(data.user.email);
+    const name = profile?.full_name || data.user.user_metadata?.full_name || data.user.email.split("@")[0];
+    const phone = profile?.phone || "";
+
     const user = {
-      id:   data.user.id,
-      name: data.user.user_metadata?.full_name || data.user.email.split("@")[0],
+      id:    data.user.id,
+      name,
       role,
-      email:data.user.email,
-      phone:data.user.email,
-      balance:0
+      email: data.user.email,
+      phone,
+      balance: 0
     };
     localStorage.setItem("nukhba_session",JSON.stringify(user));
     if (role==="admin") await loadUsers();
-    setState({user, view:role==="customer"||role==="courier"?"tasks":role==="merchant"?"shipments":"overview"});
+    const startView = role==="customer"?"track":role==="courier"?"tasks":role==="merchant"?"shipments":"overview";
+    setState({user, view:startView});
   });
 
   // ── Register ──
