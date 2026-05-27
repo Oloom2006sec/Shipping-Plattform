@@ -401,8 +401,8 @@ function homePage() {
         </div>
         <div class="footer-col">
           <h4>تواصل معنا</h4>
-          <a href="tel:+20100000000">📞 01000000000</a>
-          <a href="https://wa.me/20100000000" target="_blank">💬 واتساب</a>
+          <a href="tel:+201061004311">📞 01061004311</a>
+          <a href="https://wa.me/201061004311" target="_blank">💬 واتساب</a>
           <a href="mailto:info@nukhba.com">✉️ info@nukhba.com</a>
         </div>
       </div>
@@ -412,7 +412,7 @@ function homePage() {
     </footer>
 
     <!-- WhatsApp float -->
-    <a href="https://wa.me/20100000000" target="_blank" class="wa-float" title="تواصل عبر واتساب">💬</a>
+    <a href="https://wa.me/201061004311" target="_blank" class="wa-float" title="تواصل عبر واتساب">💬</a>
   </div>`;
 }
 
