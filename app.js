@@ -1,721 +1,913 @@
 // ═══════════════════════════════════════════════════════════
-// AL-NUKHBA EXPRESS — app.js v5
-// Production-ready | Auth-guarded | Professional UI
+// AL-NUKHBA EXPRESS — app.js v6
+// Clean Architecture · Fixed FK · Real Couriers · Pro UI
 // ═══════════════════════════════════════════════════════════
 
 const SUPABASE_URL = "https://urktddxiyzwsilddamci.supabase.co";
 const SUPABASE_KEY = "sb_publishable_-0wKJXXI18TuHK7pe-dKYw_HWyjH79u";
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// ─── Global state ─────────────────────────────────────────
-let users         = [];
-let shipments     = [];
-let notifications = [];
-let realtimeChannel = null;
-
-// ─── App state machine ────────────────────────────────────
-let state = {
-  page:             "home",       // home | auth | dashboard
-  authMode:         "login",      // login | register
-  user:             null,
-  view:             "overview",
-  query:            "",
-  statusFilter:     "all",
-  selectedShipment: null,
-  userFilter:       "",
-  auditFilter:      "",
-  loading:          false
+// ── CONFIG ────────────────────────────────────────────────
+const STATUS_MAP = {
+  created:          { label:"تم إنشاء الشحنة",  badge:"badge-info",    step:0 },
+  received:         { label:"تم الاستلام",       badge:"badge-warning", step:1 },
+  warehouse:        { label:"في المخزن",         badge:"badge-warning", step:2 },
+  hub:              { label:"مركز الفرز",        badge:"badge-brand",   step:3 },
+  out_for_delivery: { label:"خرجت للتسليم",      badge:"badge-brand",   step:4 },
+  delivered:        { label:"تم التسليم",        badge:"badge-success", step:5 },
+  returned:         { label:"مرتجع",             badge:"badge-danger",  step:6 },
+  cancelled:        { label:"ملغية",             badge:"badge-gray",    step:-1 }
 };
 
-// ─── Status definitions ───────────────────────────────────
-const STATUS = {
-  created:          { label:"تم إنشاء الشحنة",  en:"Created",          tone:"info"    },
-  received:         { label:"تم استلام الشحنة", en:"Received",         tone:"warning" },
-  warehouse:        { label:"في المخزن",         en:"In Warehouse",     tone:"warning" },
-  hub:              { label:"مركز الفرز",        en:"Hub Sorting",      tone:"primary" },
-  out_for_delivery: { label:"خرجت للتسليم",     en:"Out for Delivery", tone:"primary" },
-  delivered:        { label:"تم التسليم",        en:"Delivered",        tone:"success" },
-  returned:         { label:"مرتجع",             en:"Returned",         tone:"danger"  }
+const STATUS_STEPS = ["created","received","warehouse","hub","out_for_delivery","delivered"];
+
+const ROLE_MAP = {
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","reports","users","audit","track"] },
+  merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","accounts"] },
+  courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
+  customer: { label:"عميل",  badge:"badge-info",    nav:["track","accounts"] }
 };
 
-// ─── Navigation ───────────────────────────────────────────
-const NAV = {
-  admin:    [{id:"overview",label:"الرئيسية",icon:"chart"},{id:"shipments",label:"الشحنات",icon:"box"},
-             {id:"tasks",label:"المهام",icon:"truck"},{id:"accounts",label:"الحساب",icon:"wallet"},
-             {id:"reports",label:"التقارير",icon:"chart"},{id:"users",label:"المستخدمين",icon:"user"},
-             {id:"audit",label:"سجل النشاط",icon:"shield"},{id:"track",label:"تتبع",icon:"search"}],
-  merchant: [{id:"overview",label:"الرئيسية",icon:"chart"},{id:"shipments",label:"الشحنات",icon:"box"},
-             {id:"accounts",label:"الحساب",icon:"wallet"}],
-  courier:  [{id:"tasks",label:"مهامي",icon:"truck"},{id:"accounts",label:"الحساب",icon:"wallet"}],
-  customer: [{id:"track",label:"تتبع شحنة",icon:"search"},{id:"accounts",label:"حسابي",icon:"wallet"}]
+const NAV_LABELS = {
+  overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
+  accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
+  audit:"سجل النشاط",  track:"تتبع"
 };
 
-// ─── RBAC ─────────────────────────────────────────────────
-const PERMS = {
-  admin:    ["create_shipment","edit_shipment","delete_shipment","assign_courier","view_reports",
-             "manage_users","export_excel","change_status","view_all","print_shipment","view_audit",
-             "manage_roles","suspend_user"],
-  merchant: ["create_shipment","view_own","track","view_accounts","print_shipment","change_status"],
-  courier:  ["view_assigned","change_status","upload_pod","navigation"],
-  customer: ["track"]
+// Live permission set — loaded from DB on login via get_user_permissions(uid)
+// Fallback used only if DB call fails (e.g. network error on first load)
+const PERMS_FALLBACK = {
+  admin:    ["shipments.view_all","shipments.create","shipments.edit","shipments.delete",
+             "shipments.cancel","shipments.change_status","shipments.assign_courier",
+             "shipments.print","shipments.export","shipments.upload_pod","shipments.view_internal",
+             "finance.view","finance.export","finance.settle","finance.manage",
+             "users.view","users.create","users.edit","users.delete","users.suspend","users.assign_roles",
+             "roles.view","roles.create","roles.edit","roles.delete",
+             "reports.view","reports.courier_perf","reports.merchant_perf","reports.financial","reports.operational",
+             "tracking.public","navigation.maps","audit.view","settings.view","settings.manage"],
+  merchant: ["shipments.view_own","shipments.create","shipments.print","shipments.export",
+             "finance.view","finance.settle","reports.view","reports.merchant_perf","tracking.public"],
+  courier:  ["shipments.view_assigned","shipments.change_status","shipments.upload_pod",
+             "navigation.maps","tracking.public","finance.view"],
+  customer: ["tracking.public"]
 };
 
-function can(p) { return !!PERMS[state.user?.role]?.includes(p); }
+// Active permission set (populated from DB on login)
+const AppPerms = new Set();
 
-// ─── Helpers ──────────────────────────────────────────────
-const money = v => new Intl.NumberFormat("ar-EG",{style:"currency",currency:"EGP",maximumFractionDigits:0}).format(v||0);
+async function loadUserPermissions(userId) {
+  try {
+    const { data, error } = await db.rpc("get_user_permissions", { p_user_id: userId });
+    if (error) throw error;
+    AppPerms.clear();
+    (data || []).forEach(p => AppPerms.add(p.code));
+    return true;
+  } catch(e) {
+    console.warn("loadUserPermissions failed, using fallback:", e.message);
+    // Fallback: use hardcoded set for the primary role
+    AppPerms.clear();
+    const role = AppState.user?.primary_role || AppState.user?.role || "customer";
+    (PERMS_FALLBACK[role] || PERMS_FALLBACK.customer).forEach(p => AppPerms.add(p));
+    return false;
+  }
+}
+
+const EGYPT_GOV = {
+  "القاهرة":["مدينة نصر","المعادي","حلوان","شبرا","مصر الجديدة","التجمع"],
+  "الجيزة":["الدقي","العجوزة","الهرم","الشيخ زايد","6 أكتوبر","إمبابة"],
+  "الإسكندرية":["المنتزه","برج العرب","العجمي","سيدي جابر","الرمل","اللبان"],
+  "الدقهلية":["المنصورة","طلخا","ميت غمر","أجا","السنبلاوين"],
+  "البحيرة":["دمنهور","أبو حمص","كفر الدوار","الرحمانية"],
+  "الشرقية":["الزقازيق","العاشر من رمضان","أبو كبير","فاقوس"],
+  "الغربية":["طنطا","المحلة الكبرى","كفر الزيات","زفتى"],
+  "المنوفية":["شبين الكوم","مينوف","قويسنا","الباجور"],
+  "القليوبية":["بنها","القناطر الخيرية","شبرا الخيمة","طوخ"],
+  "الإسماعيلية":["الإسماعيلية","فايد","القنطرة","التل الكبير"],
+  "السويس":["السويس","الجناين","عتاقة","الأربعين"],
+  "بورسعيد":["بورسعيد","بورفؤاد","المناخ"],
+  "دمياط":["دمياط","فارسكور","الزرقا","رأس البر"],
+  "كفر الشيخ":["كفر الشيخ","دسوق","قلين","فوه"],
+  "الفيوم":["الفيوم","طامية","سنورس"],
+  "بني سويف":["بني سويف","ناصر","الفشن"],
+  "المنيا":["المنيا","ملوي","سمالوط","أبو قرقاص"],
+  "أسيوط":["أسيوط","ديروط","أبو تيج"],
+  "سوهاج":["سوهاج","طهطا","أخميم","جرجا"],
+  "قنا":["قنا","نجع حمادي","دشنا","قوص"],
+  "أسوان":["أسوان","إدفو","كوم أمبو"],
+  "الأقصر":["الأقصر","إسنا","أرمنت"],
+  "البحر الأحمر":["الغردقة","سفاجا","مرسى علم"],
+  "مطروح":["مرسى مطروح","سيوة","الحمام"],
+  "شمال سيناء":["العريش","رفح","بئر العبد"],
+  "جنوب سيناء":["شرم الشيخ","دهب","طابا"],
+  "الوادي الجديد":["الخارجة","الداخلة","الفرافرة"]
+};
+
+// ── STATE ─────────────────────────────────────────────────
+const AppState = {
+  page:"home", authMode:"login", user:null, view:"overview",
+  query:"", statusFilter:"all", selectedShipment:null,
+  userFilter:"", auditFilter:"",
+  shipments:[], users:[], couriers:[], notifications:[],
+  realtimeChannel:null,
+};
+
+// ── UTILS ─────────────────────────────────────────────────
+const $  = id  => document.getElementById(id);
+const $$ = sel => document.querySelectorAll(sel);
 
 function esc(s) {
-  if (!s) return "";
-  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
-                  .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+  if (s == null) return "";
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+}
+
+const money = v =>
+  new Intl.NumberFormat("ar-EG",{style:"currency",currency:"EGP",maximumFractionDigits:0}).format(v||0);
+
+const pct = (a,b) => b>0 ? Math.round((a/b)*100) : 0;
+
+function fmtDate(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleDateString("ar-EG",{year:"numeric",month:"short",day:"numeric"});
+}
+function fmtTime(d) {
+  if (!d) return "—";
+  return new Date(d).toLocaleString("ar-EG");
+}
+function initials(name) {
+  if (!name) return "؟";
+  const p = name.trim().split(" ");
+  return p.length>=2 ? p[0][0]+p[1][0] : p[0][0];
 }
 
 const ICONS = {
-  box:    "M20.5 7.3 12 2.5 3.5 7.3 12 12.1l8.5-4.8ZM3.5 7.3v9.4L12 21.5v-9.4L3.5 7.3Zm17 0L12 12.1v9.4l8.5-4.8V7.3Z",
-  truck:  "M3 7h11v9H3V7Zm11 3h4l3 4v2h-7v-6ZM6 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
-  user:   "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 9a7 7 0 0 1 14 0H5Z",
-  wallet: "M4 6h15a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6Zm13 7h4v-2h-4a2 2 0 0 0 0 4h4v-2h-4Z",
-  search: "M10 4a6 6 0 1 0 3.7 10.7l4.8 4.8 1.4-1.4-4.8-4.8A6 6 0 0 0 10 4Z",
-  plus:   "M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z",
-  chart:  "M4 19V5h2v14H4Zm7 0V9h2v10h-2Zm7 0V3h2v16h-2Z",
-  logout: "M5 4h8v2H7v12h6v2H5V4Zm10.5 4.5L20 13l-4.5 4.5-1.4-1.4 2.1-2.1H10v-2h6.2l-2.1-2.1 1.4-1.4Z",
-  bell:   "M12 2a7 7 0 0 1 7 7v4l2 2v1H3v-1l2-2V9a7 7 0 0 1 7-7Zm0 20a2 2 0 0 1-2-2h4a2 2 0 0 1-2 2Z",
-  edit:   "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83Z",
-  trash:  "M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z",
-  shield: "M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4Z",
-  log:    "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm4 18H6V4h7v5h5v11ZM8 15h8v2H8zm0-4h8v2H8z",
-  menu:   "M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"
+  box:     "M20.5 7.3 12 2.5 3.5 7.3 12 12.1l8.5-4.8ZM3.5 7.3v9.4L12 21.5v-9.4L3.5 7.3Zm17 0L12 12.1v9.4l8.5-4.8V7.3Z",
+  truck:   "M3 7h11v9H3V7Zm11 3h4l3 4v2h-7v-6ZM6 19a2 2 0 1 0 0-4 2 2 0 0 0 0 4Zm12 0a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
+  user:    "M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 9a7 7 0 0 1 14 0H5Z",
+  users:   "M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3Zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3Zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5Zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5Z",
+  wallet:  "M4 6h15a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6Zm13 7h4v-2h-4a2 2 0 0 0 0 4h4v-2h-4Z",
+  search:  "M10 4a6 6 0 1 0 3.7 10.7l4.8 4.8 1.4-1.4-4.8-4.8A6 6 0 0 0 10 4Z",
+  plus:    "M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z",
+  chart:   "M4 19V5h2v14H4Zm7 0V9h2v10h-2Zm7 0V3h2v16h-2Z",
+  logout:  "M5 4h8v2H7v12h6v2H5V4Zm10.5 4.5L20 13l-4.5 4.5-1.4-1.4 2.1-2.1H10v-2h6.2l-2.1-2.1 1.4-1.4Z",
+  bell:    "M12 2a7 7 0 0 1 7 7v4l2 2v1H3v-1l2-2V9a7 7 0 0 1 7-7Zm0 20a2 2 0 0 1-2-2h4a2 2 0 0 1-2 2Z",
+  edit:    "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25ZM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83Z",
+  trash:   "M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12ZM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4Z",
+  shield:  "M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4Z",
+  log:     "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Zm4 18H6V4h7v5h5v11ZM8 15h8v2H8zm0-4h8v2H8z",
+  menu:    "M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z",
+  close:   "M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
+  phone:   "M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2Z",
+  map:     "M20.5 3l-.16.03L15 5.1 9 3 3.36 4.9c-.21.07-.36.25-.36.48V20.5c0 .28.22.5.5.5l.16-.03L9 18.9l6 2.1 5.64-1.9c.21-.07.36-.25.36-.48V3.5c0-.28-.22-.5-.5-.5zM15 19l-6-2.11V5l6 2.11V19z",
+  qr:      "M3 11V3h8v8H3Zm2-6v4h4V5H5Zm8-2h8v8h-8V3Zm2 2v4h4V5h-4ZM3 21v-8h8v8H3Zm2-6v4h4v-4H5Zm13 0h-2v-2h2v2Zm0 4h-2v-2h2v2Zm2 2h-2v-2h2v2Zm0-4h-2v-2h2v2Zm-4-4h-2v-2h2v2Zm4 0h-2v-2h2v2Z",
+  pkg:     "M17 4H7c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm-3 9h-2v2H8v-2H6v-2h2V9h4v2h2v2z",
+  refresh: "M17.65 6.35A7.958 7.958 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"
 };
 
-function icon(name, size=18) {
-  return `<svg viewBox="0 0 24 24" style="width:${size}px;height:${size}px;fill:currentColor;flex-shrink:0;"><path d="${ICONS[name]||ICONS.box}"/></svg>`;
+function icon(name, size=16) {
+  const d = ICONS[name]||ICONS.box;
+  return `<svg viewBox="0 0 24 24" style="width:${size}px;height:${size}px;fill:currentColor;flex-shrink:0;"><path d="${d}"/></svg>`;
 }
 
-function roleName(r) { return {admin:"إدارة",merchant:"تاجر",courier:"مندوب",customer:"عميل"}[r]||r; }
-function roleColor(r){ return {admin:"danger",merchant:"success",courier:"primary",customer:"info"}[r]||"info"; }
+// Permission code aliases — maps legacy UI checks to new DB codes.
+// Add new aliases here when new permissions are created in the DB.
+const PERM_ALIAS = {
+  // Legacy → new DB code
+  "create_shipment":  "shipments.create",
+  "edit_shipment":    "shipments.edit",
+  "delete_shipment":  "shipments.delete",
+  "assign_courier":   "shipments.assign_courier",
+  "change_status":    "shipments.change_status",
+  "upload_pod":       "shipments.upload_pod",
+  "print_shipment":   "shipments.print",
+  "export_excel":     "shipments.export",
+  "view_all":         "shipments.view_all",
+  "view_own":         "shipments.view_own",
+  "view_assigned":    "shipments.view_assigned",
+  "view_internal":    "shipments.view_internal",
+  "manage_users":     "users.view",
+  "view_reports":     "reports.view",
+  "view_audit":       "audit.view",
+  "navigation":       "navigation.maps",
+  "track":            "tracking.public",
+  "view_accounts":    "finance.view",
+};
 
-// ─── Toast ────────────────────────────────────────────────
-function toast(msg, type="success") {
-  const t = document.createElement("div");
-  t.className = `toast toast-${type}`;
-  t.textContent = msg;
-  document.body.appendChild(t);
-  requestAnimationFrame(()=>{ requestAnimationFrame(()=>t.classList.add("show")); });
-  setTimeout(()=>{ t.classList.remove("show"); setTimeout(()=>t.remove(),350); }, 3500);
-}
-
-// ─── Auth guard ───────────────────────────────────────────
-function getSession() {
-  try { return JSON.parse(localStorage.getItem("nukhba_v5")||"null"); } catch(e) { return null; }
-}
-function saveSession(user) {
-  localStorage.setItem("nukhba_v5", JSON.stringify(user));
-}
-function clearSession() {
-  localStorage.removeItem("nukhba_v5");
-  localStorage.removeItem("nukhba_session"); // clear old key too
-}
-
-// ─── Role from Supabase profiles ──────────────────────────
-async function getProfile(uid) {
-  try {
-    const {data} = await db.from("profiles").select("role,full_name,phone,suspended").eq("id",uid).single();
-    return data;
-  } catch(e) { return null; }
-}
-
-function fallbackRole(email) {
-  if (!email) return "customer";
-  const e = email.toLowerCase();
-  if (e.startsWith("admin"))    return "admin";
-  if (e.startsWith("merchant")) return "merchant";
-  if (e.startsWith("courier"))  return "courier";
-  return "customer";
+function can(p) {
+  if (!AppState.user) return false;
+  // Resolve alias if provided (legacy code path)
+  const resolved = PERM_ALIAS[p] || p;
+  // Check live DB permission set first
+  if (AppPerms.size > 0) return AppPerms.has(resolved);
+  // Fallback: check hardcoded set for primary role
+  const role = AppState.user.primary_role || AppState.user.role || "customer";
+  const fallback = PERMS_FALLBACK[role] || [];
+  return fallback.includes(resolved) || fallback.includes(p);
 }
 
-// ─── Audit ────────────────────────────────────────────────
-async function audit(action, targetId="", details="") {
-  if (!state.user) return;
-  try {
-    await db.from("audit_logs").insert([{
-      user_id:  state.user.id,
-      username: state.user.name,
-      role:     state.user.role,
-      action, target_id:String(targetId), details
-    }]);
-  } catch(e) { console.warn("Audit:", e.message); }
+// ── TOAST ─────────────────────────────────────────────────
+function ensureToastWrap() {
+  let w=document.querySelector(".toast-wrap");
+  if(!w){w=document.createElement("div");w.className="toast-wrap";document.body.appendChild(w);}
+  return w;
+}
+function toast(msg, type="success", duration=3500) {
+  const wrap=ensureToastWrap();
+  const el=document.createElement("div");
+  el.className=`toast toast-${type}`;
+  el.textContent=msg;
+  wrap.appendChild(el);
+  requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.add("show")));
+  setTimeout(()=>{el.classList.remove("show");setTimeout(()=>el.remove(),350);},duration);
 }
 
-// ─── Push notifications ───────────────────────────────────
-async function askPush() {
-  if (!("Notification" in window) || Notification.permission!=="default") return;
-  await Notification.requestPermission();
-}
-function push(title, body) {
-  if (Notification.permission!=="granted") return;
-  try { new Notification(title, {body, dir:"rtl", icon:"./icon.svg"}); } catch(e) {}
+// ── SESSION ───────────────────────────────────────────────
+function getSession()   { try{return JSON.parse(localStorage.getItem("nukhba_v6")||"null");}catch(e){return null;} }
+function saveSession(u) { localStorage.setItem("nukhba_v6",JSON.stringify(u)); }
+function clearSession() { ["nukhba_v6","nukhba_v5","nukhba_session"].forEach(k=>localStorage.removeItem(k)); }
+
+// ── DATABASE SERVICES ─────────────────────────────────────
+const DB = {
+  async getProfile(uid) {
+    try{const{data}=await db.from("profiles").select("*").eq("id",uid).single();return data;}
+    catch(e){return null;}
+  },
+  async loadShipments() {
+    const{data,error}=await db.from("shipments").select("*").order("created_at",{ascending:false});
+    if(error)throw error;
+    return data.map(mapRow);
+  },
+  async loadCouriers() {
+    const{data,error}=await db.from("profiles")
+      .select("id,full_name,phone,email,is_active")
+      .eq("role","courier").eq("is_active",true).order("full_name");
+    if(error){console.warn("loadCouriers:",error.message);return[];}
+    return data||[];
+  },
+  async loadUsers() {
+    const{data,error}=await db.from("profiles").select("*").order("created_at",{ascending:false});
+    if(error){console.warn("loadUsers:",error.message);return[];}
+    return(data||[]).map(u=>({
+      id:u.id,name:u.full_name||"—",email:u.email||"—",phone:u.phone||"—",
+      role:u.role||"customer",isActive:u.is_active!==false,suspended:u.is_suspended||false,
+      createdAt:fmtDate(u.created_at),balance:0
+    }));
+  },
+  async loadNotifications(role) {
+    if(role==="customer")return[];
+    let q=db.from("notifications").select("*").order("created_at",{ascending:false}).limit(20);
+    if(role==="courier")       q=q.eq("recipient_role","courier");
+    else if(role==="merchant") q=q.in("recipient_role",["merchant","admin"]);
+    const{data}=await q;
+    return(data||[]).map(n=>({
+      text:n.body||n.text||"",
+      role:n.recipient_role||n.role||"admin",
+      time:fmtTime(n.created_at),
+      isRead:n.is_read||false
+    }));
+  },
+  async createShipment(data) {
+    const{error}=await db.from("shipments").insert([data]);
+    if(error)throw error;
+  },
+  async updateShipment(code,patch) {
+    const{error}=await db.from("shipments").update({...patch,updated_at:new Date().toISOString()}).eq("shipment_code",code);
+    if(error)throw error;
+  },
+  async addTimeline(code,event,actorName="",actorRole="",eventType="status_change") {
+    try{await db.from("shipment_timeline").insert([{
+      shipment_code:code, event, event_type:eventType,
+      actor_id:AppState.user?.id||null,
+      actor_name:actorName, actor_role:actorRole
+    }]);}
+    catch(e){console.warn("timeline:",e.message);}
+  },
+  async loadTimeline(code) {
+    const{data}=await db.from("shipment_timeline")
+      .select("*").eq("shipment_code",code).order("created_at",{ascending:true});
+    return data||[];
+  },
+  async addNotification(body,recipientRole="admin",referenceId="",type="info") {
+    try{await db.from("notifications").insert([{
+      body, recipient_role:recipientRole,
+      reference_id:referenceId, type
+    }]);}
+    catch(e){console.warn("notif:",e.message);}
+  },
+  async addAudit(action, entityId="", details="", entityType="shipment") {
+    if (!AppState.user) return;
+    try {
+      await db.from("audit_logs").insert([{
+        actor_id:    AppState.user.id,
+        actor_name:  AppState.user.name,
+        actor_role:  AppState.user.primary_role || AppState.user.role,
+        action,
+        entity_type: entityType,
+        entity_id:   String(entityId),
+        details
+      }]);
+    } catch(e) { console.warn("audit:", e.message); }
+  },
+  async loadAuditLogs(filter="") {
+    const{data,error}=await db.from("audit_logs").select("*").order("created_at",{ascending:false}).limit(300);
+    if(error)throw error;
+    const logs=data||[];
+    if(!filter)return logs;
+    const f=filter.toLowerCase();
+    return logs.filter(l=>`${l.actor_name} ${l.action} ${l.entity_id} ${l.actor_role} ${l.details}`.toLowerCase().includes(f));
+  },
+  async uploadPOD(shipmentCode,file) {
+    const ext=file.name.split(".").pop()||"jpg";
+    const path=`pod_${shipmentCode}_${Date.now()}.${ext}`;
+    const{error:upErr}=await db.storage.from("pod-images").upload(path,file,{upsert:true});
+    if(upErr)throw upErr;
+    const{data}=db.storage.from("pod-images").getPublicUrl(path);
+    return data.publicUrl;
+  }
+};
+
+function mapRow(r) {
+  return {
+    id:r.shipment_code, merchantId:r.merchant_id||null,
+    merchantName:r.merchant_name||"", merchantPhone:r.merchant_phone||"",
+    courierId:r.courier_id||null, courierName:r.courier_name||"",
+    customerName:r.customer_name||"", customerPhone:r.customer_phone||"",
+    customerPhone2:r.customer_phone2||"", address:r.address||"",
+    governorate:r.governorate||"", city:r.city||"", street:r.street||"",
+    building:r.building||"", floor:r.floor||"", apartment:r.apartment||"",
+    amount:Number(r.amount)||0, deliveryFee:Number(r.delivery_fee)||60,
+    status:r.status||"created", eta:r.eta||"", attempts:r.attempts||0,
+    podUrl:r.pod_url||null, notes:r.notes||"",
+    createdBy:r.created_by||null, createdAt:r.created_at, updatedAt:r.updated_at,
+  };
 }
 
-// ─── Real-time ────────────────────────────────────────────
+// ── VISIBLE SHIPMENTS ─────────────────────────────────────
+function visible() {
+  let list=[...AppState.shipments];
+  const{role,id:uid}=AppState.user||{};
+  if(role==="courier") list=list.filter(s=>s.courierId===uid);
+  if(role==="merchant")list=list.filter(s=>s.merchantId===uid);
+  if(role==="customer")return[];
+  const q=AppState.query.trim().toLowerCase();
+  return list.filter(s=>{
+    const txt=`${s.id} ${s.customerName} ${s.customerPhone} ${s.customerPhone2} ${s.address} ${s.governorate}`.toLowerCase();
+    return(!q||txt.includes(q))&&(AppState.statusFilter==="all"||s.status===AppState.statusFilter);
+  });
+}
+
+// ── REALTIME ──────────────────────────────────────────────
 function startRealtime() {
-  if (realtimeChannel) return;
-  realtimeChannel = db.channel("rt")
-    .on("postgres_changes",{event:"INSERT",schema:"public",table:"shipments"}, p=>{
-      const s = mapRow(p.new);
-      shipments.unshift(s);
-      addNotif(`شحنة جديدة: ${s.id} — ${s.customerName}`,"admin");
-      push("📦 شحنة جديدة", s.id+" — "+s.customerName);
-      if(state.user?.role==="admin") render();
+  if(AppState.realtimeChannel)return;
+  AppState.realtimeChannel=db.channel("rt_v6")
+    .on("postgres_changes",{event:"INSERT",schema:"public",table:"shipments"},p=>{
+      const s=mapRow(p.new);AppState.shipments.unshift(s);
+      DB.addNotification(`شحنة جديدة: ${s.id} — ${s.customerName}`,"admin");
+      if(AppState.user?.role==="admin")rerenderContent();
     })
-    .on("postgres_changes",{event:"UPDATE",schema:"public",table:"shipments"}, p=>{
-      const idx = shipments.findIndex(s=>s.id===p.new.shipment_code);
-      if(idx>=0){ shipments[idx]={...shipments[idx],...mapRow(p.new)}; render(); }
+    .on("postgres_changes",{event:"UPDATE",schema:"public",table:"shipments"},p=>{
+      const idx=AppState.shipments.findIndex(s=>s.id===p.new.shipment_code);
+      if(idx>=0){AppState.shipments[idx]={...AppState.shipments[idx],...mapRow(p.new)};rerenderContent();}
     })
     .subscribe();
 }
 
-// ─── Map DB row → shipment object ─────────────────────────
-function mapRow(item) {
-  return {
-    id:             item.shipment_code,
-    merchantId:     item.merchant_id||null,
-    merchantName:   item.merchant_name||"",
-    merchantPhone:  item.merchant_phone||"",
-    courierId:      item.courier_id||null,
-    customerName:   item.customer_name||"",
-    customerPhone:  item.customer_phone||"",
-    customerPhone2: item.customer_phone2||"",
-    address:        item.address||"",
-    status:         item.status||"created",
-    amount:         Number(item.amount)||0,
-    deliveryFee:    Number(item.delivery_fee)||60,
-    eta:            item.eta||"",
-    notes:          item.notes||"",
-    podUrl:         item.pod_url||null,
-    createdAt:      item.created_at ? new Date(item.created_at).toLocaleDateString("ar-EG") : ""
-  };
-}
+// ── SESSION ───────────────────────────────────────────────
+function getSession()   { try{return JSON.parse(localStorage.getItem("nukhba_v6")||"null");}catch(e){return null;} }
+function saveSession(u) { localStorage.setItem("nukhba_v6",JSON.stringify(u)); }
+function clearSession() { ["nukhba_v6","nukhba_v5","nukhba_session"].forEach(k=>localStorage.removeItem(k)); }
 
-// ─── Visible shipments ────────────────────────────────────
-function visible() {
-  let list = [...shipments];
-  const {role, id:uid} = state.user||{};
-  if (role==="courier")  list = list.filter(s=>s.courierId===uid);
-  if (role==="merchant") list = list.filter(s=>s.merchantId===uid);
-  if (role==="customer") return []; // customer uses track page only
-  return list.filter(s=>{
-    const txt = `${s.id} ${s.customerName} ${s.customerPhone} ${s.customerPhone2} ${s.address}`.toLowerCase();
-    return txt.includes(state.query.trim().toLowerCase()) &&
-           (state.statusFilter==="all" || s.status===state.statusFilter);
-  });
-}
-
-// ═══════════════════════════════════════════════════════════
-// HOMEPAGE (public landing page)
-// ═══════════════════════════════════════════════════════════
-function homePage() {
-  return `
-  <div class="homepage">
-    <!-- Navbar -->
-    <nav class="home-nav">
-      <div class="nav-brand">
-        ${icon("truck",32)}
-        <span>النخبة للشحن السريع</span>
-      </div>
-      <div class="nav-links">
+// ══════════════════════════════════════════════════════════
+// HOMEPAGE
+// ══════════════════════════════════════════════════════════
+function renderHomepage() {
+  const govOpts=Object.keys(EGYPT_GOV).map(g=>`<option value="${g}">${g}</option>`).join("");
+  document.querySelector("#app").innerHTML=`
+  <div class="hp">
+    <nav class="hp-nav">
+      <div class="hp-nav-brand">${icon("truck",28)}<span>النخبة للشحن السريع</span></div>
+      <div class="hp-nav-links">
         <a href="#services">خدماتنا</a>
-        <a href="#features">المميزات</a>
-        <a href="#track-section">تتبع شحنة</a>
-        <a href="#contact">تواصل معنا</a>
-        <a href="#" id="navLoginBtn" class="nav-cta">تسجيل الدخول</a>
+        <a href="#hp-track">تتبع</a>
+        <a href="#" id="navLogin" class="hp-nav-cta">دخول</a>
       </div>
-      <button class="menu-toggle" id="mobileMenuBtn">${icon("menu")}</button>
     </nav>
-
-    <!-- Hero -->
-    <section class="home-hero">
-      <div class="hero-content">
-        <div class="hero-badge">🚀 <span>أسرع خدمة شحن في مصر</span></div>
-        <h1>شحن سريع وموثوق<br/><span>في كل مكان</span></h1>
-        <p>منصة لوجستية متكاملة تربط التجار بالمناديب والعملاء بأعلى كفاءة وشفافية.</p>
-        <div class="hero-actions">
-          <button class="btn-hero-primary" id="heroRegisterBtn">ابدأ الآن مجاناً</button>
-          <button class="btn-hero-ghost" id="heroTrackBtn">تتبع شحنتي</button>
-        </div>
-        <div class="hero-track-box">
-          <h3>📦 تتبع شحنتك الآن</h3>
-          <div class="track-input-row">
-            <input id="heroTrackInput" placeholder="أدخل رقم الشحنة..." type="text"/>
-            <button id="heroTrackSubmit">تتبع</button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Stats -->
-    <div class="home-stats">
-      <div class="home-stat"><div class="stat-num">+10K</div><div class="stat-lbl">شحنة تم تسليمها</div></div>
-      <div class="home-stat"><div class="stat-num">+500</div><div class="stat-lbl">تاجر موثوق</div></div>
-      <div class="home-stat"><div class="stat-num">98%</div><div class="stat-lbl">نسبة رضا العملاء</div></div>
-      <div class="home-stat"><div class="stat-num">24/7</div><div class="stat-lbl">دعم مستمر</div></div>
-    </div>
-
-    <!-- Services -->
-    <section class="home-section" id="services">
-      <p class="section-label">خدماتنا</p>
-      <h2 class="section-title">كل ما تحتاجه لإدارة شحناتك</h2>
-      <p class="section-sub">من إنشاء الشحنة حتى التسليم النهائي، كل شيء في مكان واحد.</p>
-      <div class="services-grid">
-        <div class="service-card">
-          <div class="service-icon">${icon("truck",24)}</div>
-          <h3>توصيل سريع</h3>
-          <p>توصيل خلال 24-48 ساعة في جميع أنحاء مصر مع تتبع مباشر لكل شحنة.</p>
-        </div>
-        <div class="service-card">
-          <div class="service-icon">${icon("search",24)}</div>
-          <h3>تتبع فوري</h3>
-          <p>تتبع شحنتك لحظة بلحظة عبر رقم الشحنة أو رمز QR في أي وقت.</p>
-        </div>
-        <div class="service-card">
-          <div class="service-icon">${icon("wallet",24)}</div>
-          <h3>تحصيل الكاش</h3>
-          <p>نحصل المبلغ من العميل ونحوله لك مع تقارير مالية شفافة.</p>
-        </div>
-        <div class="service-card">
-          <div class="service-icon">${icon("shield",24)}</div>
-          <h3>أمان وضمان</h3>
-          <p>شحناتك محمية بالكامل مع سجل تفصيلي لكل حدث.</p>
-        </div>
-      </div>
-    </section>
-
-    <!-- Features -->
-    <section class="home-section alt" id="features">
-      <div class="features-grid">
+    <section class="hp-hero">
+      <div class="hp-hero-grid">
         <div>
-          <p class="section-label">لماذا النخبة؟</p>
-          <h2 class="section-title">منصة متكاملة للتجار والمناديب</h2>
-          <div class="feature-list-items">
-            <div class="feature-item">
-              <div class="feature-dot">📊</div>
-              <div><h4>لوحة تحكم متقدمة</h4><p>إحصائيات ومؤشرات أداء تفصيلية لكل حساب.</p></div>
-            </div>
-            <div class="feature-item">
-              <div class="feature-dot">🔔</div>
-              <div><h4>إشعارات فورية</h4><p>واتساب وإشعارات المتصفح عند كل تحديث.</p></div>
-            </div>
-            <div class="feature-item">
-              <div class="feature-dot">📱</div>
-              <div><h4>متوافق مع الموبايل</h4><p>تجربة سلسة على جميع الأجهزة.</p></div>
-            </div>
-            <div class="feature-item">
-              <div class="feature-dot">📈</div>
-              <div><h4>تقارير وتصدير Excel</h4><p>تصدير جميع بياناتك بضغطة واحدة.</p></div>
+          <div class="hp-hero-badge">🚀 أسرع خدمة شحن في مصر</div>
+          <h1>شحن <em>سريع وموثوق</em><br/>في كل مكان</h1>
+          <p>منصة لوجستية متكاملة تربط التجار بالمناديب والعملاء بأعلى كفاءة.</p>
+          <div class="hp-hero-btns">
+            <button class="btn-white" id="heroRegister">ابدأ مجاناً</button>
+            <button class="btn-ghost-white" id="heroLogin">تسجيل الدخول</button>
+          </div>
+          <div class="hp-track-box">
+            <label>📦 تتبع شحنتك الآن</label>
+            <div class="hp-track-row">
+              <input id="heroTrackInput" placeholder="أدخل رقم الشحنة..."/>
+              <button id="heroTrackBtn">تتبع</button>
             </div>
           </div>
         </div>
-        <div class="features-visual">
-          <div class="mock-card">
-            <div class="mc-label">شحنات اليوم</div>
-            <div class="mc-val">48 شحنة</div>
-            <div class="mc-badge">+12% عن أمس</div>
-          </div>
-          <div class="mock-card">
-            <div class="mc-label">ANE-54558</div>
-            <div class="mc-val">محمد أحمد</div>
-            <div class="mc-badge">🚚 خرجت للتسليم</div>
-          </div>
-          <div class="mock-card">
-            <div class="mc-label">تحصيلات اليوم</div>
-            <div class="mc-val">24,500 ج.م</div>
-            <div class="mc-badge">✅ 38 تم التسليم</div>
-          </div>
+        <div class="hp-hero-visual">
+          <div class="hp-mock-stat"><div class="ms-label">شحنات اليوم</div><div class="ms-val">48</div><div class="hp-mock-badge">+12% عن أمس</div></div>
+          <div class="hp-mock-stat"><div class="ms-label">تحصيلات</div><div class="ms-val">24,500 ج.م</div><div class="hp-mock-badge">✅ 38 مسلمة</div></div>
         </div>
       </div>
     </section>
-
-    <!-- Track section -->
-    <section class="home-section" id="track-section" style="background:var(--primary-light);">
-      <div style="max-width:560px;margin:0 auto;text-align:center;">
-        <p class="section-label">تتبع مجاني</p>
-        <h2 class="section-title">تعرف على مكان شحنتك الآن</h2>
+    <div class="hp-stats">
+      <div class="hp-stat"><div class="hp-stat-num">+10K</div><div class="hp-stat-lbl">شحنة مسلمة</div></div>
+      <div class="hp-stat"><div class="hp-stat-num">+500</div><div class="hp-stat-lbl">تاجر موثوق</div></div>
+      <div class="hp-stat"><div class="hp-stat-num">98%</div><div class="hp-stat-lbl">رضا العملاء</div></div>
+      <div class="hp-stat"><div class="hp-stat-num">24/7</div><div class="hp-stat-lbl">دعم مستمر</div></div>
+    </div>
+    <div class="hp-section-alt" id="services">
+      <div class="hp-section" style="padding-block:64px;">
+        <p class="hp-label">خدماتنا</p>
+        <h2 class="hp-title">كل ما تحتاجه لإدارة شحناتك</h2>
+        <div class="hp-services">
+          <div class="hp-service"><div class="hp-service-icon">${icon("truck",20)}</div><h3>توصيل سريع</h3><p>خلال 24-48 ساعة في جميع أنحاء مصر مع تتبع مباشر.</p></div>
+          <div class="hp-service"><div class="hp-service-icon">${icon("search",20)}</div><h3>تتبع فوري</h3><p>تتبع شحنتك لحظة بلحظة عبر رقم الشحنة أو QR.</p></div>
+          <div class="hp-service"><div class="hp-service-icon">${icon("wallet",20)}</div><h3>تحصيل الكاش</h3><p>نحصل المبلغ ونحوله لك مع تقارير مالية شفافة.</p></div>
+          <div class="hp-service"><div class="hp-service-icon">${icon("shield",20)}</div><h3>أمان وضمان</h3><p>شحناتك محمية مع سجل تفصيلي لكل حدث.</p></div>
+        </div>
+      </div>
+    </div>
+    <section class="hp-section" id="hp-track">
+      <div style="max-width:500px;margin:0 auto;text-align:center;">
+        <p class="hp-label">تتبع مجاني</p>
+        <h2 class="hp-title">اعرف مكان شحنتك الآن</h2>
         <div style="display:flex;gap:10px;margin-top:24px;">
-          <input id="sectionTrackInput" placeholder="أدخل رقم الشحنة..."
-                 style="flex:1;padding:12px 16px;border-radius:var(--radius);border:1.5px solid var(--line);font-size:15px;"/>
-          <button id="sectionTrackBtn" class="primary-btn" style="padding:12px 24px;font-size:15px;">🔍 تتبع</button>
+          <input id="secTrackInput" placeholder="أدخل رقم الشحنة..."
+            style="flex:1;padding:12px 16px;border-radius:10px;border:1.5px solid var(--gray-300);font-size:15px;"/>
+          <button id="secTrackBtn" class="btn btn-primary btn-lg">🔍 تتبع</button>
         </div>
       </div>
     </section>
-
-    <!-- Testimonials -->
-    <section class="home-section alt">
-      <p class="section-label">آراء العملاء</p>
-      <h2 class="section-title">ماذا يقول عملاؤنا</h2>
-      <div class="testimonials-grid">
-        <div class="testimonial-card">
-          <div class="stars">★★★★★</div>
-          <p>"النخبة غيّرت طريقة إدارة شحناتي. لوحة التحكم رائعة والتتبع فوري."</p>
-          <div class="author"><div class="avatar">أ</div><div class="author-info"><div class="name">أحمد السيد</div><div class="role">تاجر إلكتروني</div></div></div>
-        </div>
-        <div class="testimonial-card">
-          <div class="stars">★★★★★</div>
-          <p>"كمندوب توصيل، التطبيق سهّل عملي جداً. الملاحة والتحديثات كلها في مكان واحد."</p>
-          <div class="author"><div class="avatar">م</div><div class="author-info"><div class="name">محمد خالد</div><div class="role">مندوب توصيل</div></div></div>
-        </div>
-        <div class="testimonial-card">
-          <div class="stars">★★★★★</div>
-          <p>"أتابع شحناتي بسهولة وأستلمها في الوقت المحدد. خدمة ممتازة."</p>
-          <div class="author"><div class="avatar">س</div><div class="author-info"><div class="name">سارة مصطفى</div><div class="role">عميلة</div></div></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- CTA -->
-    <section class="home-cta">
+    <section class="hp-cta">
       <h2>ابدأ رحلتك مع النخبة اليوم</h2>
       <p>انضم لآلاف التجار والمناديب الذين يثقون بنا</p>
-      <div class="cta-actions">
-        <button class="btn-hero-primary" id="ctaRegisterBtn">إنشاء حساب مجاناً</button>
-        <button class="btn-hero-ghost" id="ctaLoginBtn">تسجيل الدخول</button>
+      <div class="hp-cta-btns">
+        <button class="btn-white" id="ctaRegister">إنشاء حساب مجاناً</button>
+        <button class="btn-ghost-white" id="ctaLogin">تسجيل الدخول</button>
       </div>
     </section>
-
-    <!-- Footer -->
-    <footer class="home-footer" id="contact">
-      <div class="footer-grid">
+    <footer class="hp-footer">
+      <div class="hp-footer-grid">
         <div>
-          <div class="footer-brand">${icon("truck",28)}<strong>النخبة للشحن السريع</strong></div>
-          <p class="footer-desc">منصة لوجستية متكاملة لإدارة الشحن والتوصيل والتتبع في مصر.</p>
+          <div class="hp-footer-brand">${icon("truck",22)}<strong>النخبة للشحن السريع</strong></div>
+          <p class="hp-footer-desc">منصة لوجستية متكاملة لإدارة الشحن والتوصيل في مصر.</p>
         </div>
-        <div class="footer-col">
-          <h4>روابط سريعة</h4>
-          <a href="#services">خدماتنا</a>
-          <a href="#features">المميزات</a>
-          <a href="#track-section">تتبع شحنة</a>
+        <div class="hp-footer-col"><h4>روابط</h4>
+          <a href="#services">خدماتنا</a><a href="#hp-track">تتبع شحنة</a>
         </div>
-        <div class="footer-col">
-          <h4>الحسابات</h4>
-          <a href="#" id="footerLoginLink">تسجيل الدخول</a>
-          <a href="#" id="footerRegisterLink">إنشاء حساب</a>
+        <div class="hp-footer-col"><h4>الحسابات</h4>
+          <a href="#" id="footerLogin">تسجيل الدخول</a>
+          <a href="#" id="footerRegister">إنشاء حساب</a>
         </div>
-        <div class="footer-col">
-          <h4>تواصل معنا</h4>
-          <a href="tel:+201061004311">📞 01061004311</a>
-          <a href="https://wa.me/201061004311" target="_blank">💬 واتساب</a>
-          <a href="mailto:info@nukhba.com">✉️ info@nukhba.com</a>
+        <div class="hp-footer-col"><h4>تواصل</h4>
+          <a href="tel:+20100000000">📞 01000000000</a>
+          <a href="https://wa.me/20100000000" target="_blank">💬 واتساب</a>
         </div>
       </div>
-      <div class="footer-bottom">
-        <p>© 2025 النخبة للشحن السريع. جميع الحقوق محفوظة.</p>
-      </div>
+      <div class="hp-footer-bottom">© 2025 النخبة للشحن السريع</div>
     </footer>
-
-    <!-- WhatsApp float -->
-    <a href="https://wa.me/201061004311" target="_blank" class="wa-float" title="تواصل عبر واتساب">💬</a>
+    <a href="https://wa.me/20100000000" target="_blank" class="wa-btn">💬</a>
   </div>`;
+
+  const goL=()=>{AppState.page="auth";AppState.authMode="login";render();};
+  const goR=()=>{AppState.page="auth";AppState.authMode="register";render();};
+  const doT=(inputId)=>{const v=$(inputId)?.value.trim();if(v)location.href=`${location.origin}${location.pathname}?track=${encodeURIComponent(v)}`;else toast("أدخل رقم الشحنة","warning");};
+
+  $("navLogin")?.addEventListener("click",e=>{e.preventDefault();goL();});
+  $("heroLogin")?.addEventListener("click",goL);
+  $("heroRegister")?.addEventListener("click",goR);
+  $("ctaLogin")?.addEventListener("click",goL);
+  $("ctaRegister")?.addEventListener("click",goR);
+  $("footerLogin")?.addEventListener("click",e=>{e.preventDefault();goL();});
+  $("footerRegister")?.addEventListener("click",e=>{e.preventDefault();goR();});
+  $("heroTrackBtn")?.addEventListener("click",()=>doT("heroTrackInput"));
+  $("secTrackBtn")?.addEventListener("click",()=>doT("secTrackInput"));
+  $("heroTrackInput")?.addEventListener("keydown",e=>{if(e.key==="Enter")doT("heroTrackInput");});
 }
 
-// ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
 // AUTH PAGE
-// ═══════════════════════════════════════════════════════════
-function authPage() {
-  return `
-  <div class="auth-page">
-    <div class="auth-card">
-      <div class="auth-brand">
-        ${icon("truck",36)}
-        <span>النخبة للشحن السريع</span>
-      </div>
-
-      ${state.authMode==="login" ? loginForm() : registerForm()}
-
-      <div class="auth-switch">
-        ${state.authMode==="login"
-          ? `عميل جديد؟ <button class="link-btn" id="switchAuth">إنشاء حساب</button>
-             &nbsp;|&nbsp; <a href="#" id="backToHome" class="link-btn">الرئيسية</a>`
-          : `لديك حساب؟ <button class="link-btn" id="switchAuth">تسجيل الدخول</button>
-             &nbsp;|&nbsp; <a href="#" id="backToHome" class="link-btn">الرئيسية</a>`}
+// ══════════════════════════════════════════════════════════
+function renderAuth() {
+  const isLogin=AppState.authMode==="login";
+  document.querySelector("#app").innerHTML=`
+  <div class="auth-wrap">
+    <div class="auth-left">
+      <div class="auth-card">
+        <div class="auth-brand">${icon("truck",32)}<span>النخبة للشحن السريع</span></div>
+        ${isLogin?`
+          <h2 class="auth-title">تسجيل الدخول</h2>
+          <p class="auth-sub">أدخل بياناتك للوصول إلى حسابك</p>
+          <form id="loginForm">
+            <div class="field"><label>البريد الإلكتروني</label><input name="email" type="email" placeholder="your@email.com" autocomplete="username" required/></div>
+            <div class="field"><label>كلمة المرور</label><input name="password" type="password" placeholder="••••••••" autocomplete="current-password" required/></div>
+            <div id="loginErr" class="auth-error"></div>
+            <button type="submit" class="btn btn-primary btn-full btn-lg">${icon("user")} دخول</button>
+          </form>
+          <div class="auth-switch">عميل جديد؟ <button class="text-link" id="toReg">إنشاء حساب</button></div>
+        `:`
+          <h2 class="auth-title">إنشاء حساب عميل</h2>
+          <p class="auth-sub">أنشئ حسابك لتتبع شحناتك</p>
+          <div class="auth-info">ℹ️ حسابات التجار والمناديب تُنشأ من قِبَل الإدارة فقط.</div>
+          <form id="registerForm">
+            <div class="field"><label>الاسم الكامل *</label><input name="fullname" type="text" required/></div>
+            <div class="field"><label>البريد الإلكتروني *</label><input name="email" type="email" required/></div>
+            <div class="field"><label>رقم الهاتف</label><input name="phone" type="tel"/></div>
+            <div class="field"><label>كلمة المرور *</label><input name="password" type="password" placeholder="6 أحرف على الأقل" required/></div>
+            <div class="field"><label>تأكيد كلمة المرور *</label><input name="confirm" type="password" required/></div>
+            <div id="regErr" class="auth-error"></div>
+            <button type="submit" class="btn btn-primary btn-full btn-lg">${icon("user")} إنشاء الحساب</button>
+          </form>
+          <div class="auth-switch">لديك حساب؟ <button class="text-link" id="toLogin">تسجيل الدخول</button></div>
+        `}
+        <div class="auth-back"><button class="text-link" id="backHome">← الرئيسية</button></div>
       </div>
     </div>
   </div>`;
+
+  $("toReg")?.addEventListener("click",()=>{AppState.authMode="register";render();});
+  $("toLogin")?.addEventListener("click",()=>{AppState.authMode="login";render();});
+  $("backHome")?.addEventListener("click",()=>{AppState.page="home";render();});
+  $("loginForm")?.addEventListener("submit",handleLogin);
+  $("registerForm")?.addEventListener("submit",handleRegister);
 }
 
-function loginForm() {
-  return `
-    <h2>تسجيل الدخول</h2>
-    <p class="auth-subtitle">أدخل بياناتك للدخول إلى حسابك</p>
-    <form id="loginForm" class="auth-form">
-      <div class="form-field">
-        <label>البريد الإلكتروني</label>
-        <input name="email" type="email" placeholder="your@email.com" autocomplete="username" required/>
-      </div>
-      <div class="form-field">
-        <label>كلمة المرور</label>
-        <input name="password" type="password" placeholder="••••••••" autocomplete="current-password" required/>
-      </div>
-      <div id="loginError" class="auth-error"></div>
-      <button class="primary-btn full" type="submit">${icon("user")} دخول</button>
-    </form>`;
-}
-
-function registerForm() {
-  return `
-    <h2>إنشاء حساب عميل</h2>
-    <p class="auth-subtitle">أنشئ حسابك لتتبع شحناتك بسهولة</p>
-    <form id="registerForm" class="auth-form">
-      <div class="form-field">
-        <label>الاسم الكامل</label>
-        <input name="fullname" type="text" placeholder="محمد أحمد" required/>
-      </div>
-      <div class="form-field">
-        <label>البريد الإلكتروني</label>
-        <input name="email" type="email" placeholder="your@email.com" required/>
-      </div>
-      <div class="form-field">
-        <label>رقم الهاتف</label>
-        <input name="phone" type="tel" placeholder="01xxxxxxxxx"/>
-      </div>
-      <div class="form-field">
-        <label>كلمة المرور</label>
-        <input name="password" type="password" placeholder="6 أحرف على الأقل" required/>
-      </div>
-      <div class="form-field">
-        <label>تأكيد كلمة المرور</label>
-        <input name="confirm" type="password" placeholder="أعد كلمة المرور" required/>
-      </div>
-      <p style="font-size:12px;color:var(--muted);background:var(--bg);padding:10px;border-radius:var(--radius);">
-        ℹ️ يتم إنشاء حسابات التجار والمناديب من قِبَل الإدارة فقط.
-      </p>
-      <div id="regError" class="auth-error"></div>
-      <button class="primary-btn full" type="submit">${icon("user")} إنشاء الحساب</button>
-    </form>`;
-}
-
-// ═══════════════════════════════════════════════════════════
-// DASHBOARD SHELL
-// ═══════════════════════════════════════════════════════════
-function dashboardPage() {
-  const nav    = NAV[state.user.role]||[];
-  const unread = notifications.filter(n=>!n.read).length;
-  const content= renderView();
-
-  if (state.user.role==="admin") {
-    return `
-    <div class="layout">
-      <div class="sidebar-overlay" id="sidebarOverlay"></div>
-      <aside class="sidebar" id="sidebar">
-        <div class="brand">
-          ${icon("truck",28)}
-          <div><strong>النخبة</strong><span>لوحة التحكم</span></div>
-        </div>
-        <nav>
-          ${nav.map(v=>`
-            <button class="${state.view===v.id?"active":""}" data-view="${v.id}">
-              ${icon(v.icon,16)} ${v.label}
-            </button>`).join("")}
-        </nav>
-        <div class="sidebar-footer">
-          <select id="roleSwitcher" class="role-switcher">
-            <option value="">👁 Preview as...</option>
-            <option value="admin">Admin</option>
-            <option value="merchant">Merchant</option>
-            <option value="courier">Courier</option>
-            <option value="customer">Customer</option>
-          </select>
-          <button class="logout-btn" id="logoutBtn">${icon("logout",16)} تسجيل الخروج</button>
-        </div>
-      </aside>
-      <main class="content">
-        <header class="topbar">
-          <div class="topbar-left" style="display:flex;align-items:center;gap:12px;">
-            <button class="menu-toggle" id="menuToggle">${icon("menu")}</button>
-            <div>
-              <div class="eyebrow">مدير النظام</div>
-              <h2>أهلاً، ${esc(state.user.name?.split(" ")[0]||"Admin")}</h2>
-            </div>
-          </div>
-          <div class="topbar-right">
-            ${topbarRight(unread)}
-          </div>
-        </header>
-        ${notifDropdown()}
-        <div class="page-body">${content}</div>
-      </main>
-    </div>`;
+async function handleLogin(e) {
+  e.preventDefault();
+  const fd=new FormData(e.currentTarget);
+  const btn=e.currentTarget.querySelector("button[type=submit]");
+  const err=$("loginErr"); err.style.display="none";
+  btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> جاري الدخول...`;
+  try {
+    const{data,error}=await db.auth.signInWithPassword({email:fd.get("email").trim(),password:fd.get("password")});
+    if(error)throw error;
+    const profile=await DB.getProfile(data.user.id);
+    if(profile?.suspended){await db.auth.signOut();throw new Error("هذا الحساب موقوف. تواصل مع الإدارة.");}
+    const role=profile?.role||"customer";
+    const name=profile?.full_name||data.user.email.split("@")[0];
+    const phone=profile?.phone||"";
+    const user={id:data.user.id,name,role,email:data.user.email,phone,balance:0};
+    saveSession(user); AppState.user=user;
+    AppState.page="dashboard";
+    AppState.view=role==="customer"?"track":role==="courier"?"tasks":role==="merchant"?"shipments":"overview";
+    await DB.addAudit("LOGIN",data.user.id,`as ${role}`);
+    const[ships,notifs,users,couriers]=await Promise.all([
+      DB.loadShipments().catch(()=>[]),
+      DB.loadNotifications(role).catch(()=>[]),
+      (role==="admin"||role==="merchant")?DB.loadUsers().catch(()=>[]):Promise.resolve([]),
+      DB.loadCouriers().catch(()=>[])
+    ]);
+    AppState.shipments=ships; AppState.notifications=notifs;
+    AppState.users=users; AppState.couriers=couriers;
+    if(role==="admin")startRealtime();
+    render(); toast(`أهلاً ${name}!`);
+  } catch(err2) {
+    err.style.display="block";
+    err.textContent=err2.message.includes("Invalid")?"بيانات الدخول غير صحيحة":err2.message;
+    btn.disabled=false; btn.innerHTML=`${icon("user")} دخول`;
   }
+}
 
-  // Simple layout for merchant / courier / customer
-  const displayName = state.user.name?.length>14 ? state.user.name.split(" ")[0] : state.user.name;
-  return `
-    <div class="simple-layout">
-      <header class="simple-topbar">
-        <div class="brand-inline">
-          ${icon("truck",24)} <span>النخبة للشحن السريع</span>
+async function handleRegister(e) {
+  e.preventDefault();
+  const fd=new FormData(e.currentTarget);
+  const fullname=fd.get("fullname").trim(),email=fd.get("email").trim();
+  const phone=fd.get("phone").trim(),password=fd.get("password"),confirm=fd.get("confirm");
+  const err=$("regErr");const btn=e.currentTarget.querySelector("button[type=submit]");
+  err.style.display="none";
+  if(!fullname||!email||!password){err.style.display="block";err.textContent="يرجى تعبئة جميع الحقول";return;}
+  if(password!==confirm){err.style.display="block";err.textContent="كلمة المرور غير متطابقة";return;}
+  if(password.length<6){err.style.display="block";err.textContent="كلمة المرور 6 أحرف على الأقل";return;}
+  btn.disabled=true;btn.innerHTML=`<span class="spinner"></span> جاري الإنشاء...`;
+  try {
+    const{data,error}=await db.auth.signUp({email,password,options:{data:{full_name:fullname,phone}}});
+    if(error)throw error;
+    await db.from("profiles").upsert([{id:data.user.id,full_name:fullname,email,phone,role:"customer",is_active:true}]);
+    const user = {
+      id: data.user.id, name: fullname,
+      role: "customer", primary_role: "customer",
+      email, phone, balance: 0
+    };
+    saveSession(user);
+    AppState.user = user;
+    AppState.page = "dashboard";
+    AppState.view = "track";
+    await loadUserPermissions(data.user.id);
+    render();
+    toast(`مرحباً ${fullname}! تم إنشاء حسابك`);
+  } catch(err2) {
+    err.style.display="block";
+    err.textContent=err2.message?.includes("already")?"البريد مسجل بالفعل":"خطأ: "+err2.message;
+    btn.disabled=false;btn.innerHTML=`${icon("user")} إنشاء الحساب`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+// DASHBOARD SHELL
+// ══════════════════════════════════════════════════════════
+function renderDashboard() {
+  const u=AppState.user;
+  const navKeys=ROLE_MAP[u.primary_role||u.role]?.nav||[];
+  const unread=AppState.notifications.filter(n=>!n.isRead).length;
+  if(u.role==="admin"){renderAdminShell(navKeys,unread);}else{renderSimpleShell(navKeys,unread);}
+  bindDashboardEvents();
+  postRender();
+}
+
+function renderAdminShell(navKeys,unread) {
+  const u=AppState.user;
+  document.querySelector("#app").innerHTML=`
+  <div class="dash">
+    <div class="sb-overlay" id="sbOverlay"></div>
+    <aside class="sidebar" id="sidebar">
+      <div class="sb-brand">${icon("truck",22)}<div class="sb-brand-text"><strong>النخبة</strong><span>لوحة التحكم</span></div></div>
+      <nav class="sb-nav">
+        <div class="sb-section-label">القائمة</div>
+        ${navKeys.map(k=>`
+          <button class="sb-item ${AppState.view===k?"active":""}" data-view="${k}">
+            ${icon(k==="users"?"users":k==="audit"?"shield":k==="shipments"?"box":k==="tasks"?"truck":k==="reports"?"chart":k==="accounts"?"wallet":k==="track"?"search":"chart",15)}
+            ${NAV_LABELS[k]}
+          </button>`).join("")}
+      </nav>
+      <div class="sb-footer">
+        <select id="roleSwitcher" class="sb-preview"><option value="">👁 Preview as...</option>
+          <option value="admin">Admin</option><option value="merchant">Merchant</option>
+          <option value="courier">Courier</option><option value="customer">Customer</option>
+        </select>
+        <div class="sb-user">
+          <div class="sb-user-avatar">${initials(u.name)}</div>
+          <div><div class="sb-user-name">${esc(u.name?.split(" ")[0])}</div><div class="sb-user-role">${ROLE_MAP[u.primary_role||u.role]?.label}</div></div>
         </div>
-        <div class="topbar-user">
-          <span class="badge ${roleColor(state.user.role)}">${roleName(state.user.role)}</span>
-          <span class="user-name">${esc(displayName)}</span>
-          ${topbarRight(unread)}
-          <button class="icon-btn" id="logoutBtn" title="خروج">${icon("logout")}</button>
+        <button class="sb-logout" id="logoutBtn">${icon("logout",14)} خروج</button>
+      </div>
+    </aside>
+    <main class="main">
+      <header class="topbar">
+        <div style="display:flex;align-items:center;gap:12px;">
+          <button class="menu-toggle" id="menuToggle">${icon("menu",18)}</button>
+          <div class="topbar-title"><div class="eyebrow">Admin</div><h2>أهلاً، ${esc(u.name?.split(" ")[0]||"Admin")}</h2></div>
+        </div>
+        <div class="topbar-actions">
+          <div class="notif-btn-wrap">
+            <button class="btn-icon" id="toggleNotif">${icon("bell")}${unread>0?`<span class="notif-count">${unread}</span>`:""}</button>
+            ${renderNotifPanel()}
+          </div>
+          <div class="search-wrap">${icon("search",14)}<input id="searchInput" value="${esc(AppState.query)}" placeholder="بحث..."/></div>
         </div>
       </header>
-      ${notifDropdown()}
-      <nav class="tab-nav">
-        ${nav.map(v=>`<button class="${state.view===v.id?"active":""}" data-view="${v.id}">${v.label}</button>`).join("")}
-      </nav>
-      <div class="tab-content">${content}</div>
-    </div>`;
+      <div class="page" id="viewContent">${renderView()}</div>
+    </main>
+  </div>`;
 }
 
-function topbarRight(unread) {
-  return `
-    <button class="notif-btn" id="toggleNotif">
-      ${icon("bell")}
-      ${unread>0?`<span class="notif-badge">${unread}</span>`:""}
-    </button>
-    <div class="search-box">
-      ${icon("search")}
-      <input id="searchInput" value="${esc(state.query)}" placeholder="بحث..."/>
-    </div>`;
-}
-
-function notifDropdown() {
-  return `
-    <div id="notifPanel" class="notif-panel" style="display:none;">
-      <div class="notif-header">
-        <h4>الإشعارات</h4>
-        <button class="link-btn" id="clearNotif">مسح الكل</button>
+function renderSimpleShell(navKeys,unread) {
+  const u=AppState.user;
+  const short=u.name?.length>14?u.name.split(" ")[0]:u.name;
+  document.querySelector("#app").innerHTML=`
+  <div class="simple-shell">
+    <header class="simple-topbar">
+      <div class="simple-brand">${icon("truck",20)}<span>النخبة للشحن السريع</span></div>
+      <div class="simple-user">
+        <span class="badge ${ROLE_MAP[u.primary_role||u.role]?.badge}">${ROLE_MAP[u.primary_role||u.role]?.label}</span>
+        <span class="user-name">${esc(short)}</span>
+        <div class="notif-btn-wrap">
+          <button class="btn-icon" id="toggleNotif">${icon("bell")}${unread>0?`<span class="notif-count">${unread}</span>`:""}</button>
+          ${renderNotifPanel()}
+        </div>
+        <div class="search-wrap" style="width:140px;">${icon("search",13)}<input id="searchInput" value="${esc(AppState.query)}" placeholder="بحث..."/></div>
+        <button class="btn-icon" id="logoutBtn" title="خروج">${icon("logout")}</button>
       </div>
-      ${notifications.length
-        ? notifications.slice(0,10).map(n=>`
-            <div class="notification-item ${n.read?"":"unread"}">
-              <span>${esc(n.text)}</span>
-              <small>${esc(n.time)}</small>
-            </div>`).join("")
-        : `<p style="padding:1rem;color:var(--muted);text-align:center;font-size:13px;">لا توجد إشعارات</p>`}
-    </div>`;
+    </header>
+    <nav class="tab-nav">
+      ${navKeys.map(k=>`<button class="tab-btn ${AppState.view===k?"active":""}" data-view="${k}">${NAV_LABELS[k]}</button>`).join("")}
+    </nav>
+    <div class="tab-body" id="viewContent">${renderView()}</div>
+  </div>`;
 }
 
-// ═══════════════════════════════════════════════════════════
+function renderNotifPanel() {
+  const n=AppState.notifications;
+  return`<div id="notifDropdown" class="notif-dropdown">
+    <div class="notif-header"><span>الإشعارات</span><button class="text-link" id="clearNotif">مسح</button></div>
+    ${!n.length?`<div class="notif-item"><div class="ni-text" style="color:var(--gray-400);">لا توجد إشعارات</div></div>`
+      :n.slice(0,10).map(x=>`<div class="notif-item ${x.isRead?"":"unread"}"><div class="ni-text">${esc(x.text)}</div><div class="ni-time">${esc(x.time)}</div></div>`).join("")}
+  </div>`;
+}
+
+function renderView() {
+  switch(AppState.view) {
+    case"shipments":return viewShipments();
+    case"tasks":    return viewTasks();
+    case"accounts": return viewAccounts();
+    case"reports":  return viewReports();
+    case"track":    return viewTrack();
+    case"users":    return viewUsers();
+    case"audit":    return viewAudit();
+    default:        return viewOverview();
+  }
+}
+
+function rerenderContent() {
+  const vc=$("viewContent");if(!vc){render();return;}
+  vc.innerHTML=renderView();
+  bindDashboardEvents();
+  postRender();
+}
+
+function render() {
+  const params=new URLSearchParams(window.location.search);
+  const trackId=params.get("track");
+  if(trackId){
+    AppState.selectedShipment=trackId;AppState.view="track";
+    if(!AppState.user)AppState.user={role:"customer",id:"guest",name:"زائر"};
+  }
+  if(!AppState.user){AppState.page==="auth"?renderAuth():renderHomepage();}
+  else{renderDashboard();}
+}
+
+function postRender() {
+  setTimeout(renderChart,200);
+  setTimeout(()=>{
+    visible().forEach(s=>{
+      const c=document.getElementById(`qr-${s.id}`);if(!c)return;
+      try{QRCode.toCanvas(c,`${location.origin}${location.pathname}?track=${s.id}`,{width:36,margin:1});}catch(e){}
+    });
+  },200);
+  const sel=AppState.shipments.find(s=>s.id===AppState.selectedShipment);
+  if(sel)loadTimeline(sel.id);
+  if(AppState.view==="audit")App.loadAudit();
+}
+
+function renderChart() {
+  const canvas=document.getElementById("statusChart");if(!canvas)return;
+  const old=Chart.getChart(canvas);if(old)old.destroy();
+  const vl=visible();
+  new Chart(canvas,{type:"doughnut",
+    data:{labels:["تم التسليم","مرتجع","خرج للتسليم","في المخزن","جديد"],
+      datasets:[{data:[
+        vl.filter(s=>s.status==="delivered").length,vl.filter(s=>s.status==="returned").length,
+        vl.filter(s=>s.status==="out_for_delivery").length,vl.filter(s=>s.status==="warehouse").length,
+        vl.filter(s=>s.status==="created").length],
+        backgroundColor:["#16a34a","#dc2626","#7c3aed","#d97706","#2563eb"],borderWidth:2,borderColor:"#fff"}]},
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{position:"bottom",labels:{font:{size:11},padding:10,usePointStyle:true}}}}});
+}
+
+// ══════════════════════════════════════════════════════════
 // VIEWS
-// ═══════════════════════════════════════════════════════════
-function overviewView() {
-  const list = visible();
-  const cards = [
-    {label:"كل الشحنات",    value:list.length,                                         icon:"box",   filter:"all",              color:"var(--primary)"},
-    {label:"خارج للتسليم", value:list.filter(s=>s.status==="out_for_delivery").length,  icon:"truck", filter:"out_for_delivery", color:"var(--info)"},
-    {label:"تم التسليم",   value:list.filter(s=>s.status==="delivered").length,         icon:"chart", filter:"delivered",        color:"var(--success)"},
-    {label:"مرتجعات",      value:list.filter(s=>s.status==="returned").length,          icon:"box",   filter:"returned",         color:"var(--danger)"}
-  ];
-  return `
-    <div class="stats-grid">
-      ${cards.map(c=>`
-        <article class="stat clickable-card" onclick="window.setFilter('${c.filter}')">
-          <div style="color:${c.color}">${icon(c.icon,20)}</div>
-          <span>${c.label}</span>
-          <strong style="color:${c.color}">${c.value}</strong>
-          <small class="card-hint">عرض التفاصيل →</small>
-        </article>`).join("")}
-    </div>
-    <div class="work-grid">
-      <div>
-        <div class="panel">
-          <div class="section-head">
-            <h3>${icon("box")} آخر الشحنات
-              ${state.statusFilter!=="all"
-                ? `<span class="badge info" style="margin-right:8px;">${STATUS[state.statusFilter]?.label||state.statusFilter}
-                    <button onclick="window.setFilter('all')" style="background:none;border:none;cursor:pointer;font-size:12px;margin-right:4px;">✕</button>
-                   </span>`:""}
-            </h3>
-            <div style="display:flex;gap:8px;">
-              <button class="ghost-btn" id="openScanner">📷 QR</button>
-              ${can("create_shipment")?`<button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} شحنة جديدة</button>`:""}
-            </div>
-          </div>
-          ${shipTable(state.statusFilter==="all"?list.slice(0,8):list)}
-        </div>
+// ══════════════════════════════════════════════════════════
+
+// ── KPI Card helper ───────────────────────────────────────
+function kpi(label,value,iconName,color,bg,filter=null,delta=null) {
+  const click=filter?`onclick="App.setFilter('${filter}')" style="cursor:pointer;"` : "";
+  return `<div class="kpi" ${click} style="--kpi-color:${color};--kpi-bg:${bg};">
+    <div class="kpi-icon">${icon(iconName,18)}</div>
+    <div class="kpi-value">${esc(String(value))}</div>
+    <div class="kpi-label">${label}</div>
+    ${delta?`<div class="kpi-delta up">${delta}</div>`:""}
+    ${filter?`<div class="kpi-hint">عرض التفاصيل ←</div>`:""}
+  </div>`;
+}
+
+function alertRow(label,count,filter,color) {
+  return `<div onclick="App.setFilter('${filter}')"
+    style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;
+    background:var(--gray-50);border-radius:var(--radius);cursor:pointer;border:1px solid var(--gray-200);transition:all .15s;"
+    onmouseover="this.style.borderColor='${color}'" onmouseout="this.style.borderColor='var(--gray-200)'">
+    <span style="font-size:13px;font-weight:500;">${label}</span>
+    <b style="font-size:18px;font-weight:800;color:${color};">${count}</b>
+  </div>`;
+}
+
+// ── OVERVIEW ──────────────────────────────────────────────
+function viewOverview() {
+  const list=visible();
+  const total=list.length,today=list.filter(s=>s.createdAt&&new Date(s.createdAt).toDateString()===new Date().toDateString()).length;
+  const onWay=list.filter(s=>s.status==="out_for_delivery").length;
+  const done=list.filter(s=>s.status==="delivered").length;
+  const ret=list.filter(s=>s.status==="returned").length;
+  const pending=list.filter(s=>s.status==="created").length;
+
+  if(AppState.user.role==="merchant") {
+    const bal=list.filter(s=>s.status==="delivered").reduce((a,s)=>a+(s.amount-s.deliveryFee),0);
+    return `
+      <div class="kpi-grid">
+        ${kpi("شحناتي",total,"box","var(--brand)","var(--brand-light)","all")}
+        ${kpi("تم التسليم",done,"chart","var(--success)","var(--success-bg)","delivered",pct(done,total)+"%")}
+        ${kpi("مرتجعات",ret,"refresh","var(--danger)","var(--danger-bg)","returned")}
+        ${kpi("الرصيد المستحق",money(bal),"wallet","var(--info)","var(--info-bg)")}
       </div>
-      <div>
-        <div class="panel">
-          <h3 style="margin-bottom:16px;">${icon("chart")} نظرة سريعة</h3>
-          <div class="alert-list">
-            <div class="alert-item clickable-card" onclick="window.setFilter('created')">
-              <b>${list.filter(s=>s.status==="created").length}</b>
-              <span>تنتظر الاستلام</span>
-            </div>
-            <div class="alert-item clickable-card" onclick="window.setFilter('out_for_delivery')">
-              <b>${list.filter(s=>s.status==="out_for_delivery").length}</b>
-              <span>في الطريق</span>
-            </div>
-            <div class="alert-item clickable-card" onclick="window.setFilter('returned')">
-              <b>${list.filter(s=>s.status==="returned").length}</b>
-              <span>مرتجع</span>
-            </div>
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("box")} شحناتي الأخيرة</h3>
+          ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn">${icon("plus",13)} شحنة جديدة</button>`:""}
+        </div>
+        ${shipTable(list.slice(0,10))}
+      </div>`;
+  }
+
+  return `
+    <div class="kpi-grid">
+      ${kpi("إجمالي الشحنات",total,"box","var(--brand)","var(--brand-light)","all")}
+      ${kpi("شحنات اليوم",today,"pkg","var(--info)","var(--info-bg)")}
+      ${kpi("خارج للتسليم",onWay,"truck","var(--purple)","var(--purple-bg)","out_for_delivery")}
+      ${kpi("تم التسليم",done,"chart","var(--success)","var(--success-bg)","delivered",pct(done,total)+"%")}
+      ${kpi("مرتجعات",ret,"refresh","var(--danger)","var(--danger-bg)","returned")}
+      ${kpi("تنتظر الاستلام",pending,"qr","var(--warning)","var(--warning-bg)","created")}
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 340px;gap:20px;">
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("box")} آخر الشحنات
+            ${AppState.statusFilter!=="all"?`<span class="badge badge-brand" style="font-size:11px;margin-right:8px;">
+              ${STATUS_MAP[AppState.statusFilter]?.label}
+              <button onclick="App.setFilter('all')" style="background:none;border:none;cursor:pointer;padding:0 2px;font-size:12px;">✕</button>
+            </span>`:""}
+          </h3>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-secondary btn-sm" id="openScanner">${icon("qr",13)} QR</button>
+            ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn">${icon("plus",13)} شحنة جديدة</button>`:""}
           </div>
-          <div class="chart-box" style="margin-top:20px;"><canvas id="statusChart"></canvas></div>
+        </div>
+        ${shipTable(AppState.statusFilter==="all"?list.slice(0,8):list)}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:16px;">
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:14px;">${icon("chart")} التوزيع</h3>
+          <div style="height:190px;"><canvas id="statusChart"></canvas></div>
+        </div>
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:12px;">⚡ تنبيهات</h3>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            ${alertRow("تنتظر الاستلام",pending,"created","var(--warning)")}
+            ${alertRow("خارج للتسليم",onWay,"out_for_delivery","var(--brand)")}
+            ${alertRow("مرتجعات",ret,"returned","var(--danger)")}
+          </div>
         </div>
       </div>
     </div>`;
 }
 
+// ── SHIP TABLE ────────────────────────────────────────────
 function shipTable(list) {
-  if (!list.length) return `
-    <div class="empty-state">
+  if(!list.length) return `
+    <div class="empty">
       <div class="empty-icon">📦</div>
       <h3>لا توجد شحنات</h3>
-      <p>لم يتم العثور على شحنات مطابقة للفلتر الحالي</p>
-      ${state.statusFilter!=="all"?`<button class="ghost-btn" onclick="window.setFilter('all')">إظهار الكل</button>`:""}
+      <p>${AppState.statusFilter!=="all"?"لا توجد شحنات بهذا الفلتر":"لم تُضف شحنات بعد"}</p>
+      ${AppState.statusFilter!=="all"?`<button class="btn btn-secondary btn-sm" onclick="App.setFilter('all')">إظهار الكل</button>`:""}
     </div>`;
-  return `
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>الشحنة</th><th>العميل</th><th>الهاتف</th>
-            <th>الحالة</th><th>المبلغ</th><th>إجراءات</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${list.map(s=>`
-            <tr>
-              <td><b>${esc(s.id)}</b><br/><small style="color:var(--muted)">${esc(s.createdAt)}</small></td>
-              <td style="font-weight:600;">${esc(s.customerName)}</td>
-              <td>
-                <a href="tel:${esc(s.customerPhone)}" class="phone-link">📞 ${esc(s.customerPhone)}</a>
-                ${s.customerPhone2?`<br/><a href="tel:${esc(s.customerPhone2)}" class="phone-link">📞 ${esc(s.customerPhone2)}</a>`:""}
-              </td>
-              <td><span class="badge ${STATUS[s.status]?.tone||"info"}">${STATUS[s.status]?.label||s.status}</span></td>
-              <td>${money(s.amount)}</td>
-              <td>
-                <div class="shipment-actions">
-                  <button class="link-btn" data-open="${esc(s.id)}">عرض</button>
-                  ${can("print_shipment")?`<button class="link-btn" onclick="window.printShipment('${esc(s.id)}')">طباعة</button>`:""}
-                  <canvas id="qr-${esc(s.id)}" style="width:40px;height:40px;"></canvas>
-                </div>
-              </td>
-            </tr>`).join("")}
-        </tbody>
-      </table>
-    </div>`;
+
+  return `<div class="table-wrap"><table>
+    <thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>المنطقة</th><th>الحالة</th><th>المبلغ</th><th>المندوب</th><th>إجراءات</th></tr></thead>
+    <tbody>
+      ${list.map(s=>`<tr>
+        <td><div class="td-mono">${esc(s.id)}</div><div style="font-size:11px;color:var(--gray-400);margin-top:2px;">${fmtDate(s.createdAt)}</div></td>
+        <td class="td-primary">${esc(s.customerName)}</td>
+        <td class="td-phone">
+          <a href="tel:${esc(s.customerPhone)}">${esc(s.customerPhone)}</a>
+          ${s.customerPhone2?`<br/><a href="tel:${esc(s.customerPhone2)}" style="font-size:11px;color:var(--gray-500);">${esc(s.customerPhone2)}</a>`:""}
+        </td>
+        <td style="font-size:12px;">${esc(s.governorate||s.address?.split("-")[0]||"—")}</td>
+        <td><span class="badge ${STATUS_MAP[s.status]?.badge||"badge-gray"}">${STATUS_MAP[s.status]?.label||s.status}</span></td>
+        <td style="font-weight:600;">${money(s.amount)}</td>
+        <td style="font-size:12px;color:var(--gray-600);">${s.courierName?esc(s.courierName):`<span style="color:var(--gray-300);">—</span>`}</td>
+        <td>
+          <div class="td-actions">
+            <button class="btn btn-secondary btn-sm" data-open="${esc(s.id)}">عرض</button>
+            ${can("print_shipment")?`<button class="btn-icon" onclick="App.print('${esc(s.id)}')" title="طباعة">${icon("pkg",13)}</button>`:""}
+            <canvas id="qr-${esc(s.id)}" style="width:34px;height:34px;"></canvas>
+          </div>
+        </td>
+      </tr>`).join("")}
+    </tbody>
+  </table></div>`;
 }
 
-function shipmentsView() {
-  const sel = shipments.find(s=>s.id===state.selectedShipment)||visible()[0]||null;
+// ── SHIPMENTS VIEW ────────────────────────────────────────
+function viewShipments() {
+  const sel=AppState.shipments.find(s=>s.id===AppState.selectedShipment)||visible()[0]||null;
   return `
-    <div class="panel">
-      <div class="section-head">
-        <h3>${icon("box")} إدارة الشحنات</h3>
+    <div class="card" style="margin-bottom:20px;">
+      <div class="card-header">
+        <h3 class="card-title">${icon("box")} إدارة الشحنات</h3>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="ghost-btn" onclick="window.manualTrack()">📦 تتبع</button>
-          ${can("export_excel")?`<button class="ghost-btn" onclick="window.exportExcel()">📊 Excel</button>`:""}
-          ${can("create_shipment")?`<button class="primary-btn compact" id="newShipmentBtn">${icon("plus")} إضافة</button>`:""}
+          <button class="btn btn-secondary btn-sm" onclick="App.manualTrack()">📦 تتبع</button>
+          ${can("export_excel")?`<button class="btn btn-secondary btn-sm" onclick="App.exportExcel()">📊 Excel</button>`:""}
+          ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn">${icon("plus",13)} إضافة</button>`:""}
         </div>
       </div>
-      <div class="filter-row" style="margin-bottom:14px;">
-        ${["all","created","received","warehouse","hub","out_for_delivery","delivered","returned"].map(st=>`
-          <button onclick="window.setFilter('${st}')" class="ghost-btn ${state.statusFilter===st?"active":""}">
-            ${st==="all"?"الكل":STATUS[st]?.label||st}
+      <div class="filter-bar">
+        ${["all","created","received","warehouse","hub","out_for_delivery","delivered","returned","cancelled"].map(st=>`
+          <button class="filter-btn ${AppState.statusFilter===st?"active":""}" onclick="App.setFilter('${st}')">
+            ${st==="all"?"الكل":STATUS_MAP[st]?.label||st}
           </button>`).join("")}
       </div>
       ${shipTable(visible())}
@@ -723,1143 +915,725 @@ function shipmentsView() {
     ${sel?detailPanel(sel):""}`;
 }
 
-function tasksView() {
-  const list = visible().filter(s=>s.status!=="delivered"&&s.status!=="returned");
-  if (!list.length) return `
-    <div class="empty-state">
-      <div class="empty-icon">✅</div>
-      <h3>لا توجد مهام حالية</h3>
-      <p>كل الشحنات تم تسليمها أو لم يتم تعيينك بعد</p>
-    </div>`;
-  return `
-    <div class="task-list">
-      ${list.map(s=>`
-        <div class="task-card">
-          <div class="task-card-header">
-            <span class="badge ${STATUS[s.status]?.tone||"info"}">${STATUS[s.status]?.label||s.status}</span>
-            <b>${esc(s.id)}</b>
-          </div>
-          <h3>${esc(s.customerName)}</h3>
-          <p>📍 ${esc(s.address)}</p>
-          <p>
-            <a href="tel:${esc(s.customerPhone)}" class="phone-link">📞 ${esc(s.customerPhone)}</a>
-            ${s.customerPhone2?`&nbsp; <a href="tel:${esc(s.customerPhone2)}" class="phone-link">📞 ${esc(s.customerPhone2)}</a>`:""}
-          </p>
-          <p>💰 ${money(s.amount)}</p>
-          <div class="task-actions">
-            <a class="ghost-btn" href="tel:${esc(s.customerPhone)}">📞 اتصال</a>
-            <a class="ghost-btn" target="_blank"
-               href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(s.address)}">
-               🗺 ملاحة</a>
-            ${can("upload_pod")?`
-              <label class="ghost-btn" style="cursor:pointer;">
-                📷 إثبات التسليم
-                <input type="file" id="pod-${esc(s.id)}" accept="image/*" style="display:none"
-                       onchange="window.uploadPOD('${esc(s.id)}','pod-${esc(s.id)}')"/>
-              </label>`:""}
-            ${can("change_status")?`
-              <button class="primary-btn compact"
-                      onclick="window.updateStatus('${esc(s.id)}','delivered')">✅ تم التسليم</button>
-              <button class="ghost-btn" style="color:var(--danger)"
-                      onclick="window.updateStatus('${esc(s.id)}','returned')">↩ مرتجع</button>`:""}
-          </div>
-          ${s.podUrl?`<img src="${esc(s.podUrl)}" style="width:100%;max-width:200px;border-radius:8px;margin-top:10px;"/>`:""}
-        </div>`).join("")}
-    </div>`;
-}
-
+// ── DETAIL PANEL ──────────────────────────────────────────
 function detailPanel(s) {
-  if (!s) return "";
-  const meta   = STATUS[s.status]||{label:s.status,tone:"info"};
-  const couriers= users.filter(u=>u.role==="courier");
-  const steps  = ["created","received","warehouse","hub","out_for_delivery","delivered"];
-  const curIdx = steps.indexOf(s.status);
+  const meta=STATUS_MAP[s.status]||{label:s.status,badge:"badge-gray"};
+  const steps=STATUS_STEPS;const curIdx=steps.indexOf(s.status);
   return `
-    <div class="panel details">
-      <div class="section-head">
-        <h3>${esc(s.id)}</h3>
-        <span class="badge ${meta.tone}">${meta.label}</span>
+    <div class="card" id="detailPanel">
+      <div class="card-header">
+        <div><div class="td-mono" style="font-size:16px;font-weight:700;">${esc(s.id)}</div>
+          <div style="font-size:12px;color:var(--gray-400);margin-top:3px;">أُنشئت ${fmtDate(s.createdAt)}</div></div>
+        <span class="badge ${meta.badge}">${meta.label}</span>
+      </div>
+      <div class="prog-track" style="margin-bottom:20px;">
+        ${steps.map((st,i)=>`
+          <div class="prog-step">
+            <div class="prog-circle ${i<curIdx?"done":i===curIdx?"curr":""}">${i<=curIdx?"✓":i+1}</div>
+            <span>${STATUS_MAP[st]?.label||st}</span>
+          </div>
+          ${i<steps.length-1?`<div class="prog-line ${i<curIdx?"done":""}"></div>`:""}`).join("")}
       </div>
       <div class="detail-grid">
-        <div><span>العميل</span><b>${esc(s.customerName)}</b></div>
-        <div><span>الهاتف الأول</span><b><a href="tel:${esc(s.customerPhone)}" class="phone-link">📞 ${esc(s.customerPhone)}</a></b></div>
-        ${s.customerPhone2?`<div><span>الهاتف الثاني</span><b><a href="tel:${esc(s.customerPhone2)}" class="phone-link">📞 ${esc(s.customerPhone2)}</a></b></div>`:""}
-        <div><span>العنوان</span><b>${esc(s.address)}</b></div>
-        <div><span>موعد التسليم</span><b>${esc(s.eta)||"قيد التجهيز"}</b></div>
-        <div><span>قيمة الطلب</span><b>${money(s.amount)}</b></div>
-        <div><span>رسوم الشحن</span><b>${money(s.deliveryFee)}</b></div>
-        ${s.merchantName?`<div><span>التاجر</span><b>${esc(s.merchantName)}</b></div>`:""}
-        ${s.merchantPhone?`<div><span>هاتف التاجر</span><b><a href="tel:${esc(s.merchantPhone)}" class="phone-link">📞 ${esc(s.merchantPhone)}</a></b></div>`:""}
-        ${s.notes?`<div style="grid-column:1/-1"><span>ملاحظات</span><b>${esc(s.notes)}</b></div>`:""}
+        <div class="detail-field"><div class="df-label">العميل</div><div class="df-value">${esc(s.customerName)}</div></div>
+        <div class="detail-field"><div class="df-label">الهاتف الأول</div><div class="df-value"><a href="tel:${esc(s.customerPhone)}" style="color:var(--brand);">📞 ${esc(s.customerPhone)}</a></div></div>
+        ${s.customerPhone2?`<div class="detail-field"><div class="df-label">الهاتف الثاني</div><div class="df-value"><a href="tel:${esc(s.customerPhone2)}" style="color:var(--brand);">📞 ${esc(s.customerPhone2)}</a></div></div>`:""}
+        <div class="detail-field"><div class="df-label">العنوان</div><div class="df-value">${esc(s.governorate?`${s.governorate} / ${s.city} — ${s.street}`:s.address)}</div></div>
+        <div class="detail-field"><div class="df-label">قيمة الطلب</div><div class="df-value">${money(s.amount)}</div></div>
+        <div class="detail-field"><div class="df-label">رسوم الشحن</div><div class="df-value">${money(s.deliveryFee)}</div></div>
+        <div class="detail-field"><div class="df-label">موعد التسليم</div><div class="df-value">${esc(s.eta)||"قيد التجهيز"}</div></div>
+        <div class="detail-field"><div class="df-label">محاولات التوصيل</div><div class="df-value">${s.attempts}</div></div>
+        ${s.merchantName?`<div class="detail-field"><div class="df-label">التاجر</div><div class="df-value">${esc(s.merchantName)}</div></div>`:""}
+        <div class="detail-field"><div class="df-label">المندوب</div><div class="df-value">${esc(s.courierName)||`<span style="color:var(--gray-400);">غير معين</span>`}</div></div>
+        ${s.notes?`<div class="detail-field" style="grid-column:1/-1"><div class="df-label">ملاحظات</div><div class="df-value">${esc(s.notes)}</div></div>`:""}
       </div>
-
       ${can("assign_courier")?`
-        <div class="assign-box">
-          <select id="assignCourier">
-            <option value="">اختر مندوب</option>
-            ${couriers.map(c=>`<option value="${esc(c.id)}" ${s.courierId===c.id?"selected":""}>${esc(c.name)}</option>`).join("")}
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px;">
+          <select id="courierSelect" style="flex:1;min-width:180px;padding:9px 12px;border-radius:var(--radius);border:1.5px solid var(--gray-300);font-size:13px;">
+            <option value="">-- اختر المندوب --</option>
+            ${AppState.couriers.map(c=>`<option value="${esc(c.id)}" data-name="${esc(c.full_name)}" ${s.courierId===c.id?"selected":""}>${esc(c.full_name)}${c.phone?` — ${esc(c.phone)}`:""}</option>`).join("")}
           </select>
-          <button class="ghost-btn" onclick="window.assignCourier('${esc(s.id)}')">تعيين</button>
+          <button class="btn btn-secondary btn-sm" onclick="App.assignCourier('${esc(s.id)}')">${icon("users",13)} تعيين</button>
         </div>`:""}
-
       ${can("change_status")?`
-        <div class="status-actions">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
           ${["received","warehouse","hub","out_for_delivery"].map(st=>`
-            <button onclick="window.updateStatus('${esc(s.id)}','${st}')" class="ghost-btn">${STATUS[st].label}</button>`).join("")}
-          <button onclick="window.updateStatus('${esc(s.id)}','delivered')" class="primary-btn compact">✅ تم التسليم</button>
-          <button onclick="window.updateStatus('${esc(s.id)}','returned')"  class="ghost-btn" style="color:var(--danger)">↩ مرتجع</button>
+            <button class="btn btn-secondary btn-sm" onclick="App.updateStatus('${esc(s.id)}','${st}')">${STATUS_MAP[st].label}</button>`).join("")}
+          <button class="btn btn-primary btn-sm" onclick="App.updateStatus('${esc(s.id)}','delivered')">✅ تم التسليم</button>
+          <button class="btn btn-sm" style="background:var(--danger-bg);color:var(--danger);border:1px solid var(--danger-border);"
+            onclick="App.updateStatus('${esc(s.id)}','returned')">↩ مرتجع</button>
         </div>`:""}
-
       ${can("upload_pod")?`
-        <div class="pod-upload">
-          <label class="ghost-btn" style="cursor:pointer;">
-            📷 رفع إثبات التسليم
-            <input type="file" id="podImage" accept="image/*" style="display:none"
-                   onchange="window.uploadPOD('${esc(s.id)}','podImage')"/>
-          </label>
-        </div>`:""}
-
-      ${s.podUrl?`<div class="pod-preview" style="margin-bottom:16px;">
-        <h4 style="font-size:13px;margin-bottom:8px;">إثبات التسليم</h4>
-        <img src="${esc(s.podUrl)}" style="width:200px;border-radius:10px;border:2px solid var(--line);"/>
-      </div>`:""}
-
-      <div class="tracking-progress">
-        ${steps.map((step,i)=>`
-          <div class="progress-step">
-            <div class="progress-circle ${i<=curIdx?"done":""}">${i<=curIdx?"✓":i+1}</div>
-            <span>${STATUS[step]?.label||step}</span>
-          </div>
-          ${i<steps.length-1?`<div class="progress-line ${i<curIdx?"done":""}"></div>`:""}`
-        ).join("")}
-      </div>
-
-      <div class="timeline" id="timeline-${esc(s.id)}">
-        <h4>سجل الشحنة</h4>
-        <div class="loading-overlay"><div class="spinner"></div> جاري التحميل...</div>
+        <label class="btn btn-secondary btn-sm" style="cursor:pointer;width:fit-content;margin-bottom:16px;">
+          📷 رفع إثبات التسليم
+          <input type="file" id="podFileInput" accept="image/*" style="display:none"
+            onchange="App.uploadPOD('${esc(s.id)}','podFileInput')"/>
+        </label>`:""}
+      ${s.podUrl?`<div style="margin-bottom:16px;"><div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">إثبات التسليم</div>
+        <img src="${esc(s.podUrl)}" style="width:180px;border-radius:var(--radius);border:2px solid var(--gray-200);"/></div>`:""}
+      <div class="timeline" id="tlBox-${esc(s.id)}">
+        <h4>${icon("log",13)} سجل الشحنة</h4>
+        <div class="page-loader"><span class="spinner"></span></div>
       </div>
     </div>`;
 }
 
-function trackView() {
-  const s = shipments.find(x=>x.id===state.selectedShipment);
-  if (!s) return `
-    <div class="empty-state" style="padding:80px 20px;">
-      <div class="empty-icon">📦</div>
-      <h3>${state.selectedShipment?"الشحنة غير موجودة":"تتبع شحنتك"}</h3>
-      <p>${state.selectedShipment?"تأكد من رقم الشحنة وحاول مرة أخرى":"أدخل رقم الشحنة الذي أرسله لك التاجر"}</p>
-      <button class="primary-btn" onclick="window.manualTrack()" style="margin-top:8px;">🔍 تتبع شحنة</button>
-    </div>`;
+// ── TASKS VIEW ────────────────────────────────────────────
+function viewTasks() {
+  const list=visible().filter(s=>!["delivered","returned","cancelled"].includes(s.status));
+  if(!list.length) return `<div class="empty"><div class="empty-icon">✅</div><h3>لا توجد مهام معلقة</h3><p>كل الشحنات تم تسليمها أو لم يتم تعيينك بعد</p></div>`;
+  return `<div style="display:flex;flex-direction:column;gap:14px;">
+    ${list.map(s=>`
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
+          <div>
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+              <span class="badge ${STATUS_MAP[s.status]?.badge||"badge-gray"}">${STATUS_MAP[s.status]?.label||s.status}</span>
+              <span class="td-mono">${esc(s.id)}</span>
+            </div>
+            <div style="font-size:16px;font-weight:700;margin-bottom:4px;">${esc(s.customerName)}</div>
+            <div style="font-size:13px;color:var(--gray-500);margin-bottom:4px;">📍 ${esc(s.governorate?`${s.governorate} — ${s.city}`:s.address)}</div>
+            <div style="margin-bottom:4px;">
+              <a href="tel:${esc(s.customerPhone)}" style="color:var(--brand);font-weight:600;font-size:13px;">📞 ${esc(s.customerPhone)}</a>
+              ${s.customerPhone2?` &nbsp;<a href="tel:${esc(s.customerPhone2)}" style="color:var(--gray-500);font-size:12px;">📞 ${esc(s.customerPhone2)}</a>`:""}
+            </div>
+            <div style="font-size:14px;font-weight:700;color:var(--brand-dark);">💰 ${money(s.amount)}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end;">
+            <a class="btn btn-secondary btn-sm" href="tel:${esc(s.customerPhone)}">📞 اتصال</a>
+            <a class="btn btn-secondary btn-sm" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(s.address)}" target="_blank">🗺 ملاحة</a>
+            ${can("upload_pod")?`<label class="btn btn-secondary btn-sm" style="cursor:pointer;">📷 إثبات
+              <input type="file" id="pod-${esc(s.id)}" accept="image/*" style="display:none" onchange="App.uploadPOD('${esc(s.id)}','pod-${esc(s.id)}')"/></label>`:""}
+            ${can("change_status")?`
+              <button class="btn btn-primary btn-sm" onclick="App.updateStatus('${esc(s.id)}','delivered')">✅ تم التسليم</button>
+              <button class="btn btn-sm" style="background:var(--danger-bg);color:var(--danger);border:1px solid var(--danger-border);"
+                onclick="App.updateStatus('${esc(s.id)}','returned')">↩ مرتجع</button>`:""}
+          </div>
+        </div>
+        ${s.podUrl?`<img src="${esc(s.podUrl)}" style="width:120px;border-radius:var(--radius);border:2px solid var(--gray-200);margin-top:10px;"/>`:""}
+      </div>`).join("")}
+  </div>`;
+}
 
-  const meta   = STATUS[s.status]||{label:s.status,tone:"info"};
-  const steps  = ["created","received","warehouse","hub","out_for_delivery","delivered"];
-  const curIdx = steps.indexOf(s.status);
+// ── TRACK VIEW ────────────────────────────────────────────
+function viewTrack() {
+  const s=AppState.shipments.find(x=>x.id===AppState.selectedShipment);
+  if(!s) return `<div class="empty" style="padding:80px 20px;">
+    <div class="empty-icon">📦</div>
+    <h3>${AppState.selectedShipment?"الشحنة غير موجودة":"تتبع شحنتك"}</h3>
+    <p>${AppState.selectedShipment?"تأكد من رقم الشحنة":"أدخل رقم الشحنة الذي أرسله لك التاجر"}</p>
+    <button class="btn btn-primary" onclick="App.manualTrack()" style="margin-top:8px;">🔍 تتبع شحنة</button>
+  </div>`;
+  const meta=STATUS_MAP[s.status]||{label:s.status,badge:"badge-gray"};
+  const steps=STATUS_STEPS;const curIdx=steps.indexOf(s.status);
   return `
     <div class="track-hero">
-      <div>
-        <div class="eyebrow">تتبع الشحنة</div>
-        <h2>${esc(s.id)}</h2>
-        <p>${esc(s.customerName)} — ${esc(s.address)}</p>
-      </div>
-      <span class="badge ${meta.tone}" style="font-size:14px;padding:10px 18px;">${meta.label}</span>
+      <div><div class="th-eyebrow">تتبع الشحنة</div><div class="th-id">${esc(s.id)}</div>
+        <div class="th-sub">${esc(s.customerName)} · ${esc(s.governorate||s.address?.slice(0,30))}</div></div>
+      <span class="badge ${meta.badge}" style="font-size:13px;padding:5px 14px;">${meta.label}</span>
     </div>
-    <div class="panel">
-      <div class="tracking-progress" style="margin:0 0 24px;">
-        ${steps.map((step,i)=>`
-          <div class="progress-step">
-            <div class="progress-circle ${i<=curIdx?"done":""}">${i<=curIdx?"✓":i+1}</div>
-            <span>${STATUS[step]?.label||step}</span>
+    <div class="card">
+      <div class="prog-track">
+        ${steps.map((st,i)=>`
+          <div class="prog-step">
+            <div class="prog-circle ${i<curIdx?"done":i===curIdx?"curr":""}">${i<=curIdx?"✓":i+1}</div>
+            <span>${STATUS_MAP[st]?.label||st}</span>
           </div>
-          ${i<steps.length-1?`<div class="progress-line ${i<curIdx?"done":""}"></div>`:""}`
-        ).join("")}
+          ${i<steps.length-1?`<div class="prog-line ${i<curIdx?"done":""}"></div>`:""}`).join("")}
       </div>
-      <div class="detail-grid">
-        <div><span>العميل</span><b>${esc(s.customerName)}</b></div>
-        <div><span>الهاتف</span><b><a href="tel:${esc(s.customerPhone)}" class="phone-link">📞 ${esc(s.customerPhone)}</a></b></div>
-        ${s.customerPhone2?`<div><span>هاتف ثاني</span><b><a href="tel:${esc(s.customerPhone2)}" class="phone-link">📞 ${esc(s.customerPhone2)}</a></b></div>`:""}
-        <div><span>العنوان</span><b>${esc(s.address)}</b></div>
-        <div><span>موعد التسليم</span><b>${esc(s.eta)||"قيد التجهيز"}</b></div>
+      <div class="detail-grid" style="margin-top:16px;">
+        <div class="detail-field"><div class="df-label">العميل</div><div class="df-value">${esc(s.customerName)}</div></div>
+        <div class="detail-field"><div class="df-label">الهاتف</div><div class="df-value"><a href="tel:${esc(s.customerPhone)}" style="color:var(--brand);">📞 ${esc(s.customerPhone)}</a></div></div>
+        <div class="detail-field"><div class="df-label">العنوان</div><div class="df-value">${esc(s.governorate?`${s.governorate} / ${s.city}`:s.address)}</div></div>
+        <div class="detail-field"><div class="df-label">موعد التسليم</div><div class="df-value">${esc(s.eta)||"قيد التجهيز"}</div></div>
       </div>
-      ${s.podUrl?`<div style="margin-top:16px;"><h4 style="font-size:13px;margin-bottom:8px;">إثبات التسليم</h4>
-        <img src="${esc(s.podUrl)}" style="width:200px;border-radius:10px;border:2px solid var(--line);"/></div>`:""}
-      <div class="timeline" id="timeline-${esc(s.id)}" style="margin-top:20px;">
-        <h4>سجل الأحداث</h4>
-        <div class="loading-overlay"><div class="spinner"></div></div>
+      ${s.podUrl?`<div style="margin-top:12px;"><div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:8px;">إثبات التسليم</div>
+        <img src="${esc(s.podUrl)}" style="width:150px;border-radius:var(--radius);border:2px solid var(--gray-200);"/></div>`:""}
+      <div class="timeline" id="tlBox-${esc(s.id)}" style="margin-top:20px;">
+        <h4>${icon("log",13)} سجل الأحداث</h4>
+        <div class="page-loader"><span class="spinner"></span></div>
       </div>
     </div>`;
 }
 
-function accountsView() {
-  if (state.user.role==="customer") return `
-    <div class="empty-state" style="padding:80px 20px;">
-      <div class="empty-icon">📦</div>
-      <h3>تتبع شحنتك</h3>
-      <p>أدخل رقم الشحنة لمعرفة حالتها</p>
-      <button class="primary-btn" onclick="window.manualTrack()">🔍 تتبع شحنة</button>
-    </div>`;
-
-  const list      = visible();
-  const delivered = list.filter(s=>s.status==="delivered");
-  const revenue   = delivered.reduce((a,s)=>a+(s.amount||0),0);
-  const fees      = delivered.reduce((a,s)=>a+(s.deliveryFee||0),0);
-  const payable   = state.user.role==="courier" ? delivered.length*25 : revenue-fees;
-
+// ── ACCOUNTS VIEW ─────────────────────────────────────────
+function viewAccounts() {
+  if(AppState.user.role==="customer") return `<div class="empty">
+    <div class="empty-icon">📦</div><h3>تتبع شحنتك</h3>
+    <p>أدخل رقم الشحنة لمعرفة حالتها</p>
+    <button class="btn btn-primary" onclick="App.manualTrack()">🔍 تتبع شحنة</button>
+  </div>`;
+  const list=visible(),del=list.filter(s=>s.status==="delivered");
+  const rev=del.reduce((a,s)=>a+(s.amount||0),0),fee=del.reduce((a,s)=>a+(s.deliveryFee||0),0);
+  const pay=AppState.user.role==="courier"?del.length*25:rev-fee;
   return `
-    <div class="account-band">
-      <div><span>الرصيد الحالي</span><strong>${money(payable)}</strong></div>
-      <button class="btn-hero-ghost" style="border-color:rgba(255,255,255,.4);">طلب تسوية</button>
+    <div class="acct-header">
+      <div><div class="ah-label">الرصيد المستحق</div><div class="ah-val">${money(pay)}</div></div>
+      <button class="btn-ghost-white" style="border-color:rgba(255,255,255,.4);">طلب تسوية</button>
     </div>
-    <div class="stats-grid two" style="margin-bottom:20px;">
-      <div class="stat">${icon("wallet")} <span>تحصيلات</span><strong>${money(revenue)}</strong></div>
-      <div class="stat">${icon("truck")} <span>رسوم شحن</span><strong>${money(fees)}</strong></div>
+    <div class="kpi-grid" style="margin-bottom:20px;">
+      ${kpi("تحصيلات",money(rev),"wallet","var(--success)","var(--success-bg)")}
+      ${kpi("رسوم الشحن",money(fee),"truck","var(--danger)","var(--danger-bg)")}
+      ${kpi("الصافي",money(rev-fee),"chart","var(--brand)","var(--brand-light)")}
     </div>
-    <div class="panel">
-      <h3 style="margin-bottom:16px;">كشف الحساب — الشحنات المسلمة</h3>
-      ${shipTable(delivered)}
-    </div>`;
+    <div class="card"><h3 class="card-title" style="margin-bottom:14px;">${icon("chart")} كشف الحساب</h3>${shipTable(del)}</div>`;
 }
 
-function reportsView() {
-  const list  = visible();
-  const total = list.length||1;
+// ── REPORTS VIEW ──────────────────────────────────────────
+function viewReports() {
+  const list=visible(),total=list.length||1;
   return `
-    <div class="stats-grid">
-      ${Object.entries(STATUS).map(([k,v])=>`
-        <div class="stat mini clickable-card" onclick="window.goTo('shipments','${k}')">
-          <span class="badge ${v.tone}">${v.label}</span>
-          <strong>${list.filter(s=>s.status===k).length}</strong>
-        </div>`).join("")}
+    <div class="kpi-grid">
+      ${Object.entries(STATUS_MAP).filter(([k])=>k!=="cancelled").map(([k,v])=>kpi(v.label,list.filter(s=>s.status===k).length,"box","var(--brand)","var(--brand-light)",k)).join("")}
     </div>
-    <div class="panel">
-      <h3 style="margin-bottom:16px;">مؤشرات الأداء</h3>
-      <div class="feature-list">
-        <div><span>إجمالي الشحنات</span><b>${list.length}</b></div>
-        <div><span>نسبة التسليم</span><b>${Math.round(list.filter(s=>s.status==="delivered").length/total*100)}%</b></div>
-        <div><span>نسبة المرتجع</span><b>${Math.round(list.filter(s=>s.status==="returned").length/total*100)}%</b></div>
-        <div><span>إجمالي المبالغ</span><b>${money(list.reduce((a,s)=>a+(s.amount||0),0))}</b></div>
-        <div><span>إجمالي الرسوم</span><b>${money(list.reduce((a,s)=>a+(s.deliveryFee||0),0))}</b></div>
-        <div><span>صافي المستحق</span><b>${money(list.filter(s=>s.status==="delivered").reduce((a,s)=>a+(s.amount-s.deliveryFee),0))}</b></div>
+    <div class="card">
+      <h3 class="card-title" style="margin-bottom:16px;">${icon("chart")} مؤشرات الأداء</h3>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">
+        ${[["إجمالي الشحنات",list.length],["نسبة التسليم",pct(list.filter(s=>s.status==="delivered").length,total)+"%"],
+           ["نسبة المرتجع",pct(list.filter(s=>s.status==="returned").length,total)+"%"],
+           ["إجمالي المبالغ",money(list.reduce((a,s)=>a+(s.amount||0),0))],
+           ["إجمالي الرسوم",money(list.reduce((a,s)=>a+(s.deliveryFee||0),0))],
+           ["صافي المستحق",money(list.filter(s=>s.status==="delivered").reduce((a,s)=>a+(s.amount-s.deliveryFee),0))]
+          ].map(([l,v])=>`<div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius);padding:14px;">
+            <div style="font-size:10px;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">${l}</div>
+            <div style="font-size:20px;font-weight:800;">${v}</div>
+          </div>`).join("")}
       </div>
     </div>`;
 }
 
-function usersView() {
-  if (!can("manage_users")) return `<div class="empty-state"><h3>غير مصرح</h3></div>`;
-  const filtered = users.filter(u=>{
-    const txt=`${u.name} ${u.email} ${u.phone||""} ${u.role}`.toLowerCase();
-    return txt.includes((state.userFilter||"").toLowerCase());
-  });
+// ── USERS VIEW ────────────────────────────────────────────
+function viewUsers() {
+  if(!can("manage_users")) return `<div class="empty"><h3>غير مصرح</h3></div>`;
+  const f=(AppState.userFilter||"").toLowerCase();
+  const filtered=AppState.users.filter(u=>`${u.name} ${u.email} ${u.phone} ${u.role}`.toLowerCase().includes(f));
   return `
-    <div class="panel">
-      <div class="section-head">
-        <h3>${icon("user")} إدارة المستخدمين</h3>
-        <button class="primary-btn compact" id="addUserBtn">${icon("plus")} مستخدم جديد</button>
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${icon("users")} إدارة المستخدمين</h3>
+        <button class="btn btn-primary btn-sm" id="addUserBtn">${icon("plus",13)} مستخدم جديد</button>
       </div>
-      <div style="margin-bottom:14px;">
-        <input id="userSearchInput" value="${esc(state.userFilter)}"
-               placeholder="ابحث بالاسم أو البريد أو الدور..."
-               style="width:100%;padding:9px 14px;border-radius:var(--radius);border:1.5px solid var(--line);font-size:13px;"/>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr><th>الاسم</th><th>الدور</th><th>البريد</th><th>الهاتف</th><th>تاريخ الإنشاء</th><th>الحالة</th><th>إجراءات</th></tr>
-          </thead>
-          <tbody>
-            ${!filtered.length
-              ? `<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:2rem;">لا يوجد مستخدمون</td></tr>`
-              : filtered.map(u=>`
-                <tr class="${u.suspended?"suspended-row":""}">
-                  <td><b>${esc(u.name||"—")}</b></td>
-                  <td><span class="badge ${roleColor(u.role)}">${roleName(u.role)}</span></td>
-                  <td style="font-size:12px;">${esc(u.email||"—")}</td>
-                  <td style="font-size:12px;">${esc(u.phone||"—")}</td>
-                  <td style="font-size:11px;color:var(--muted);">${esc(u.createdAt||"—")}</td>
-                  <td><span class="badge ${u.suspended?"danger":"success"}">${u.suspended?"موقوف":"نشط"}</span></td>
-                  <td>
-                    <div style="display:flex;gap:4px;">
-                      <button class="ghost-btn compact" title="تعديل" onclick="window.editUser('${esc(u.id)}')">${icon("edit",14)}</button>
-                      <button class="ghost-btn compact" title="${u.suspended?"تفعيل":"إيقاف"}"
-                              onclick="window.toggleUser('${esc(u.id)}')">${u.suspended?"✅":"🚫"}</button>
-                      <button class="ghost-btn compact" title="حذف" style="color:var(--danger)"
-                              onclick="window.deleteUser('${esc(u.id)}')">${icon("trash",14)}</button>
-                    </div>
-                  </td>
-                </tr>`).join("")}
-          </tbody>
-        </table>
-      </div>
+      <div style="margin-bottom:14px;"><input id="userSearch" value="${esc(AppState.userFilter)}"
+        placeholder="ابحث بالاسم أو البريد أو الدور..."
+        style="width:100%;padding:9px 14px;border-radius:var(--radius);border:1.5px solid var(--gray-300);font-size:13px;"/></div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>الاسم</th><th>الدور</th><th>البريد</th><th>الهاتف</th><th>تاريخ الإنشاء</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+        <tbody>
+          ${!filtered.length?`<tr><td colspan="7" style="text-align:center;padding:2rem;color:var(--gray-400);">لا يوجد مستخدمون</td></tr>`
+            :filtered.map(u=>`<tr class="${u.is_suspended?"muted":""}">
+              <td><div style="display:flex;align-items:center;gap:8px;">
+                <div style="width:28px;height:28px;border-radius:50%;background:var(--brand-light);color:var(--brand-dark);
+                  display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;flex-shrink:0;">${initials(u.name)}</div>
+                <b>${esc(u.name)}</b></div></td>
+              <td><span class="badge ${ROLE_MAP[u.primary_role||u.role]?.badge||"badge-gray"}">${ROLE_MAP[u.primary_role||u.role]?.label||u.role}</span></td>
+              <td style="font-size:12px;">${esc(u.email)}</td>
+              <td style="font-size:12px;">${esc(u.phone||"—")}</td>
+              <td style="font-size:11px;color:var(--gray-400);">${esc(u.createdAt)}</td>
+              <td><span class="badge ${u.is_suspended?"badge-danger":"badge-success"}">${u.is_suspended?"موقوف":"نشط"}</span></td>
+              <td><div class="td-actions">
+                <button class="btn-icon" onclick="App.editUser('${esc(u.id)}')" title="تعديل">${icon("edit",13)}</button>
+                <button class="btn-icon" onclick="App.toggleUser('${esc(u.id)}')" title="${u.is_suspended?"تفعيل":"إيقاف"}">${u.is_suspended?"✅":"🚫"}</button>
+                <button class="btn-icon" onclick="App.deleteUser('${esc(u.id)}')" title="حذف" style="color:var(--danger);">${icon("trash",13)}</button>
+              </div></td>
+            </tr>`).join("")}
+        </tbody>
+      </table></div>
     </div>`;
 }
 
-function auditView() {
-  if (!can("view_audit")) return `<div class="empty-state"><h3>غير مصرح</h3></div>`;
+// ── AUDIT VIEW ────────────────────────────────────────────
+function viewAudit() {
+  if(!can("view_audit")) return `<div class="empty"><h3>غير مصرح</h3></div>`;
   return `
-    <div class="panel">
-      <div class="section-head">
-        <h3>${icon("shield")} سجل النشاط الكامل</h3>
-        <button class="ghost-btn" onclick="window.loadAudit()">🔄 تحديث</button>
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${icon("shield")} سجل النشاط</h3>
+        <button class="btn btn-secondary btn-sm" onclick="App.loadAudit()">${icon("refresh",13)} تحديث</button>
       </div>
-      <div style="margin-bottom:14px;">
-        <input id="auditSearchInput" value="${esc(state.auditFilter)}"
-               placeholder="ابحث بالمستخدم أو الإجراء أو الشحنة..."
-               style="width:100%;padding:9px 14px;border-radius:var(--radius);border:1.5px solid var(--line);font-size:13px;"/>
-      </div>
-      <div id="auditTable">
-        <div class="loading-overlay"><div class="spinner"></div> جاري تحميل السجل...</div>
-      </div>
+      <div style="margin-bottom:14px;"><input id="auditSearch" value="${esc(AppState.auditFilter)}"
+        placeholder="ابحث بالمستخدم أو الإجراء..."
+        style="width:100%;padding:9px 14px;border-radius:var(--radius);border:1.5px solid var(--gray-300);font-size:13px;"/></div>
+      <div id="auditContent"><div class="page-loader"><span class="spinner"></span> جاري تحميل السجل...</div></div>
     </div>`;
 }
 
-function renderView() {
-  const v = state.view;
-  if (v==="shipments") return shipmentsView();
-  if (v==="tasks")     return tasksView();
-  if (v==="accounts")  return accountsView();
-  if (v==="reports")   return reportsView();
-  if (v==="track")     return trackView();
-  if (v==="users")     return usersView();
-  if (v==="audit")     return auditView();
-  return overviewView();
-}
-
-// ═══════════════════════════════════════════════════════════
-// RENDER ENGINE
-// ═══════════════════════════════════════════════════════════
-function render() {
-  const params  = new URLSearchParams(window.location.search);
-  const trackId = params.get("track");
-
-  // Public track URL — no auth needed
-  if (trackId && !state.user) {
-    state.selectedShipment = trackId;
-    state.view = "track";
-    state.user = {role:"customer",id:"guest",name:"زائر"};
-  }
-
-  const app = document.querySelector("#app");
-  if (!app) return;
-
-  // Route to correct page
-  if (!state.user) {
-    // Not logged in — show home or auth
-    app.innerHTML = state.page==="auth" ? authPage() : homePage();
-  } else {
-    // Logged in — dashboard
-    app.innerHTML = dashboardPage();
-  }
-
-  bindEvents();
-  postRender();
-}
-
-function postRender() {
-  // Chart
-  setTimeout(renderChart, 200);
-
-  // QR codes
-  setTimeout(()=>{
-    visible().forEach(s=>{
-      const c = document.getElementById(`qr-${s.id}`);
-      if (!c) return;
-      try { QRCode.toCanvas(c,`${location.origin}${location.pathname}?track=${s.id}`,{width:40}); } catch(e){}
-    });
-  },150);
-
-  // Lazy load timeline
-  const sel = shipments.find(s=>s.id===state.selectedShipment);
-  if (sel) loadTimeline(sel.id);
-
-  // Lazy load audit
-  if (state.view==="audit") window.loadAudit();
-}
-
-function renderChart() {
-  const canvas = document.getElementById("statusChart");
-  if (!canvas) return;
-  const old = Chart.getChart(canvas);
-  if (old) old.destroy();
-  const vl = visible();
-  new Chart(canvas,{
-    type:"doughnut",
-    data:{
-      labels:["تم التسليم","مرتجع","خرج للتسليم","في المخزن","جديد"],
-      datasets:[{
-        data:[
-          vl.filter(s=>s.status==="delivered").length,
-          vl.filter(s=>s.status==="returned").length,
-          vl.filter(s=>s.status==="out_for_delivery").length,
-          vl.filter(s=>s.status==="warehouse").length,
-          vl.filter(s=>s.status==="created").length,
-        ],
-        backgroundColor:["#16a34a","#dc2626","#2563eb","#d97706","#7c3aed"],
-        borderWidth:0
-      }]
-    },
-    options:{responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{position:"bottom",labels:{font:{size:11},padding:8}}}}
+// ══════════════════════════════════════════════════════════
+// BIND EVENTS
+// ══════════════════════════════════════════════════════════
+function bindDashboardEvents() {
+  $$("[data-view]").forEach(btn=>{
+    btn.addEventListener("click",()=>{AppState.view=btn.dataset.view;AppState.statusFilter="all";rerenderContent();});
+  });
+  $("roleSwitcher")?.addEventListener("change",e=>{
+    const r=e.target.value;if(!r)return;
+    AppState.user.role=r;AppState.view=r==="customer"?"track":r==="courier"?"tasks":"overview";
+    renderDashboard();bindDashboardEvents();postRender();
+  });
+  $("logoutBtn")?.addEventListener("click",async()=>{
+    await DB.addAudit("LOGOUT","","User logged out");
+    await db.auth.signOut();clearSession();
+    if(AppState.realtimeChannel){db.removeChannel(AppState.realtimeChannel);AppState.realtimeChannel=null;}
+    AppState.user=null;AppState.page="home";render();toast("تم تسجيل الخروج","info");
+  });
+  const si=$("searchInput");
+  if(si){let t;si.addEventListener("input",e=>{clearTimeout(t);t=setTimeout(()=>{AppState.query=e.target.value;rerenderContent();si.focus();},250);});}
+  const ui=$("userSearch");
+  if(ui){let t;ui.addEventListener("input",e=>{clearTimeout(t);t=setTimeout(()=>{AppState.userFilter=e.target.value;rerenderContent();ui.focus();},250);});}
+  const ai=$("auditSearch");
+  if(ai){let t;ai.addEventListener("input",e=>{clearTimeout(t);t=setTimeout(()=>{AppState.auditFilter=e.target.value;App.loadAudit();},300);});}
+  $$("[data-open]").forEach(btn=>{
+    btn.addEventListener("click",()=>{AppState.selectedShipment=btn.dataset.open;rerenderContent();});
+  });
+  $("newShipBtn")?.addEventListener("click",Modals.newShipment);
+  $("addUserBtn")?.addEventListener("click",Modals.addUser);
+  $("openScanner")?.addEventListener("click",Modals.scanner);
+  $("toggleNotif")?.addEventListener("click",()=>{
+    const d=$("notifDropdown");if(!d)return;
+    const open=d.style.display==="block";
+    d.style.display=open?"none":"block";
+    if(!open){AppState.notifications.forEach(n=>n.isRead=true);document.querySelector(".notif-count")?.remove();}
+  });
+  $("clearNotif")?.addEventListener("click",async()=>{
+    AppState.notifications=[];
+    try{await db.from("notifications").delete().neq("id","00000000-0000-0000-0000-000000000000");}catch(e){}
+    rerenderContent();
+  });
+  $("menuToggle")?.addEventListener("click",()=>{
+    $("sidebar")?.classList.toggle("open");$("sbOverlay")?.classList.toggle("active");
+  });
+  $("sbOverlay")?.addEventListener("click",()=>{
+    $("sidebar")?.classList.remove("open");$("sbOverlay")?.classList.remove("active");
   });
 }
 
-// ═══════════════════════════════════════════════════════════
-// EVENT BINDING
-// ═══════════════════════════════════════════════════════════
-function bindEvents() {
-
-  // ── Homepage buttons ──────────────────────────────────
-  document.querySelector("#navLoginBtn")?.addEventListener("click", e=>{ e.preventDefault(); state.page="auth"; state.authMode="login"; render(); });
-  document.querySelector("#heroRegisterBtn")?.addEventListener("click", ()=>{ state.page="auth"; state.authMode="register"; render(); });
-  document.querySelector("#heroTrackBtn")?.addEventListener("click", ()=>{ state.page="auth"; state.authMode="login"; render(); });
-  document.querySelector("#ctaRegisterBtn")?.addEventListener("click", ()=>{ state.page="auth"; state.authMode="register"; render(); });
-  document.querySelector("#ctaLoginBtn")?.addEventListener("click",    ()=>{ state.page="auth"; state.authMode="login"; render(); });
-  document.querySelector("#footerLoginLink")?.addEventListener("click",    e=>{ e.preventDefault(); state.page="auth"; state.authMode="login"; render(); });
-  document.querySelector("#footerRegisterLink")?.addEventListener("click", e=>{ e.preventDefault(); state.page="auth"; state.authMode="register"; render(); });
-
-  // Hero track
-  document.querySelector("#heroTrackSubmit")?.addEventListener("click", ()=>{
-    const code = document.querySelector("#heroTrackInput")?.value.trim();
-    if (code) { state.selectedShipment=code; state.view="track"; state.user={role:"customer",id:"guest",name:"زائر"}; render(); }
-  });
-  document.querySelector("#sectionTrackBtn")?.addEventListener("click", ()=>{
-    const code = document.querySelector("#sectionTrackInput")?.value.trim();
-    if (code) { location.href=`${location.origin}${location.pathname}?track=${code}`; }
-  });
-
-  // ── Auth ──────────────────────────────────────────────
-  document.querySelector("#switchAuth")?.addEventListener("click", ()=>{
-    state.authMode = state.authMode==="login"?"register":"login"; render();
-  });
-  document.querySelector("#backToHome")?.addEventListener("click", e=>{ e.preventDefault(); state.page="home"; render(); });
-
-  // Login form
-  document.querySelector("#loginForm")?.addEventListener("submit", async e=>{
-    e.preventDefault();
-    const fd  = new FormData(e.currentTarget);
-    const btn = e.currentTarget.querySelector("button[type=submit]");
-    const err = document.querySelector("#loginError");
-    btn.disabled=true; btn.textContent="جاري الدخول...";
-    err.style.display="none";
-
-    const {data,error} = await db.auth.signInWithPassword({
-      email: fd.get("email"), password: fd.get("password")
-    });
-
-    btn.disabled=false; btn.innerHTML=`${icon("user")} دخول`;
-
-    if (error) {
-      err.style.display="block";
-      err.textContent = "بيانات الدخول غير صحيحة. تحقق من البريد وكلمة المرور.";
-      return;
-    }
-
-    // Get role from profiles table
-    const profile = await getProfile(data.user.id);
-    if (profile?.suspended) {
-      err.style.display="block";
-      err.textContent = "هذا الحساب موقوف. تواصل مع الإدارة.";
-      await db.auth.signOut();
-      return;
-    }
-
-    const role = profile?.role || fallbackRole(data.user.email);
-    const name = profile?.full_name || data.user.user_metadata?.full_name || data.user.email.split("@")[0];
-    const phone= profile?.phone || "";
-
-    const user = { id:data.user.id, name, role, email:data.user.email, phone, balance:0 };
-    saveSession(user);
-    state.user = user;
-    state.page = "dashboard";
-    state.view = role==="customer"?"track":role==="courier"?"tasks":role==="merchant"?"shipments":"overview";
-
-    await audit("LOGIN", data.user.id, `Logged in as ${role}`);
-    await askPush();
-    if (role==="admin"||role==="merchant") await loadUsers();
-    if (role==="admin") startRealtime();
-
-    render();
-    toast(`أهلاً ${name}!`);
-  });
-
-  // Register form (customer only)
-  document.querySelector("#registerForm")?.addEventListener("submit", async e=>{
-    e.preventDefault();
-    const fd      = new FormData(e.currentTarget);
-    const fullname= fd.get("fullname").trim();
-    const email   = fd.get("email").trim();
-    const phone   = fd.get("phone").trim();
-    const password= fd.get("password");
-    const confirm = fd.get("confirm");
-    const err     = document.querySelector("#regError");
-    const btn     = e.currentTarget.querySelector("button[type=submit]");
-    err.style.display="none";
-
-    if (!fullname||!email||!password){ err.style.display="block"; err.textContent="يرجى تعبئة جميع الحقول المطلوبة"; return; }
-    if (password!==confirm)           { err.style.display="block"; err.textContent="كلمة المرور غير متطابقة"; return; }
-    if (password.length<6)            { err.style.display="block"; err.textContent="كلمة المرور 6 أحرف على الأقل"; return; }
-
-    btn.disabled=true; btn.textContent="جاري الإنشاء...";
-
-    const {data,error} = await db.auth.signUp({
-      email, password, options:{data:{full_name:fullname, phone}}
-    });
-
-    btn.disabled=false; btn.innerHTML=`${icon("user")} إنشاء الحساب`;
-
-    if (error) {
-      err.style.display="block";
-      err.textContent = error.message.includes("already registered")
-        ? "هذا البريد الإلكتروني مسجل بالفعل" : "خطأ: "+error.message;
-      return;
-    }
-
-    // Save to profiles as customer
-    await db.from("profiles").upsert([{
-      id: data.user.id, full_name:fullname, email, phone, role:"customer"
-    }]);
-
-    const user = {id:data.user.id, name:fullname, role:"customer", email, phone, balance:0};
-    saveSession(user);
-    state.user = user;
-    state.page = "dashboard";
-    state.view = "track";
-    render();
-    toast(`مرحباً ${fullname}! تم إنشاء حسابك بنجاح`);
-  });
-
-  // ── Dashboard nav ────────────────────────────────────
-  document.querySelectorAll("[data-view]").forEach(btn=>{
-    btn.addEventListener("click",()=>{ state.view=btn.dataset.view; state.statusFilter="all"; render(); });
-  });
-
-  // ── Role switcher (admin preview) ────────────────────
-  document.querySelector("#roleSwitcher")?.addEventListener("change", e=>{
-    const role=e.target.value; if(!role) return;
-    state.user.role=role;
-    state.view=role==="customer"?"track":role==="courier"?"tasks":"overview";
-    render();
-  });
-
-  // ── Logout ───────────────────────────────────────────
-  document.querySelector("#logoutBtn")?.addEventListener("click", async ()=>{
-    await audit("LOGOUT","","User logged out");
-    await db.auth.signOut();
-    clearSession();
-    if(realtimeChannel){ db.removeChannel(realtimeChannel); realtimeChannel=null; }
-    state.user=null; state.page="home"; state.view="overview";
-    render();
-    toast("تم تسجيل الخروج","info");
-  });
-
-  // ── Search ───────────────────────────────────────────
-  const si=document.querySelector("#searchInput");
-  if(si){ let t; si.addEventListener("input",e=>{ clearTimeout(t); t=setTimeout(()=>{ state.query=e.target.value; render(); document.querySelector("#searchInput")?.focus(); },250); }); }
-
-  // ── User search ──────────────────────────────────────
-  const ui=document.querySelector("#userSearchInput");
-  if(ui){ let t; ui.addEventListener("input",e=>{ clearTimeout(t); t=setTimeout(()=>{ state.userFilter=e.target.value; render(); document.querySelector("#userSearchInput")?.focus(); },250); }); }
-
-  // ── Audit search ─────────────────────────────────────
-  const ai=document.querySelector("#auditSearchInput");
-  if(ai){ let t; ai.addEventListener("input",e=>{ clearTimeout(t); t=setTimeout(()=>{ state.auditFilter=e.target.value; window.loadAudit(); },300); }); }
-
-  // ── Open detail ──────────────────────────────────────
-  document.querySelectorAll("[data-open]").forEach(btn=>{
-    btn.addEventListener("click",()=>{ state.selectedShipment=btn.dataset.open; render(); });
-  });
-
-  // ── New shipment ─────────────────────────────────────
-  document.querySelector("#newShipmentBtn")?.addEventListener("click", openNewShipmentModal);
-
-  // ── Add user ─────────────────────────────────────────
-  document.querySelector("#addUserBtn")?.addEventListener("click", openAddUserModal);
-
-  // ── QR Scanner ───────────────────────────────────────
-  document.querySelector("#openScanner")?.addEventListener("click", openScanner);
-
-  // ── Notifications ────────────────────────────────────
-  document.querySelector("#toggleNotif")?.addEventListener("click", ()=>{
-    const p=document.querySelector("#notifPanel"); if(!p) return;
-    const open=p.style.display!=="none";
-    p.style.display=open?"none":"block";
-    if(!open){ notifications.forEach(n=>n.read=true); document.querySelector(".notif-badge")?.remove(); }
-  });
-  document.querySelector("#clearNotif")?.addEventListener("click", async ()=>{
-    notifications=[];
-    try{ await db.from("notifications").delete().neq("id","00000000-0000-0000-0000-000000000000"); }catch(e){}
-    render();
-  });
-
-  // ── Mobile sidebar ───────────────────────────────────
-  document.querySelector("#menuToggle")?.addEventListener("click",()=>{
-    document.querySelector("#sidebar")?.classList.toggle("open");
-    document.querySelector("#sidebarOverlay")?.classList.toggle("active");
-  });
-  document.querySelector("#sidebarOverlay")?.addEventListener("click",()=>{
-    document.querySelector("#sidebar")?.classList.remove("open");
-    document.querySelector("#sidebarOverlay")?.classList.remove("active");
-  });
-
-  // Close notif on outside click
-  document.addEventListener("click", e=>{
-    const panel=document.querySelector("#notifPanel");
-    const btn=document.querySelector("#toggleNotif");
-    if(panel&&!panel.contains(e.target)&&btn&&!btn.contains(e.target)){
-      panel.style.display="none";
-    }
-  }, {once:true});
-}
-
-// ═══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════
 // MODALS
-// ═══════════════════════════════════════════════════════════
-function openScanner() {
-  const modal=document.createElement("div"); modal.className="shipment-modal";
-  modal.innerHTML=`<div class="shipment-modal-box">
-    <h2>📷 مسح QR</h2>
-    <div id="reader" style="width:100%;"></div>
-    <button id="manualBtn" class="ghost-btn" style="margin-top:12px;width:100%;">إدخال كود يدوياً</button>
-    <div class="modal-actions"><button id="closeScanner" class="ghost-btn">إغلاق</button></div>
-  </div>`;
-  document.body.appendChild(modal);
-  document.querySelector("#manualBtn").onclick=()=>{
-    const c=prompt("أدخل رقم الشحنة:");
-    if(c){ modal.remove(); location.href=`${location.origin}${location.pathname}?track=${c}`; }
-  };
-  let scanner;
-  try {
-    scanner=new Html5Qrcode("reader");
-    scanner.start({facingMode:"environment"},{fps:10,qrbox:250},
-      t=>{scanner.stop();modal.remove();location.href=t;}).catch(()=>{});
-  }catch(e){}
-  document.querySelector("#closeScanner").onclick=async()=>{
-    try{if(scanner)await scanner.stop();}catch(e){} modal.remove();
-  };
-}
+// ══════════════════════════════════════════════════════════
+const Modals={
+  open(html){
+    const w=document.createElement("div");w.className="modal-wrap";w.id="modalWrap";
+    w.innerHTML=html;document.body.appendChild(w);
+    w.addEventListener("click",e=>{if(e.target===w)Modals.close();});return w;
+  },
+  close(){document.querySelector("#modalWrap")?.remove();},
 
-function openNewShipmentModal() {
-  const modal=document.createElement("div"); modal.className="shipment-modal";
-  modal.innerHTML=`<div class="shipment-modal-box large">
-    <h2>📦 شحنة جديدة</h2>
-    <div class="form-grid">
-      <input id="fCode"    placeholder="كود الشحنة *" style="font-weight:700;"/>
-      <input id="fName"    placeholder="اسم العميل *"/>
-      <input id="fPhone"   placeholder="الهاتف الأول *" type="tel"/>
-      <input id="fPhone2"  placeholder="الهاتف الثاني (اختياري)" type="tel"/>
-      <input id="fAmount"  placeholder="قيمة الطلب (ج.م) *" type="number"/>
-      <input id="fFee"     placeholder="رسوم الشحن" type="number" value="60"/>
-      <select id="fGov"><option value="">جاري تحميل المحافظات...</option></select>
-      <select id="fCenter"><option value="">اختر المركز</option></select>
-      <input id="fStreet"  placeholder="الشارع"/>
-      <input id="fBuild"   placeholder="العمارة"/>
-      <input id="fFloor"   placeholder="الدور"/>
-      <input id="fApt"     placeholder="الشقة"/>
-    </div>
-    <textarea id="fNotes" placeholder="ملاحظات إضافية"
-      style="width:100%;padding:10px;border-radius:var(--radius);border:1.5px solid var(--line);
-             height:60px;resize:vertical;font-size:13px;margin-top:4px;box-sizing:border-box;"></textarea>
-    <div id="shipErr" style="color:var(--danger);font-size:13px;margin-top:8px;display:none;
-                             background:#fef2f2;padding:8px 12px;border-radius:var(--radius);"></div>
-    <div class="modal-actions">
-      <button id="saveShip" class="primary-btn">💾 حفظ الشحنة</button>
-      <button id="closeShip" class="ghost-btn">إلغاء</button>
-    </div>
-  </div>`;
-  document.body.appendChild(modal);
-
-  // Load governorates
-  fetch("./cities.json").then(r=>r.json()).then(data=>{
-    window._egyptData=data[2]?.data||[];
-    const govs={1:"القاهرة",2:"الجيزة",3:"الإسكندرية",4:"الدقهلية",5:"البحر الأحمر",
-      6:"البحيرة",7:"الفيوم",8:"الغربية",9:"الإسماعيلية",10:"المنوفية",11:"المنيا",
-      12:"القليوبية",13:"الوادي الجديد",14:"السويس",15:"أسوان",16:"أسيوط",
-      17:"بني سويف",18:"بورسعيد",19:"دمياط",20:"الشرقية",21:"جنوب سيناء",22:"كفر الشيخ"};
-    document.querySelector("#fGov").innerHTML=
-      `<option value="">اختر المحافظة</option>`+
-      Object.entries(govs).map(([id,n])=>`<option value="${id}">${n}</option>`).join("");
-  }).catch(()=>{ const g=document.querySelector("#fGov"); if(g) g.innerHTML=`<option value="">تعذر التحميل</option>`; });
-
-  document.querySelector("#fGov").addEventListener("change",e=>{
-    const cities=(window._egyptData||[]).filter(x=>x.governorate_id==e.target.value);
-    document.querySelector("#fCenter").innerHTML=
-      `<option value="">اختر المركز</option>`+
-      cities.map(c=>`<option value="${c.city_name_ar}">${c.city_name_ar}</option>`).join("");
-  });
-
-  document.querySelector("#closeShip").onclick=()=>modal.remove();
-
-  document.querySelector("#saveShip").onclick=async()=>{
-    const code   = document.querySelector("#fCode").value.trim();
-    const cName  = document.querySelector("#fName").value.trim();
-    const cPhone = document.querySelector("#fPhone").value.trim();
-    const cPhone2= document.querySelector("#fPhone2").value.trim();
-    const amount = Number(document.querySelector("#fAmount").value)||0;
-    const fee    = Number(document.querySelector("#fFee").value)||60;
-    const center = document.querySelector("#fCenter").value;
-    const street = document.querySelector("#fStreet").value.trim();
-    const build  = document.querySelector("#fBuild").value.trim();
-    const floor  = document.querySelector("#fFloor").value.trim();
-    const apt    = document.querySelector("#fApt").value.trim();
-    const notes  = document.querySelector("#fNotes").value.trim();
-    const errEl  = document.querySelector("#shipErr");
-    const btn    = document.querySelector("#saveShip");
-
-    if(!code||!cName||!cPhone||!amount){
-      errEl.style.display="block";
-      errEl.textContent="الحقول المطلوبة: كود الشحنة، اسم العميل، الهاتف، القيمة";
-      return;
-    }
-
-    const addrParts=[center,street?`شارع ${street}`:"",build?`عمارة ${build}`:"",floor?`دور ${floor}`:"",apt?`شقة ${apt}`:""];
-    const address=addrParts.filter(Boolean).join(" - ");
-
-    btn.disabled=true; btn.innerHTML=`<div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> جاري الحفظ...`;
-
-    // Determine merchant info
-    const isMerchant = state.user.role==="merchant";
-    const insertData = {
-      shipment_code:   code,
-      customer_name:   cName,
-      customer_phone:  cPhone,
-      customer_phone2: cPhone2||null,
-      address,
-      amount,
-      delivery_fee:    fee,
-      status:          "created",
-      eta:             "قيد التجهيز",
-      notes:           notes||null,
-      merchant_id:     isMerchant ? state.user.id : null,
-      merchant_name:   isMerchant ? state.user.name : null,
-      merchant_phone:  isMerchant ? (state.user.phone||null) : null,
-    };
-
-    const {error} = await db.from("shipments").insert([insertData]);
-
-    if (error) {
-      errEl.style.display="block";
-      errEl.textContent = error.code==="23505"
-        ? "كود الشحنة موجود بالفعل، اختر كوداً آخر"
-        : "خطأ: "+error.message;
-      btn.disabled=false; btn.innerHTML="💾 حفظ الشحنة";
-      return;
-    }
-
-    await addTimeline(code,"تم إنشاء الشحنة");
-    await addNotif(`شحنة جديدة: ${code} — ${cName}`,"admin");
-    await audit("CREATE_SHIPMENT", code, `Created by ${state.user.name} for ${cName}`);
-
-    modal.remove();
-    await loadShipments();
-    toast(`✅ تم إضافة الشحنة ${code} بنجاح`);
-  };
-}
-
-function openAddUserModal() {
-  const modal=document.createElement("div"); modal.className="shipment-modal";
-  modal.innerHTML=`<div class="shipment-modal-box">
-    <h2>👤 مستخدم جديد</h2>
-    <div style="display:flex;flex-direction:column;gap:12px;margin-top:8px;">
-      <div class="form-field"><label>الاسم الكامل *</label>
-        <input id="uName" placeholder="محمد أحمد"/></div>
-      <div class="form-field"><label>البريد الإلكتروني *</label>
-        <input id="uEmail" type="email" placeholder="user@example.com"/></div>
-      <div class="form-field"><label>كلمة المرور *</label>
-        <input id="uPass" type="password" placeholder="6 أحرف على الأقل"/></div>
-      <div class="form-field"><label>الهاتف</label>
-        <input id="uPhone" placeholder="01xxxxxxxxx" type="tel"/></div>
-      <div class="form-field"><label>الدور</label>
-        <select id="uRole">
-          <option value="merchant">تاجر</option>
-          <option value="courier">مندوب</option>
-          <option value="customer">عميل</option>
-          <option value="admin">إدارة</option>
-        </select>
+  scanner(){
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>📷 مسح QR</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div id="qrReader"></div>
+        <button class="btn btn-secondary" style="width:100%;margin-top:12px;" id="manualQR">إدخال كود يدوياً</button>
       </div>
-    </div>
-    <div id="uErr" style="color:var(--danger);font-size:13px;margin-top:8px;
-                          background:#fef2f2;padding:8px 12px;border-radius:var(--radius);display:none;"></div>
-    <div class="modal-actions">
-      <button id="saveUser" class="primary-btn">حفظ</button>
-      <button id="closeUser" class="ghost-btn">إلغاء</button>
-    </div>
-  </div>`;
-  document.body.appendChild(modal);
-  document.querySelector("#closeUser").onclick=()=>modal.remove();
-  document.querySelector("#saveUser").onclick=async()=>{
-    const name=document.querySelector("#uName").value.trim();
-    const email=document.querySelector("#uEmail").value.trim();
-    const pass=document.querySelector("#uPass").value;
-    const phone=document.querySelector("#uPhone").value.trim();
-    const role=document.querySelector("#uRole").value;
-    const errEl=document.querySelector("#uErr");
-    const btn=document.querySelector("#saveUser");
-    if(!name||!email||!pass){errEl.style.display="block";errEl.textContent="يرجى تعبئة الحقول المطلوبة";return;}
-    if(pass.length<6){errEl.style.display="block";errEl.textContent="كلمة المرور 6 أحرف على الأقل";return;}
-    btn.disabled=true;btn.textContent="جاري الإنشاء...";
-    const{data,error}=await db.auth.signUp({email,password:pass,options:{data:{full_name:name,role,phone}}});
-    if(error){
-      errEl.style.display="block";
-      errEl.textContent=error.message.includes("already")?"البريد مسجل بالفعل":"خطأ: "+error.message;
-      btn.disabled=false;btn.textContent="حفظ";return;
-    }
-    await db.from("profiles").upsert([{id:data.user.id,full_name:name,email,phone,role}]);
-    await audit("CREATE_USER",data.user.id,`Admin created ${role}: ${email}`);
-    users.push({id:data.user.id,name,email,phone,role,createdAt:new Date().toLocaleDateString("ar-EG"),balance:0,suspended:false});
-    modal.remove(); render();
-    toast(`✅ تم إنشاء ${name} كـ ${roleName(role)}`);
-  };
-}
+    </div>`);
+    $("manualQR").onclick=()=>{Modals.close();App.manualTrack();};
+    let scanner;
+    try{
+      scanner=new Html5Qrcode("qrReader");
+      scanner.start({facingMode:"environment"},{fps:10,qrbox:250},
+        t=>{scanner.stop();Modals.close();location.href=t;}).catch(()=>{});
+    }catch(e){}
+    const orig=Modals.close.bind(Modals);
+    Modals.close=async()=>{try{if(scanner)await scanner.stop();}catch(e){}orig();Modals.close=orig;};
+  },
 
-// ═══════════════════════════════════════════════════════════
-// GLOBAL WINDOW FUNCTIONS
-// ═══════════════════════════════════════════════════════════
-window.setFilter = (f)=>{ state.statusFilter=f; render(); };
-window.goTo      = (view,filter)=>{ state.view=view; state.statusFilter=filter||"all"; render(); };
-window.manualTrack=()=>{
-  const c=prompt("أدخل رقم الشحنة:");
-  if(c) location.href=`${location.origin}${location.pathname}?track=${encodeURIComponent(c.trim())}`;
-};
-
-window.updateStatus = async (id, status) => {
-  const s=shipments.find(x=>x.id===id); if(!s) return;
-  s.status=status;
-  if(status==="delivered") s.eta="تم التسليم";
-
-  const{error}=await db.from("shipments").update({status,eta:s.eta}).eq("shipment_code",id);
-  if(error){toast("خطأ في التحديث: "+error.message,"error");return;}
-
-  await addTimeline(id, STATUS[status]?.label||status);
-  await addNotif(`شحنة ${id} → ${STATUS[status]?.label||status}`,"admin");
-  await audit("UPDATE_STATUS", id, `${status} by ${state.user?.name}`);
-
-  if(status==="delivered"||status==="returned"){
-    push(status==="delivered"?"✅ تم التسليم":"↩ مرتجع", `شحنة ${id}`);
-    if(confirm("إرسال إشعار واتساب للعميل؟")){
-      const msg=`مرحباً ${s.customerName}\n\nشحنتك: ${s.id}\nالحالة: ${STATUS[status]?.label}\n\nالنخبة للشحن السريع`;
-      window.open(`https://wa.me/2${s.customerPhone}?text=${encodeURIComponent(msg)}`);
-    }
-  }
-  render();
-};
-
-window.assignCourier = async (id) => {
-  const courierId=document.querySelector("#assignCourier")?.value;
-  if(!courierId){toast("اختر مندوباً أولاً","error");return;}
-  const s=shipments.find(x=>x.id===id); if(!s) return;
-
-  const{error}=await db.from("shipments").update({courier_id:courierId}).eq("shipment_code",id);
-  if(error){toast("خطأ في التعيين: "+error.message,"error");return;}
-
-  s.courierId=courierId;
-  const cn=users.find(u=>u.id===courierId)?.name||courierId;
-  await addTimeline(id,`تم تعيين المندوب: ${cn}`);
-  await addNotif(`مندوب ${cn} تم تعيينه لشحنة ${id}`,"courier");
-  await audit("ASSIGN_COURIER",id,`${cn} assigned to ${id}`);
-  push("📦 تعيين جديد",`شحنة ${id} تم تعيينها لك`);
-  toast(`✅ تم تعيين ${cn}`);
-  render();
-};
-
-window.uploadPOD = async (id, inputId) => {
-  const file=document.querySelector(`#${CSS.escape(inputId)}`)?.files[0];
-  if(!file){toast("اختر صورة أولاً","error");return;}
-  if(file.size>5*1024*1024){toast("الحد الأقصى 5MB","error");return;}
-  try {
-    const ext=file.name.split(".").pop()||"jpg";
-    const fn=`pod_${id}_${Date.now()}.${ext}`;
-    const{error:upErr}=await db.storage.from("pod-images").upload(fn,file,{upsert:true});
-    if(upErr) throw upErr;
-    const{data:ud}=db.storage.from("pod-images").getPublicUrl(fn);
-    const{error:urr}=await db.from("shipments").update({pod_url:ud.publicUrl}).eq("shipment_code",id);
-    if(urr) throw urr;
-    const s=shipments.find(x=>x.id===id); if(s) s.podUrl=ud.publicUrl;
-    await addTimeline(id,"تم رفع إثبات التسليم");
-    await audit("UPLOAD_POD",id,`POD by ${state.user?.name}`);
-    toast("✅ تم رفع إثبات التسليم");
-    render();
-  }catch(err){toast("فشل الرفع: "+err.message,"error");}
-};
-
-window.exportExcel = () => {
-  if(!can("export_excel")){toast("غير مصرح","error");return;}
-  const data=visible().map(s=>({
-    "كود الشحنة":s.id,"العميل":s.customerName,"الهاتف":s.customerPhone,
-    "هاتف 2":s.customerPhone2||"","العنوان":s.address,
-    "الحالة":STATUS[s.status]?.label||s.status,"المبلغ":s.amount,
-    "الرسوم":s.deliveryFee,"التاجر":s.merchantName||""
-  }));
-  const ws=XLSX.utils.json_to_sheet(data);
-  const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,ws,"Shipments");
-  XLSX.writeFile(wb,`nukhba_${new Date().toLocaleDateString("en-GB").replace(/\//g,"-")}.xlsx`);
-  audit("EXPORT_EXCEL","",`${data.length} shipments exported`);
-};
-
-window.printShipment = async id => {
-  if(!can("print_shipment")){toast("غير مصرح","error");return;}
-  const s=shipments.find(x=>x.id===id); if(!s) return;
-  const el=document.createElement("div");
-  el.style.cssText="width:700px;padding:30px;background:#fff;direction:rtl;font-family:Arial;position:fixed;top:-9999px;left:0;z-index:-1;";
-  el.innerHTML=`<div style="border:2px solid #111;padding:24px;border-radius:12px;">
-    <h1 style="text-align:center;margin-bottom:20px;color:#0f766e;">النخبة للشحن السريع</h1>
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
-      <div>
-        <p><b>رقم الشحنة:</b> ${esc(s.id)}</p>
-        <p><b>العميل:</b> ${esc(s.customerName)}</p>
-        <p><b>الهاتف:</b> ${esc(s.customerPhone)}</p>
-        ${s.customerPhone2?`<p><b>هاتف 2:</b> ${esc(s.customerPhone2)}</p>`:""}
-        <p><b>المبلغ:</b> ${s.amount} ج.م</p>
-        <p><b>رسوم الشحن:</b> ${s.deliveryFee} ج.م</p>
-        <p><b>العنوان:</b> ${esc(s.address)}</p>
-        ${s.merchantName?`<p><b>التاجر:</b> ${esc(s.merchantName)}</p>`:""}
+  newShipment(){
+    const govOpts=Object.keys(EGYPT_GOV).map(g=>`<option value="${g}">${g}</option>`).join("");
+    const couriers=AppState.couriers;
+    const autoCode=`ANE-${Date.now().toString().slice(-6)}`;
+    Modals.open(`<div class="modal modal-xl">
+      <div class="modal-header">
+        <h3>${icon("pkg",18)} شحنة جديدة</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
       </div>
-      <canvas id="printQR"></canvas>
-    </div>
-  </div>`;
-  document.body.appendChild(el);
-  await QRCode.toCanvas(document.querySelector("#printQR"),
-    `${location.origin}${location.pathname}?track=${s.id}`,{width:150});
-  const canvas=await html2canvas(el);
-  const{jsPDF}=window.jspdf;
-  const pdf=new jsPDF("p","mm","a4");
-  pdf.addImage(canvas.toDataURL("image/png"),"PNG",10,10,190,130);
-  pdf.save(`${s.id}.pdf`);
-  el.remove();
-  audit("PRINT_SHIPMENT",s.id,`Printed by ${state.user?.name}`);
-};
-
-window.editUser = (id) => {
-  const u=users.find(x=>x.id===id); if(!u) return;
-  const modal=document.createElement("div"); modal.className="shipment-modal";
-  modal.innerHTML=`<div class="shipment-modal-box">
-    <h2>✏️ تعديل المستخدم</h2>
-    <div style="display:flex;flex-direction:column;gap:12px;margin-top:8px;">
-      <div class="form-field"><label>الاسم</label><input id="euName" value="${esc(u.name)}"/></div>
-      <div class="form-field"><label>الهاتف</label><input id="euPhone" value="${esc(u.phone||"")}"/></div>
-      <div class="form-field"><label>الدور</label>
-        <select id="euRole">
-          ${["admin","merchant","courier","customer"].map(r=>`<option value="${r}" ${u.role===r?"selected":""}>${roleName(r)}</option>`).join("")}
-        </select>
+      <div class="modal-body">
+        <div class="form-section-label">بيانات الشحنة</div>
+        <div class="form-row">
+          <div class="field"><label>كود الشحنة *</label><input id="fCode" value="${autoCode}" style="font-weight:700;font-family:monospace;"/></div>
+          <div class="field"><label>قيمة الطلب (ج.م) *</label><input id="fAmount" type="number" min="0" placeholder="0"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>رسوم الشحن (ج.م)</label><input id="fFee" type="number" value="60" min="0"/></div>
+          <div class="field"><label>موعد التسليم</label><input id="fEta" placeholder="مثال: خلال 48 ساعة"/></div>
+        </div>
+        <div class="form-section-label">بيانات العميل</div>
+        <div class="form-row">
+          <div class="field"><label>اسم العميل *</label><input id="fCustName"/></div>
+          <div class="field"><label>الهاتف الأول *</label><input id="fPhone" type="tel" placeholder="01xxxxxxxxx"/></div>
+        </div>
+        <div class="form-row single">
+          <div class="field"><label>الهاتف الثاني (اختياري)</label><input id="fPhone2" type="tel" placeholder="01xxxxxxxxx"/></div>
+        </div>
+        <div class="form-section-label">العنوان</div>
+        <div class="form-row">
+          <div class="field"><label>المحافظة *</label><select id="fGov"><option value="">اختر المحافظة</option>${govOpts}</select></div>
+          <div class="field"><label>المدينة / المركز</label><select id="fCity"><option value="">اختر المدينة</option></select></div>
+        </div>
+        <div class="form-row three">
+          <div class="field"><label>الشارع</label><input id="fStreet"/></div>
+          <div class="field"><label>العمارة</label><input id="fBuild"/></div>
+          <div class="field"><label>الدور / الشقة</label><input id="fFloor"/></div>
+        </div>
+        ${couriers.length?`
+        <div class="form-section-label">تعيين مندوب (اختياري)</div>
+        <div class="form-row single">
+          <div class="field"><label>المندوب</label>
+            <select id="fCourier">
+              <option value="">-- بدون تعيين --</option>
+              ${couriers.map(c=>`<option value="${esc(c.id)}" data-name="${esc(c.full_name)}">${esc(c.full_name)}${c.phone?` — ${esc(c.phone)}`:""}</option>`).join("")}
+            </select>
+          </div>
+        </div>`:""}
+        <div class="form-section-label">ملاحظات</div>
+        <div class="form-row single">
+          <div class="field"><textarea id="fNotes" rows="2" placeholder="ملاحظات إضافية..." style="resize:vertical;"></textarea></div>
+        </div>
+        <div id="shipErr" class="form-error"></div>
       </div>
-    </div>
-    <div id="euErr" style="color:var(--danger);font-size:13px;margin-top:8px;display:none;"></div>
-    <div class="modal-actions">
-      <button id="saveEU" class="primary-btn">حفظ التغييرات</button>
-      <button id="closeEU" class="ghost-btn">إلغاء</button>
-    </div>
-  </div>`;
-  document.body.appendChild(modal);
-  document.querySelector("#closeEU").onclick=()=>modal.remove();
-  document.querySelector("#saveEU").onclick=async()=>{
-    const name=document.querySelector("#euName").value.trim();
-    const phone=document.querySelector("#euPhone").value.trim();
-    const role=document.querySelector("#euRole").value;
-    const errEl=document.querySelector("#euErr");
-    const btn=document.querySelector("#saveEU");
-    if(!name){errEl.style.display="block";errEl.textContent="الاسم مطلوب";return;}
-    btn.disabled=true;btn.textContent="جاري الحفظ...";
-    const{error}=await db.from("profiles").update({full_name:name,phone,role}).eq("id",id);
-    if(error){errEl.style.display="block";errEl.textContent="خطأ: "+error.message;btn.disabled=false;btn.textContent="حفظ التغييرات";return;}
-    await audit("EDIT_USER",id,`Updated: name=${name}, role=${role}`);
-    const idx=users.findIndex(x=>x.id===id);
-    if(idx>=0) users[idx]={...users[idx],name,phone,role};
-    modal.remove(); render();
-    toast(`✅ تم تحديث ${name}`);
-  };
-};
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveShipBtn">${icon("plus",14)} حفظ الشحنة</button>
+      </div>
+    </div>`);
 
-window.toggleUser = async (id) => {
-  const u=users.find(x=>x.id===id); if(!u) return;
-  const ns=!u.suspended;
-  const{error}=await db.from("profiles").update({suspended:ns}).eq("id",id);
-  if(error){toast("فشل التحديث","error");return;}
-  u.suspended=ns;
-  await audit(ns?"SUSPEND_USER":"ACTIVATE_USER",id,`${state.user?.name} ${ns?"suspended":"activated"} ${u.email}`);
-  toast(`${ns?"تم إيقاف":"تم تفعيل"} ${u.name}`);
-  render();
-};
-
-window.deleteUser = async (id) => {
-  const u=users.find(x=>x.id===id); if(!u) return;
-  if(!confirm(`حذف المستخدم ${u.name}؟ لا يمكن التراجع.`)) return;
-  const{error}=await db.from("profiles").delete().eq("id",id);
-  if(error){toast("فشل الحذف: "+error.message,"error");return;}
-  await audit("DELETE_USER",id,`${state.user?.name} deleted ${u.email}`);
-  users=users.filter(x=>x.id!==id);
-  toast(`تم حذف ${u.name}`,"info");
-  render();
-};
-
-window.loadAudit = async () => {
-  const container=document.querySelector("#auditTable"); if(!container) return;
-  try {
-    const{data,error}=await db.from("audit_logs").select("*").order("created_at",{ascending:false}).limit(200);
-    if(error) throw error;
-    const logs=(data||[]).filter(l=>{
-      const txt=`${l.username} ${l.action} ${l.target_id} ${l.role} ${l.details}`.toLowerCase();
-      return txt.includes((state.auditFilter||"").toLowerCase());
+    $("fGov").addEventListener("change",e=>{
+      const cities=EGYPT_GOV[e.target.value]||[];
+      $("fCity").innerHTML=`<option value="">اختر المدينة</option>`+cities.map(c=>`<option value="${c}">${c}</option>`).join("");
     });
-    if(!logs.length){
-      container.innerHTML=`<div class="empty-state"><div class="empty-icon">📋</div><h3>لا يوجد سجل بعد</h3></div>`;
-      return;
-    }
-    container.innerHTML=`<div class="table-wrap"><table>
-      <thead><tr><th>الوقت</th><th>المستخدم</th><th>الدور</th><th>الإجراء</th><th>الهدف</th><th>التفاصيل</th></tr></thead>
-      <tbody>
-        ${logs.map(l=>`<tr>
-          <td style="font-size:11px;color:var(--muted);white-space:nowrap;">${new Date(l.created_at).toLocaleString("ar-EG")}</td>
-          <td><b>${esc(l.username||"—")}</b></td>
-          <td><span class="badge ${roleColor(l.role)}">${roleName(l.role)}</span></td>
-          <td><span class="audit-action">${esc(l.action)}</span></td>
-          <td><code style="font-size:11px;">${esc(l.target_id||"—")}</code></td>
-          <td style="font-size:12px;color:var(--muted);">${esc(l.details||"—")}</td>
-        </tr>`).join("")}
-      </tbody>
-    </table></div>`;
-  }catch(e){
-    container.innerHTML=`<p style="color:var(--danger);padding:1rem;">تعذر تحميل السجل: ${e.message}</p>`;
+
+    $("saveShipBtn").addEventListener("click",async()=>{
+      const code=$("fCode")?.value.trim(),cName=$("fCustName")?.value.trim();
+      const cPhone=$("fPhone")?.value.trim(),cPhone2=$("fPhone2")?.value.trim();
+      const amount=Number($("fAmount")?.value)||0,fee=Number($("fFee")?.value)||60;
+      const eta=$("fEta")?.value.trim(),gov=$("fGov")?.value,city=$("fCity")?.value;
+      const street=$("fStreet")?.value.trim(),build=$("fBuild")?.value.trim(),floor=$("fFloor")?.value.trim();
+      const notes=$("fNotes")?.value.trim();
+      const sel=$("fCourier");
+      const courierId=sel?.value||null,courierName=courierId?(sel.options[sel.selectedIndex]?.dataset.name||""):"";
+      const errEl=$("shipErr");const btn=$("saveShipBtn");
+      errEl.style.display="none";
+      if(!code||!cName||!cPhone||!amount){errEl.style.display="block";errEl.textContent="الحقول المطلوبة: الكود، اسم العميل، الهاتف، القيمة";return;}
+      if(!gov){errEl.style.display="block";errEl.textContent="يرجى اختيار المحافظة";return;}
+      const address=[gov,city,street?`شارع ${street}`:"",build?`عمارة ${build}`:"",floor?`دور ${floor}`:""].filter(Boolean).join(" - ");
+      btn.disabled=true;btn.innerHTML=`<span class="spinner"></span> جاري الحفظ...`;
+      try {
+        const{data:{session}}=await db.auth.getSession();
+        const uid=session?.user?.id||AppState.user?.id||null;
+        const isMerchant=AppState.user.role==="merchant";
+        await DB.createShipment({
+          shipment_code:code,customer_name:cName,customer_phone:cPhone,
+          customer_phone2:cPhone2||null,address,governorate:gov,city:city||null,
+          street:street||null,building:build||null,floor:floor||null,
+          amount,delivery_fee:fee,status:"created",eta:eta||null,notes:notes||null,
+          merchant_id:isMerchant?uid:null,
+          merchant_name:isMerchant?AppState.user.name:null,
+          merchant_phone:isMerchant?(AppState.user.phone||null):null,
+          courier_id:courierId,courier_name:courierName||null,
+          created_by:uid,
+        });
+        await DB.addTimeline(code,"تم إنشاء الشحنة",AppState.user.name,AppState.user.role);
+        await DB.addNotification(`شحنة جديدة: ${code} — ${cName}`,"admin",code,"shipment");
+        await DB.addAudit("CREATE_SHIPMENT",code,`By ${AppState.user.name} for ${cName}`);
+        Modals.close();
+        AppState.shipments=await DB.loadShipments();
+        rerenderContent();toast(`✅ تم إضافة الشحنة ${code}`);
+      } catch(err) {
+        errEl.style.display="block";
+        errEl.textContent=err.message?.includes("23505")?"كود الشحنة موجود بالفعل":"خطأ: "+err.message;
+        btn.disabled=false;btn.innerHTML=`${icon("plus",14)} حفظ الشحنة`;
+      }
+    });
+  },
+
+  addUser(){
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>${icon("user",18)} مستخدم جديد</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>الاسم الكامل *</label><input id="uName"/></div>
+        <div class="field"><label>البريد الإلكتروني *</label><input id="uEmail" type="email"/></div>
+        <div class="field"><label>كلمة المرور *</label><input id="uPass" type="password"/></div>
+        <div class="field"><label>الهاتف</label><input id="uPhone" type="tel"/></div>
+        <div class="field"><label>الدور</label>
+          <select id="uRole">
+            <option value="merchant">تاجر</option><option value="courier">مندوب</option>
+            <option value="customer">عميل</option><option value="admin">إدارة</option>
+          </select>
+        </div>
+        <div id="uErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveUserBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveUserBtn").addEventListener("click",async()=>{
+      const name=$("uName").value.trim(),email=$("uEmail").value.trim();
+      const pass=$("uPass").value,phone=$("uPhone").value.trim(),role=$("uRole").value;
+      const errEl=$("uErr"),btn=$("saveUserBtn");
+      errEl.style.display="none";
+      if(!name||!email||!pass){errEl.style.display="block";errEl.textContent="يرجى تعبئة الحقول المطلوبة";return;}
+      if(pass.length<6){errEl.style.display="block";errEl.textContent="كلمة المرور 6 أحرف على الأقل";return;}
+      btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const{data,error}=await db.auth.signUp({email,password:pass,options:{data:{full_name:name,role,phone}}});
+        if(error)throw error;
+        await db.from("profiles").upsert([{id:data.user.id,full_name:name,email,phone,role,is_active:true}]);
+        await DB.addAudit("CREATE_USER",data.user.id,`Admin created ${role}: ${email}`);
+        AppState.users.push({id:data.user.id,name,email,phone,role,isActive:true,suspended:false,createdAt:fmtDate(new Date()),balance:0});
+        Modals.close();rerenderContent();
+        toast(`✅ تم إنشاء ${name} كـ ${ROLE_MAP[role]?.label}`);
+      }catch(err){
+        errEl.style.display="block";
+        errEl.textContent=err.message?.includes("already")?"البريد مسجل بالفعل":"خطأ: "+err.message;
+        btn.disabled=false;btn.textContent="حفظ";
+      }
+    });
   }
 };
 
-// ═══════════════════════════════════════════════════════════
-// DATA FUNCTIONS
-// ═══════════════════════════════════════════════════════════
-async function addTimeline(shipmentCode, event) {
-  try { await db.from("shipment_timeline").insert([{shipment_code:shipmentCode,event}]); }
-  catch(e){ console.warn("Timeline:",e.message); }
-}
+// ══════════════════════════════════════════════════════════
+// APP GLOBAL FUNCTIONS
+// ══════════════════════════════════════════════════════════
+const App={
+  setFilter(f){AppState.statusFilter=f;rerenderContent();},
+  manualTrack(){const c=prompt("أدخل رقم الشحنة:");if(c)location.href=`${location.origin}${location.pathname}?track=${encodeURIComponent(c.trim())}`;},
 
-async function loadTimeline(shipmentCode) {
-  const el=document.querySelector(`#timeline-${shipmentCode}`); if(!el) return;
-  try {
-    const{data,error}=await db.from("shipment_timeline")
-      .select("*").eq("shipment_code",shipmentCode).order("created_at",{ascending:true});
-    if(error) throw error;
-    if(!data?.length){
-      el.innerHTML=`<h4>سجل الشحنة</h4><p style="color:var(--muted);font-size:13px;">لا يوجد سجل بعد</p>`;
-      return;
-    }
-    el.innerHTML=`<h4>سجل الشحنة</h4>${data.map(e=>`
-      <div class="timeline-item">
-        <span class="tl-dot"></span>
-        <div><b>${esc(e.event)}</b><small>${new Date(e.created_at).toLocaleString("ar-EG")}</small></div>
-      </div>`).join("")}`;
-  }catch(e){
-    el.innerHTML=`<h4>سجل الشحنة</h4><p style="color:var(--muted);font-size:13px;">تعذر التحميل</p>`;
-  }
-}
-
-async function addNotif(text, role="admin") {
-  try {
-    await db.from("notifications").insert([{text,role}]);
-    notifications.unshift({text,role,time:new Date().toLocaleTimeString("ar-EG"),read:false});
-  }catch(e){ console.warn("Notif:",e.message); }
-}
-
-async function loadNotifications() {
-  try {
-    const role=state.user?.role||"customer";
-    if(role==="customer"){notifications=[];return;}
-    let q=db.from("notifications").select("*").order("created_at",{ascending:false}).limit(20);
-    if(role==="courier")       q=q.eq("role","courier");
-    else if(role==="merchant") q=q.in("role",["merchant","admin"]);
-    const{data}=await q;
-    if(data) notifications=data.map(n=>({text:n.text,role:n.role,time:new Date(n.created_at).toLocaleTimeString("ar-EG"),read:false}));
-  }catch(e){console.warn("loadNotif:",e.message);}
-}
-
-async function loadUsers() {
-  try {
-    const{data,error}=await db.from("profiles").select("*").order("created_at",{ascending:false});
-    if(error) throw error;
-    if(data?.length) users=data.map(u=>({
-      id:u.id, name:u.full_name||"—", email:u.email||"—", phone:u.phone||"—",
-      role:u.role||"customer", suspended:u.suspended||false,
-      createdAt:u.created_at?new Date(u.created_at).toLocaleDateString("ar-EG"):"—", balance:0
-    }));
-  }catch(e){console.warn("loadUsers:",e.message);}
-}
-
-async function loadShipments() {
-  try {
-    const{data,error}=await db.from("shipments").select("*").order("created_at",{ascending:false});
-    if(error) throw error;
-    shipments=data.map(mapRow);
-    if(!state.selectedShipment&&shipments.length) state.selectedShipment=shipments[0].id;
-    render();
-  }catch(err){
-    console.error("loadShipments:",err);
-    const app=document.querySelector("#app");
-    if(app){
-      const b=document.createElement("div");
-      b.style.cssText="background:#fef2f2;color:var(--danger);padding:12px;text-align:center;font-size:13px;";
-      b.textContent="تعذر تحميل الشحنات — "+err.message;
-      app.prepend(b);
-    }
-    render();
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-// PWA
-// ═══════════════════════════════════════════════════════════
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
-
-// ═══════════════════════════════════════════════════════════
-// BOOT — check session and route correctly
-// ═══════════════════════════════════════════════════════════
-(async () => {
-  const params  = new URLSearchParams(window.location.search);
-  const trackId = params.get("track");
-
-  // Public tracking URL — skip auth
-  if (trackId) {
-    state.selectedShipment = trackId;
-    state.view = "track";
-    state.user = {role:"customer", id:"guest", name:"زائر"};
-    await loadShipments();
-    return;
-  }
-
-  // Check for existing valid session
-  const session = getSession();
-  if (session?.id) {
-    // Verify session is still valid with Supabase
-    const {data:{session:supa}} = await db.auth.getSession();
-    if (supa && supa.user.id === session.id) {
-      // Session valid — check for suspension
-      const profile = await getProfile(session.id);
-      if (profile?.suspended) {
-        clearSession();
-        state.page="auth"; state.authMode="login";
-        render();
-        toast("هذا الحساب موقوف. تواصل مع الإدارة.","error");
-        return;
+  async updateStatus(id,status){
+    const s=AppState.shipments.find(x=>x.id===id);if(!s)return;
+    s.status=status;if(status==="delivered")s.eta="تم التسليم";
+    try{
+      await DB.updateShipment(id,{status,eta:s.eta});
+      await DB.addTimeline(id,STATUS_MAP[status]?.label||status,AppState.user.name,AppState.user.role);
+      await DB.addNotification(`شحنة ${id} → ${STATUS_MAP[status]?.label}`,"admin",id);
+      await DB.addAudit("UPDATE_STATUS",id,`→ ${status} by ${AppState.user.name}`);
+      if(status==="delivered"||status==="returned"){
+        if(confirm("إرسال إشعار واتساب للعميل؟")){
+          const msg=`مرحباً ${s.customerName}\n\nشحنتك: ${s.id}\nالحالة: ${STATUS_MAP[status]?.label}\n\nالنخبة للشحن السريع`;
+          window.open(`https://wa.me/2${s.customerPhone}?text=${encodeURIComponent(msg)}`);
+        }
       }
-      // Refresh role from profile
-      state.user = {
-        ...session,
-        role:  profile?.role  || session.role,
-        name:  profile?.full_name || session.name,
-        phone: profile?.phone || session.phone
-      };
-      state.page = "dashboard";
-      state.view = state.user.role==="customer"?"track":
-                   state.user.role==="courier"?"tasks":
-                   state.user.role==="merchant"?"shipments":"overview";
-      saveSession(state.user);
-      await loadNotifications();
-      await loadShipments();
-      if (state.user.role==="admin"||state.user.role==="merchant") await loadUsers();
-      if (state.user.role==="admin") startRealtime();
-      await askPush();
-      return;
-    } else {
-      clearSession();
-    }
-  }
+      rerenderContent();toast(`تم تحديث الشحنة ${id}`);
+    }catch(err){toast("خطأ في التحديث: "+err.message,"error");}
+  },
 
-  // No valid session — show homepage
-  state.page = "home";
-  await loadShipments(); // load for tracking widget
-  render();
+  async assignCourier(id){
+    const sel=$("courierSelect");if(!sel)return;
+    const courierId=sel.value,courierName=sel.options[sel.selectedIndex]?.text||"";
+    if(!courierId){toast("اختر مندوباً أولاً","warning");return;}
+    const s=AppState.shipments.find(x=>x.id===id);if(!s)return;
+    try{
+      const cleanName=courierName.split("—")[0].trim();
+      await DB.updateShipment(id,{courier_id:courierId,courier_name:cleanName});
+      s.courierId=courierId;s.courierName=cleanName;
+      await DB.addTimeline(id,`تعيين المندوب: ${cleanName}`,AppState.user.name,AppState.user.role);
+      await DB.addNotification(`مندوب ${cleanName} معين لشحنة ${id}`,"courier",id,"shipment");
+      await DB.addAudit("ASSIGN_COURIER",id,`${cleanName} → ${id}`);
+      rerenderContent();toast(`✅ تم تعيين ${cleanName}`);
+    }catch(err){toast("خطأ في التعيين: "+err.message,"error");}
+  },
+
+  async uploadPOD(id,inputId){
+    const file=document.querySelector(`#${CSS.escape(inputId)}`)?.files[0];if(!file)return;
+    if(file.size>5*1024*1024){toast("الحد الأقصى للصورة 5MB","warning");return;}
+    try{
+      const url=await DB.uploadPOD(id,file);
+      await DB.updateShipment(id,{pod_url:url,pod_uploaded_at:new Date().toISOString(),pod_uploaded_by:AppState.user?.id||null});
+      const s=AppState.shipments.find(x=>x.id===id);if(s)s.podUrl=url;
+      await DB.addTimeline(id,"رفع إثبات التسليم",AppState.user.name,AppState.user.role);
+      await DB.addAudit("UPLOAD_POD",id,`By ${AppState.user.name}`);
+      rerenderContent();toast("✅ تم رفع إثبات التسليم");
+    }catch(err){toast("فشل الرفع: "+err.message,"error");}
+  },
+
+  exportExcel(){
+    if(!can("export_excel")){toast("غير مصرح","error");return;}
+    const data=visible().map(s=>({
+      "الكود":s.id,"العميل":s.customerName,"الهاتف":s.customerPhone,"هاتف 2":s.customerPhone2||"",
+      "المحافظة":s.governorate,"العنوان":s.address,"الحالة":STATUS_MAP[s.status]?.label||s.status,
+      "المبلغ":s.amount,"الرسوم":s.deliveryFee,"التاجر":s.merchantName||"","المندوب":s.courierName||"",
+      "تاريخ الإنشاء":fmtDate(s.createdAt)
+    }));
+    const ws=XLSX.utils.json_to_sheet(data);
+    const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Shipments");
+    XLSX.writeFile(wb,`nukhba_${new Date().toLocaleDateString("en-GB").replace(/\//g,"-")}.xlsx`);
+    DB.addAudit("EXPORT_EXCEL","",`${data.length} rows`);
+  },
+
+  async print(id){
+    if(!can("print_shipment")){toast("غير مصرح","error");return;}
+    const s=AppState.shipments.find(x=>x.id===id);if(!s)return;
+    const el=document.createElement("div");
+    el.style.cssText="width:680px;padding:28px;background:#fff;direction:rtl;font-family:Arial;position:fixed;top:-9999px;left:0;";
+    el.innerHTML=`<div style="border:2px solid #0d9488;padding:22px;border-radius:12px;">
+      <h1 style="text-align:center;color:#0f766e;margin-bottom:18px;">النخبة للشحن السريع</h1>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
+        <div style="font-size:14px;line-height:2.2;">
+          <p><b>رقم الشحنة:</b> ${esc(s.id)}</p>
+          <p><b>العميل:</b> ${esc(s.customerName)}</p>
+          <p><b>الهاتف:</b> ${esc(s.customerPhone)}</p>
+          ${s.customerPhone2?`<p><b>هاتف 2:</b> ${esc(s.customerPhone2)}</p>`:""}
+          <p><b>المبلغ:</b> ${s.amount} ج.م</p>
+          <p><b>رسوم الشحن:</b> ${s.deliveryFee} ج.م</p>
+          <p><b>العنوان:</b> ${esc(s.address)}</p>
+          ${s.merchantName?`<p><b>التاجر:</b> ${esc(s.merchantName)}</p>`:""}
+        </div>
+        <canvas id="pQR"></canvas>
+      </div>
+    </div>`;
+    document.body.appendChild(el);
+    await QRCode.toCanvas(document.querySelector("#pQR"),`${location.origin}${location.pathname}?track=${s.id}`,{width:140});
+    const canvas=await html2canvas(el);
+    const{jsPDF}=window.jspdf;
+    const pdf=new jsPDF("p","mm","a4");
+    pdf.addImage(canvas.toDataURL("image/png"),"PNG",10,10,190,130);
+    pdf.save(`${s.id}.pdf`);
+    el.remove();DB.addAudit("PRINT_SHIPMENT",s.id,`By ${AppState.user.name}`);
+  },
+
+  editUser(id){
+    const u=AppState.users.find(x=>x.id===id);if(!u)return;
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>✏️ تعديل المستخدم</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>الاسم</label><input id="euName" value="${esc(u.name)}"/></div>
+        <div class="field"><label>الهاتف</label><input id="euPhone" value="${esc(u.phone||"")}"/></div>
+        <div class="field"><label>الدور</label>
+          <select id="euRole">${["admin","merchant","courier","customer"].map(r=>`<option value="${r}" ${u.role===r?"selected":""}>${ROLE_MAP[r]?.label}</option>`).join("")}</select>
+        </div>
+        <div id="euErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveEU">حفظ التغييرات</button>
+      </div>
+    </div>`);
+    $("saveEU").addEventListener("click",async()=>{
+      const name=$("euName").value.trim(),phone=$("euPhone").value.trim(),role=$("euRole").value;
+      const errEl=$("euErr"),btn=$("saveEU");
+      if(!name){errEl.style.display="block";errEl.textContent="الاسم مطلوب";return;}
+      btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      const{error}=await db.from("profiles").update({full_name:name,phone,role}).eq("id",id);
+      if(error){errEl.style.display="block";errEl.textContent="خطأ: "+error.message;btn.disabled=false;btn.textContent="حفظ";return;}
+      await DB.addAudit("EDIT_USER",id,`name=${name},role=${role}`);
+      const idx=AppState.users.findIndex(x=>x.id===id);
+      if(idx>=0)AppState.users[idx]={...AppState.users[idx],name,phone,role};
+      Modals.close();rerenderContent();toast(`✅ تم تحديث ${name}`);
+    });
+  },
+
+  async toggleUser(id){
+    const u=AppState.users.find(x=>x.id===id);if(!u)return;
+    const ns=!u.is_suspended;
+    const{error}=await db.from("profiles").update({is_suspended:ns}).eq("id",id);
+    if(error){toast("فشل التحديث","error");return;}
+    u.is_suspended=ns;
+    await DB.addAudit(ns?"SUSPEND_USER":"ACTIVATE_USER",id,`by ${AppState.user.name}`);
+    toast(`${ns?"تم إيقاف":"تم تفعيل"} ${u.name}`);rerenderContent();
+  },
+
+  async deleteUser(id){
+    const u=AppState.users.find(x=>x.id===id);if(!u)return;
+    if(!confirm(`حذف ${u.name}؟ لا يمكن التراجع.`))return;
+    const{error}=await db.from("profiles").delete().eq("id",id);
+    if(error){toast("فشل الحذف: "+error.message,"error");return;}
+    await DB.addAudit("DELETE_USER",id,`by ${AppState.user.name}`);
+    AppState.users=AppState.users.filter(x=>x.id!==id);
+    toast(`تم حذف ${u.name}`,"info");rerenderContent();
+  },
+
+  async loadAudit(){
+    const el=$("auditContent");if(!el)return;
+    el.innerHTML=`<div class="page-loader"><span class="spinner"></span></div>`;
+    try{
+      const logs=await DB.loadAuditLogs(AppState.auditFilter);
+      if(!logs.length){el.innerHTML=`<div class="empty"><div class="empty-icon">📋</div><h3>لا يوجد سجل بعد</h3></div>`;return;}
+      el.innerHTML=`<div class="table-wrap"><table>
+        <thead><tr><th>الوقت</th><th>المستخدم</th><th>الدور</th><th>الإجراء</th><th>الهدف</th><th>التفاصيل</th></tr></thead>
+        <tbody>
+          ${logs.map(l=>`<tr>
+            <td style="font-size:11px;color:var(--gray-400);white-space:nowrap;">${fmtTime(l.created_at)}</td>
+            <td class="td-primary">${esc(l.actor_name||"—")}</td>
+            <td><span class="badge ${ROLE_MAP[l.actor_role]?.badge||"badge-gray"}">${ROLE_MAP[l.actor_role]?.label||l.actor_role||"—"}</span></td>
+            <td><span class="action-chip">${esc(l.action)}</span></td>
+            <td class="td-mono">${esc(l.entity_id||"—")}</td>
+            <td style="font-size:12px;color:var(--gray-500);">${esc(l.details||"—")}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table></div>`;
+    }catch(err){el.innerHTML=`<p style="color:var(--danger);padding:1rem;">تعذر تحميل السجل: ${err.message}</p>`;}
+  }
+};
+
+// ══════════════════════════════════════════════════════════
+// TIMELINE LOADER
+// ══════════════════════════════════════════════════════════
+async function loadTimeline(shipmentCode){
+  const el=document.querySelector(`#tlBox-${shipmentCode}`);if(!el)return;
+  try{
+    const items=await DB.loadTimeline(shipmentCode);
+    if(!items.length){el.innerHTML=`<h4>${icon("log",13)} سجل الشحنة</h4><p style="color:var(--gray-400);font-size:13px;margin-top:8px;">لا يوجد سجل بعد</p>`;return;}
+    el.innerHTML=`<h4>${icon("log",13)} سجل الشحنة</h4>
+      <div class="tl-list">
+        ${items.map((e,i)=>`<div class="tl-item">
+          <div class="tl-dot ${i<items.length-1?"past":""}"></div>
+          <div class="tl-content">
+            <b>${esc(e.event)}</b>
+            <small>${fmtTime(e.created_at)}</small>
+            ${e.actor_name?`<div class="tl-actor">${esc(e.actor_name)} (${esc(e.actor_role)})</div>`:""}
+          </div>
+        </div>`).join("")}
+      </div>`;
+  }catch(err){el.innerHTML=`<h4>${icon("log",13)} سجل الشحنة</h4><p style="color:var(--danger);font-size:13px;">تعذر التحميل</p>`;}
+}
+
+// ══════════════════════════════════════════════════════════
+// BOOT
+// ══════════════════════════════════════════════════════════
+if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch(()=>{});
+
+(async()=>{
+  const params=new URLSearchParams(window.location.search);
+  const trackId=params.get("track");
+  if(trackId){
+    AppState.selectedShipment=trackId;AppState.view="track";
+    AppState.user={role:"customer",id:"guest",name:"زائر"};
+    AppState.shipments=await DB.loadShipments().catch(()=>[]);
+    render();return;
+  }
+  const session=getSession();
+  if(session?.id){
+    const{data:{session:supa}}=await db.auth.getSession();
+    if(supa?.user?.id===session.id){
+      const profile=await DB.getProfile(session.id);
+      if(profile?.suspended){clearSession();AppState.page="auth";AppState.authMode="login";render();toast("الحساب موقوف","error");return;}
+      const role = profile?.primary_role || session.role || "customer";
+      AppState.user = {
+        ...session,
+        role,
+        primary_role: role,
+        name:  profile?.full_name || session.name,
+        phone: profile?.phone     || session.phone || ""
+      };
+      AppState.page = "dashboard";
+      AppState.view = role==="customer"?"track":role==="courier"?"tasks":role==="merchant"?"shipments":"overview";
+      saveSession(AppState.user);
+
+      // Load permissions + data in parallel
+      const [, ships, notifs, users, couriers] = await Promise.all([
+        loadUserPermissions(session.id),
+        DB.loadShipments().catch(()=>[]),
+        DB.loadNotifications(role).catch(()=>[]),
+        (role==="admin"||role==="merchant") ? DB.loadUsers().catch(()=>[]) : Promise.resolve([]),
+        DB.loadCouriers().catch(()=>[])
+      ]);
+      AppState.shipments     = ships;
+      AppState.notifications = notifs;
+      AppState.users         = users;
+      AppState.couriers      = couriers;
+      if (role === "admin") startRealtime();
+      render(); return;
+    }
+    clearSession();
+  }
+  AppState.shipments=await DB.loadShipments().catch(()=>[]);
+  AppState.page="home";render();
 })();
