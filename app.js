@@ -56,18 +56,27 @@ const PERMS_FALLBACK = {
 const AppPerms = new Set();
 
 async function loadUserPermissions(userId) {
+  // Guest users get no permissions — skip DB call
+  if (!userId || userId === "guest") {
+    AppPerms.clear();
+    (PERMS_FALLBACK.customer).forEach(p => AppPerms.add(p));
+    return false;
+  }
   try {
     const { data, error } = await db.rpc("get_user_permissions", { p_user_id: userId });
     if (error) throw error;
+    const perms = Array.isArray(data) ? data : [];
+    if (perms.length === 0) throw new Error("empty permissions returned from DB");
     AppPerms.clear();
-    (data || []).forEach(p => AppPerms.add(p.code));
+    perms.forEach(p => AppPerms.add(p.code));
+    console.log("[Auth] Permissions loaded from DB:", AppPerms.size, "for user", userId);
     return true;
   } catch(e) {
-    console.warn("loadUserPermissions failed, using fallback:", e.message);
-    // Fallback: use hardcoded set for the primary role
+    console.warn("[Auth] loadUserPermissions fallback:", e.message);
     AppPerms.clear();
     const role = AppState.user?.primary_role || AppState.user?.role || "customer";
     (PERMS_FALLBACK[role] || PERMS_FALLBACK.customer).forEach(p => AppPerms.add(p));
+    console.log("[Auth] Using fallback permissions:", AppPerms.size, "for role:", role);
     return false;
   }
 }
@@ -200,7 +209,7 @@ function can(p) {
   // Check live DB permission set first
   if (AppPerms.size > 0) return AppPerms.has(resolved);
   // Fallback: check hardcoded set for primary role
-  const role = AppState.user.primary_role || AppState.user.role || "customer";
+  const role = AppState.user.primary_role || (AppState.user.primary_role||AppState.user.role) || "customer";
   const fallback = PERMS_FALLBACK[role] || [];
   return fallback.includes(resolved) || fallback.includes(p);
 }
@@ -229,8 +238,13 @@ function clearSession() { ["nukhba_v6","nukhba_v5","nukhba_session"].forEach(k=>
 // ── DATABASE SERVICES ─────────────────────────────────────
 const DB = {
   async getProfile(uid) {
-    try{const{data}=await db.from("profiles").select("*").eq("id",uid).single();return data;}
-    catch(e){return null;}
+    try {
+      const { data, error } = await db.from("profiles")
+        .select("id,full_name,email,phone,primary_role,is_active,is_suspended,is_deleted")
+        .eq("id", uid).single();
+      if (error) throw error;
+      return data;
+    } catch(e) { return null; }
   },
   async loadShipments() {
     const{data,error}=await db.from("shipments").select("*").order("created_at",{ascending:false});
@@ -240,7 +254,7 @@ const DB = {
   async loadCouriers() {
     const{data,error}=await db.from("profiles")
       .select("id,full_name,phone,email,is_active")
-      .eq("role","courier").eq("is_active",true).order("full_name");
+      .eq("primary_role","courier").eq("is_active",true).order("full_name");
     if(error){console.warn("loadCouriers:",error.message);return[];}
     return data||[];
   },
@@ -249,7 +263,7 @@ const DB = {
     if(error){console.warn("loadUsers:",error.message);return[];}
     return(data||[]).map(u=>({
       id:u.id,name:u.full_name||"—",email:u.email||"—",phone:u.phone||"—",
-      role:u.role||"customer",isActive:u.is_active!==false,suspended:u.is_suspended||false,
+      role:u.primary_role||"customer",isActive:u.is_active!==false,suspended:u.is_suspended||false,
       createdAt:fmtDate(u.created_at),balance:0
     }));
   },
@@ -300,7 +314,7 @@ const DB = {
       await db.from("audit_logs").insert([{
         actor_id:    AppState.user.id,
         actor_name:  AppState.user.name,
-        actor_role:  AppState.user.primary_role || AppState.user.role,
+        actor_role:  AppState.user.primary_role || (AppState.user.primary_role||AppState.user.role),
         action,
         entity_type: entityType,
         entity_id:   String(entityId),
@@ -332,11 +346,11 @@ function mapRow(r) {
     merchantName:r.merchant_name||"", merchantPhone:r.merchant_phone||"",
     courierId:r.courier_id||null, courierName:r.courier_name||"",
     customerName:r.customer_name||"", customerPhone:r.customer_phone||"",
-    customerPhone2:r.customer_phone2||"", address:r.address||"",
+    customerPhone2:r.customer_phone2||"", address:r.address_full||r.address||"",
     governorate:r.governorate||"", city:r.city||"", street:r.street||"",
     building:r.building||"", floor:r.floor||"", apartment:r.apartment||"",
     amount:Number(r.amount)||0, deliveryFee:Number(r.delivery_fee)||60,
-    status:r.status||"created", eta:r.eta||"", attempts:r.attempts||0,
+    status:r.status||"created", eta:r.eta||"", attempts:r.delivery_attempts||r.attempts||0,
     podUrl:r.pod_url||null, notes:r.notes||"",
     createdBy:r.created_by||null, createdAt:r.created_at, updatedAt:r.updated_at,
   };
@@ -345,7 +359,8 @@ function mapRow(r) {
 // ── VISIBLE SHIPMENTS ─────────────────────────────────────
 function visible() {
   let list=[...AppState.shipments];
-  const{role,id:uid}=AppState.user||{};
+  const{id:uid}=AppState.user||{};
+  const role=AppState.user?.primary_role||AppState.user?.role||"customer";
   if(role==="courier") list=list.filter(s=>s.courierId===uid);
   if(role==="merchant")list=list.filter(s=>s.merchantId===uid);
   if(role==="customer")return[];
@@ -363,7 +378,7 @@ function startRealtime() {
     .on("postgres_changes",{event:"INSERT",schema:"public",table:"shipments"},p=>{
       const s=mapRow(p.new);AppState.shipments.unshift(s);
       DB.addNotification(`شحنة جديدة: ${s.id} — ${s.customerName}`,"admin");
-      if(AppState.user?.role==="admin")rerenderContent();
+      if((AppState.user?.primary_role||AppState.user?.role)==="admin")rerenderContent();
     })
     .on("postgres_changes",{event:"UPDATE",schema:"public",table:"shipments"},p=>{
       const idx=AppState.shipments.findIndex(s=>s.id===p.new.shipment_code);
@@ -373,8 +388,6 @@ function startRealtime() {
 }
 
 // ── SESSION ───────────────────────────────────────────────
-function getSession()   { try{return JSON.parse(localStorage.getItem("nukhba_v6")||"null");}catch(e){return null;} }
-function saveSession(u) { localStorage.setItem("nukhba_v6",JSON.stringify(u)); }
 function clearSession() { ["nukhba_v6","nukhba_v5","nukhba_session"].forEach(k=>localStorage.removeItem(k)); }
 
 // ══════════════════════════════════════════════════════════
@@ -541,37 +554,93 @@ function renderAuth() {
 
 async function handleLogin(e) {
   e.preventDefault();
-  const fd=new FormData(e.currentTarget);
-  const btn=e.currentTarget.querySelector("button[type=submit]");
-  const err=$("loginErr"); err.style.display="none";
-  btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> جاري الدخول...`;
+  const fd  = new FormData(e.currentTarget);
+  const btn = e.currentTarget.querySelector("button[type=submit]");
+  const err = $("loginErr");
+  err.style.display = "none";
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span> جاري الدخول...`;
+
   try {
-    const{data,error}=await db.auth.signInWithPassword({email:fd.get("email").trim(),password:fd.get("password")});
-    if(error)throw error;
-    const profile=await DB.getProfile(data.user.id);
-    if(profile?.suspended){await db.auth.signOut();throw new Error("هذا الحساب موقوف. تواصل مع الإدارة.");}
-    const role=profile?.role||"customer";
-    const name=profile?.full_name||data.user.email.split("@")[0];
-    const phone=profile?.phone||"";
-    const user={id:data.user.id,name,role,email:data.user.email,phone,balance:0};
-    saveSession(user); AppState.user=user;
-    AppState.page="dashboard";
-    AppState.view=role==="customer"?"track":role==="courier"?"tasks":role==="merchant"?"shipments":"overview";
-    await DB.addAudit("LOGIN",data.user.id,`as ${role}`);
-    const[ships,notifs,users,couriers]=await Promise.all([
-      DB.loadShipments().catch(()=>[]),
-      DB.loadNotifications(role).catch(()=>[]),
-      (role==="admin"||role==="merchant")?DB.loadUsers().catch(()=>[]):Promise.resolve([]),
-      DB.loadCouriers().catch(()=>[])
+    // Step 1: authenticate
+    const { data, error } = await db.auth.signInWithPassword({
+      email:    fd.get("email").trim(),
+      password: fd.get("password")
+    });
+    if (error) throw error;
+
+    // Step 2: load profile — primary_role is the production column
+    const profile = await DB.getProfile(data.user.id);
+
+    if (profile?.is_suspended) {
+      await db.auth.signOut();
+      throw new Error("هذا الحساب موقوف. تواصل مع الإدارة.");
+    }
+    if (profile?.is_deleted) {
+      await db.auth.signOut();
+      throw new Error("هذا الحساب غير موجود. تواصل مع الإدارة.");
+    }
+
+    // Step 3: resolve role from primary_role (production schema)
+    const role  = profile?.primary_role || "customer";
+    const name  = profile?.full_name    || data.user.email.split("@")[0];
+    const phone = profile?.phone        || "";
+
+    // Step 4: set state — primary_role on both fields for full compat
+    const user = {
+      id:           data.user.id,
+      name,
+      role,           // kept for legacy UI checks
+      primary_role:  role,
+      email:         data.user.email,
+      phone,
+      balance:       0
+    };
+    AppState.user = user;
+    AppState.page = "dashboard";
+    AppState.view = role === "customer" ? "track"
+                  : role === "courier"  ? "tasks"
+                  : role === "merchant" ? "shipments"
+                  : "overview";
+
+    // Step 5: load permissions + all data in parallel
+    //         render() must NOT be called until this resolves
+    const [, ships, notifs, users, couriers] = await Promise.all([
+      loadUserPermissions(data.user.id),            // fills AppPerms
+      DB.loadShipments().catch(() => []),
+      DB.loadNotifications(role).catch(() => []),
+      (role === "admin" || role === "merchant")
+        ? DB.loadUsers().catch(() => [])
+        : Promise.resolve([]),
+      DB.loadCouriers().catch(() => [])
     ]);
-    AppState.shipments=ships; AppState.notifications=notifs;
-    AppState.users=users; AppState.couriers=couriers;
-    if(role==="admin")startRealtime();
-    render(); toast(`أهلاً ${name}!`);
+
+    // Step 6: commit all data to state atomically
+    AppState.shipments     = ships;
+    AppState.notifications = notifs;
+    AppState.users         = users;
+    AppState.couriers      = couriers;
+
+    // Step 7: persist session AFTER permissions are confirmed
+    saveSession(user);
+
+    // Step 8: start realtime BEFORE render (so first render shows live count)
+    if (role === "admin") startRealtime();
+
+    // Step 9: audit (fire-and-forget, do not await — avoid delaying render)
+    DB.addAudit("LOGIN", data.user.id, `role:${role} perms:${AppPerms.size}`, "auth");
+
+    // Step 10: single render — everything is ready
+    render();
+    toast(`أهلاً ${name}!`);
+
   } catch(err2) {
-    err.style.display="block";
-    err.textContent=err2.message.includes("Invalid")?"بيانات الدخول غير صحيحة":err2.message;
-    btn.disabled=false; btn.innerHTML=`${icon("user")} دخول`;
+    err.style.display = "block";
+    err.textContent   = err2.message.includes("Invalid")
+      ? "بيانات الدخول غير صحيحة. تحقق من البريد وكلمة المرور."
+      : err2.message;
+    btn.disabled = false;
+    btn.innerHTML = `${icon("user")} دخول`;
   }
 }
 
@@ -589,7 +658,7 @@ async function handleRegister(e) {
   try {
     const{data,error}=await db.auth.signUp({email,password,options:{data:{full_name:fullname,phone}}});
     if(error)throw error;
-    await db.from("profiles").upsert([{id:data.user.id,full_name:fullname,email,phone,role:"customer",is_active:true}]);
+    await db.from("profiles").upsert([{id:data.user.id,full_name:fullname,email,phone,primary_role:"customer",is_active:true}]);
     const user = {
       id: data.user.id, name: fullname,
       role: "customer", primary_role: "customer",
@@ -613,10 +682,17 @@ async function handleRegister(e) {
 // DASHBOARD SHELL
 // ══════════════════════════════════════════════════════════
 function renderDashboard() {
-  const u=AppState.user;
-  const navKeys=ROLE_MAP[u.primary_role||u.role]?.nav||[];
-  const unread=AppState.notifications.filter(n=>!n.isRead).length;
-  if(u.role==="admin"){renderAdminShell(navKeys,unread);}else{renderSimpleShell(navKeys,unread);}
+  const u       = AppState.user;
+  const _role   = u.primary_role || u.role || "customer";
+  const navKeys = ROLE_MAP[_role]?.nav || [];
+  const unread  = AppState.notifications.filter(n => !n.isRead).length;
+
+  if (_role === "admin") {
+    renderAdminShell(navKeys, unread);
+  } else {
+    renderSimpleShell(navKeys, unread);
+  }
+
   bindDashboardEvents();
   postRender();
 }
@@ -726,7 +802,7 @@ function render() {
   const trackId=params.get("track");
   if(trackId){
     AppState.selectedShipment=trackId;AppState.view="track";
-    if(!AppState.user)AppState.user={role:"customer",id:"guest",name:"زائر"};
+    if(!AppState.user)AppState.user={role:"customer",primary_role:"customer",id:"guest",name:"زائر"};
   }
   if(!AppState.user){AppState.page==="auth"?renderAuth():renderHomepage();}
   else{renderDashboard();}
@@ -795,7 +871,7 @@ function viewOverview() {
   const ret=list.filter(s=>s.status==="returned").length;
   const pending=list.filter(s=>s.status==="created").length;
 
-  if(AppState.user.role==="merchant") {
+  if((AppState.user.primary_role||AppState.user.role)==="merchant") {
     const bal=list.filter(s=>s.status==="delivered").reduce((a,s)=>a+(s.amount-s.deliveryFee),0);
     return `
       <div class="kpi-grid">
@@ -1058,14 +1134,14 @@ function viewTrack() {
 
 // ── ACCOUNTS VIEW ─────────────────────────────────────────
 function viewAccounts() {
-  if(AppState.user.role==="customer") return `<div class="empty">
+  if((AppState.user.primary_role||AppState.user.role)==="customer") return `<div class="empty">
     <div class="empty-icon">📦</div><h3>تتبع شحنتك</h3>
     <p>أدخل رقم الشحنة لمعرفة حالتها</p>
     <button class="btn btn-primary" onclick="App.manualTrack()">🔍 تتبع شحنة</button>
   </div>`;
   const list=visible(),del=list.filter(s=>s.status==="delivered");
   const rev=del.reduce((a,s)=>a+(s.amount||0),0),fee=del.reduce((a,s)=>a+(s.deliveryFee||0),0);
-  const pay=AppState.user.role==="courier"?del.length*25:rev-fee;
+  const pay=(AppState.user.primary_role||AppState.user.role)==="courier"?del.length*25:rev-fee;
   return `
     <div class="acct-header">
       <div><div class="ah-label">الرصيد المستحق</div><div class="ah-val">${money(pay)}</div></div>
@@ -1106,7 +1182,7 @@ function viewReports() {
 function viewUsers() {
   if(!can("manage_users")) return `<div class="empty"><h3>غير مصرح</h3></div>`;
   const f=(AppState.userFilter||"").toLowerCase();
-  const filtered=AppState.users.filter(u=>`${u.name} ${u.email} ${u.phone} ${u.role}`.toLowerCase().includes(f));
+  const filtered=AppState.users.filter(u=>`${u.name} ${u.email} ${u.phone} ${u.role||u.primary_role}`.toLowerCase().includes(f));
   return `
     <div class="card">
       <div class="card-header">
@@ -1166,14 +1242,23 @@ function bindDashboardEvents() {
   });
   $("roleSwitcher")?.addEventListener("change",e=>{
     const r=e.target.value;if(!r)return;
-    AppState.user.role=r;AppState.view=r==="customer"?"track":r==="courier"?"tasks":"overview";
+    AppState.user.role = r;
+    AppState.user.primary_role = r;
+    AppState.view=r==="customer"?"track":r==="courier"?"tasks":"overview";
+    // Reload permissions for the previewed role using fallback
+    AppPerms.clear();
+    (PERMS_FALLBACK[r]||PERMS_FALLBACK.customer).forEach(p=>AppPerms.add(p));
     renderDashboard();bindDashboardEvents();postRender();
   });
   $("logoutBtn")?.addEventListener("click",async()=>{
-    await DB.addAudit("LOGOUT","","User logged out");
-    await db.auth.signOut();clearSession();
+    await DB.addAudit("LOGOUT","","User logged out","auth");
+    await db.auth.signOut();
+    clearSession();
+    AppPerms.clear();
     if(AppState.realtimeChannel){db.removeChannel(AppState.realtimeChannel);AppState.realtimeChannel=null;}
-    AppState.user=null;AppState.page="home";render();toast("تم تسجيل الخروج","info");
+    AppState.user=null;AppState.shipments=[];AppState.users=[];AppState.couriers=[];
+    AppState.notifications=[];AppState.page="home";
+    render();toast("تم تسجيل الخروج","info");
   });
   const si=$("searchInput");
   if(si){let t;si.addEventListener("input",e=>{clearTimeout(t);t=setTimeout(()=>{AppState.query=e.target.value;rerenderContent();si.focus();},250);});}
@@ -1318,7 +1403,7 @@ const Modals={
       try {
         const{data:{session}}=await db.auth.getSession();
         const uid=session?.user?.id||AppState.user?.id||null;
-        const isMerchant=AppState.user.role==="merchant";
+        const isMerchant=(AppState.user.primary_role||AppState.user.role)==="merchant";
         await DB.createShipment({
           shipment_code:code,customer_name:cName,customer_phone:cPhone,
           customer_phone2:cPhone2||null,address,governorate:gov,city:city||null,
@@ -1330,7 +1415,7 @@ const Modals={
           courier_id:courierId,courier_name:courierName||null,
           created_by:uid,
         });
-        await DB.addTimeline(code,"تم إنشاء الشحنة",AppState.user.name,AppState.user.role);
+        await DB.addTimeline(code,"تم إنشاء الشحنة",AppState.user.name,(AppState.user.primary_role||AppState.user.role));
         await DB.addNotification(`شحنة جديدة: ${code} — ${cName}`,"admin",code,"shipment");
         await DB.addAudit("CREATE_SHIPMENT",code,`By ${AppState.user.name} for ${cName}`);
         Modals.close();
@@ -1376,7 +1461,7 @@ const Modals={
       try{
         const{data,error}=await db.auth.signUp({email,password:pass,options:{data:{full_name:name,role,phone}}});
         if(error)throw error;
-        await db.from("profiles").upsert([{id:data.user.id,full_name:name,email,phone,role,is_active:true}]);
+        await db.from("profiles").upsert([{id:data.user.id,full_name:name,email,phone,primary_role:role,is_active:true}]);
         await DB.addAudit("CREATE_USER",data.user.id,`Admin created ${role}: ${email}`);
         AppState.users.push({id:data.user.id,name,email,phone,role,isActive:true,suspended:false,createdAt:fmtDate(new Date()),balance:0});
         Modals.close();rerenderContent();
@@ -1402,7 +1487,7 @@ const App={
     s.status=status;if(status==="delivered")s.eta="تم التسليم";
     try{
       await DB.updateShipment(id,{status,eta:s.eta});
-      await DB.addTimeline(id,STATUS_MAP[status]?.label||status,AppState.user.name,AppState.user.role);
+      await DB.addTimeline(id,STATUS_MAP[status]?.label||status,AppState.user.name,(AppState.user.primary_role||AppState.user.role));
       await DB.addNotification(`شحنة ${id} → ${STATUS_MAP[status]?.label}`,"admin",id);
       await DB.addAudit("UPDATE_STATUS",id,`→ ${status} by ${AppState.user.name}`);
       if(status==="delivered"||status==="returned"){
@@ -1424,7 +1509,7 @@ const App={
       const cleanName=courierName.split("—")[0].trim();
       await DB.updateShipment(id,{courier_id:courierId,courier_name:cleanName});
       s.courierId=courierId;s.courierName=cleanName;
-      await DB.addTimeline(id,`تعيين المندوب: ${cleanName}`,AppState.user.name,AppState.user.role);
+      await DB.addTimeline(id,`تعيين المندوب: ${cleanName}`,AppState.user.name,(AppState.user.primary_role||AppState.user.role));
       await DB.addNotification(`مندوب ${cleanName} معين لشحنة ${id}`,"courier",id,"shipment");
       await DB.addAudit("ASSIGN_COURIER",id,`${cleanName} → ${id}`);
       rerenderContent();toast(`✅ تم تعيين ${cleanName}`);
@@ -1438,7 +1523,7 @@ const App={
       const url=await DB.uploadPOD(id,file);
       await DB.updateShipment(id,{pod_url:url,pod_uploaded_at:new Date().toISOString(),pod_uploaded_by:AppState.user?.id||null});
       const s=AppState.shipments.find(x=>x.id===id);if(s)s.podUrl=url;
-      await DB.addTimeline(id,"رفع إثبات التسليم",AppState.user.name,AppState.user.role);
+      await DB.addTimeline(id,"رفع إثبات التسليم",AppState.user.name,(AppState.user.primary_role||AppState.user.role));
       await DB.addAudit("UPLOAD_POD",id,`By ${AppState.user.name}`);
       rerenderContent();toast("✅ تم رفع إثبات التسليم");
     }catch(err){toast("فشل الرفع: "+err.message,"error");}
@@ -1473,7 +1558,7 @@ const App={
           ${s.customerPhone2?`<p><b>هاتف 2:</b> ${esc(s.customerPhone2)}</p>`:""}
           <p><b>المبلغ:</b> ${s.amount} ج.م</p>
           <p><b>رسوم الشحن:</b> ${s.deliveryFee} ج.م</p>
-          <p><b>العنوان:</b> ${esc(s.address)}</p>
+          <p><b>العنوان:</b> ${esc(s.address||s.address_full)}</p>
           ${s.merchantName?`<p><b>التاجر:</b> ${esc(s.merchantName)}</p>`:""}
         </div>
         <canvas id="pQR"></canvas>
@@ -1511,7 +1596,7 @@ const App={
       const errEl=$("euErr"),btn=$("saveEU");
       if(!name){errEl.style.display="block";errEl.textContent="الاسم مطلوب";return;}
       btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
-      const{error}=await db.from("profiles").update({full_name:name,phone,role}).eq("id",id);
+      const{error}=await db.from("profiles").update({full_name:name,phone,primary_role:role}).eq("id",id);
       if(error){errEl.style.display="block";errEl.textContent="خطأ: "+error.message;btn.disabled=false;btn.textContent="حفظ";return;}
       await DB.addAudit("EDIT_USER",id,`name=${name},role=${role}`);
       const idx=AppState.users.findIndex(x=>x.id===id);
@@ -1595,7 +1680,7 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
   const trackId=params.get("track");
   if(trackId){
     AppState.selectedShipment=trackId;AppState.view="track";
-    AppState.user={role:"customer",id:"guest",name:"زائر"};
+    AppState.user={role:"customer",primary_role:"customer",id:"guest",name:"زائر"};
     AppState.shipments=await DB.loadShipments().catch(()=>[]);
     render();return;
   }
@@ -1603,34 +1688,60 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
   if(session?.id){
     const{data:{session:supa}}=await db.auth.getSession();
     if(supa?.user?.id===session.id){
-      const profile=await DB.getProfile(session.id);
-      if(profile?.suspended){clearSession();AppState.page="auth";AppState.authMode="login";render();toast("الحساب موقوف","error");return;}
-      const role = profile?.primary_role || session.role || "customer";
+      const profile = await DB.getProfile(session.id);
+      if (profile?.is_suspended || profile?.is_deleted) {
+        clearSession();
+        AppState.page = "auth";
+        AppState.authMode = "login";
+        render();
+        toast("هذا الحساب موقوف أو غير موجود. تواصل مع الإدارة.", "error");
+        return;
+      }
+      // primary_role is the production column name
+      // Resolve role from primary_role (production schema column)
+      const role = profile?.primary_role
+                || session.primary_role
+                || session.role
+                || "customer";
+
       AppState.user = {
         ...session,
-        role,
-        primary_role: role,
-        name:  profile?.full_name || session.name,
-        phone: profile?.phone     || session.phone || ""
+        role,           // kept for legacy compatibility
+        primary_role:  role,
+        name:          profile?.full_name || session.name,
+        phone:         profile?.phone     || session.phone || ""
       };
       AppState.page = "dashboard";
-      AppState.view = role==="customer"?"track":role==="courier"?"tasks":role==="merchant"?"shipments":"overview";
-      saveSession(AppState.user);
+      AppState.view = role === "customer" ? "track"
+                    : role === "courier"  ? "tasks"
+                    : role === "merchant" ? "shipments"
+                    : "overview";
 
-      // Load permissions + data in parallel
+      // Load permissions + all data in parallel — render AFTER all settle
       const [, ships, notifs, users, couriers] = await Promise.all([
-        loadUserPermissions(session.id),
+        loadUserPermissions(session.id),       // fills AppPerms before render
         DB.loadShipments().catch(()=>[]),
         DB.loadNotifications(role).catch(()=>[]),
-        (role==="admin"||role==="merchant") ? DB.loadUsers().catch(()=>[]) : Promise.resolve([]),
+        (role === "admin" || role === "merchant")
+          ? DB.loadUsers().catch(()=>[])
+          : Promise.resolve([]),
         DB.loadCouriers().catch(()=>[])
       ]);
+
+      // Commit atomically
       AppState.shipments     = ships;
       AppState.notifications = notifs;
       AppState.users         = users;
       AppState.couriers      = couriers;
+
+      // Persist refreshed session
+      saveSession(AppState.user);
+
       if (role === "admin") startRealtime();
-      render(); return;
+
+      // Single render — everything ready
+      render();
+      return;
     }
     clearSession();
   }
