@@ -916,31 +916,34 @@ tbody tr.muted { opacity: .5; }
   .form-row.three { grid-template-columns: 1fr; }
   .hp-nav-links { display: none; }
   .notif-dropdown { width: calc(100vw - 32px); right: 16px; left: auto; }
+  
+
   .sidebar{
-    right:0;
-    width:260px;
-    max-width:85vw;
-}
+      right:0;
+      width:260px;
+      max-width:85vw;
+  }
 
-.sidebar.open{
-    transform:translateX(0);
-}
+  .sidebar.open{
+      transform:translateX(0);
+  }
 
-.sb-overlay{
-    display:block;
-}
-.dash{
-      width:100%;
-      max-width:100%;
+  .sb-overlay{
+      display:block;
+  }
+
+  .dash{
+      display:block !important;
+      width:100% !important;
       overflow-x:hidden;
   }
 
   .main{
+      width:100% !important;
       margin-right:0 !important;
-      width:100%;
-      max-width:100%;
       overflow-x:hidden;
   }
+
 }
 html,
 body{
