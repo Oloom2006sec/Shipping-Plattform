@@ -899,7 +899,6 @@ tbody tr.muted { opacity: .5; }
 
 @media (max-width: 1024px) {
   .hp-hero-grid { grid-template-columns: 1fr; }
-  .hp-hero-visual { display: none; }
   .hp-features { grid-template-columns: 1fr; }
   .kpi-grid { grid-template-columns: repeat(2,1fr); }
 }
@@ -917,6 +916,19 @@ tbody tr.muted { opacity: .5; }
   .form-row.three { grid-template-columns: 1fr; }
   .hp-nav-links { display: none; }
   .notif-dropdown { width: calc(100vw - 32px); right: 16px; left: auto; }
+  .sidebar{
+    right:0;
+    width:260px;
+    max-width:85vw;
+}
+
+.sidebar.open{
+    transform:translateX(0);
+}
+
+.sb-overlay{
+    display:block;
+}
 }
 
 @media (max-width: 540px) {

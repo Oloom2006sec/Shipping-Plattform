@@ -26,5 +26,5 @@ createServer((request, response) => {
   response.writeHead(200, { "Content-Type": types[extname(filePath)] || "application/octet-stream" });
   createReadStream(filePath).pipe(response);
 }).listen(port, "127.0.0.1", () => {
-  console.log(`Wasla app running on http://127.0.0.1:${port}`);
+  console.log(`AL-NUKHBA EXPRESS running on http://127.0.0.1:${port}`);
 });
