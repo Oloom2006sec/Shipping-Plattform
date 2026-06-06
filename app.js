@@ -1895,3 +1895,16 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
   AppState.shipments=await DB.loadShipments().catch(()=>[]);
   AppState.page="home";render();
 })();
+
+
+$("menuToggle")?.addEventListener("click",()=>{
+    console.log("MENU CLICKED");
+
+    $("sidebar")?.classList.toggle("open");
+    $("sbOverlay")?.classList.toggle("active");
+
+    console.log(
+      $("sidebar")?.className,
+      $("sbOverlay")?.className
+    );
+});
