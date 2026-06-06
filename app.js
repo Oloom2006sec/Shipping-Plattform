@@ -547,13 +547,16 @@ function renderHomepage() {
           <a href="#" id="footerRegister">إنشاء حساب</a>
         </div>
         <div class="hp-footer-col"><h4>تواصل</h4>
-          <a href="tel:+20100000000">📞 01000000000</a>
-          <a href="https://wa.me/20100000000" target="_blank">💬 واتساب</a>
+          <a href="tel:+201061004311">📞 01061004311</a>
+          <a href="tel:+201007736244">📞 01007736244</a>
+          <a href="https://wa.me/201061004311" target="_blank">💬 واتساب</a>
+          <a href="https://wa.me/201007736244" target="_blank">💬 واتساب</a>
         </div>
       </div>
       <div class="hp-footer-bottom">© 2025 النخبة للشحن السريع</div>
     </footer>
-    <a href="https://wa.me/20100000000" target="_blank" class="wa-btn">💬</a>
+    <a href="https://wa.me/201061004311" target="_blank" class="wa-btn">💬</a>
+    <a href="https://wa.me/201007736244" target="_blank" class="wa-btn">💬</a>
   </div>`;
 
   const goL=()=>{AppState.page="auth";AppState.authMode="login";render();};
