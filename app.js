@@ -81,35 +81,68 @@ async function loadUserPermissions(userId) {
   }
 }
 
-const EGYPT_GOV = {
-  "القاهرة":["مدينة نصر","المعادي","حلوان","شبرا","مصر الجديدة","التجمع"],
-  "الجيزة":["الدقي","العجوزة","الهرم","الشيخ زايد","6 أكتوبر","إمبابة"],
-  "الإسكندرية":["المنتزه","برج العرب","العجمي","سيدي جابر","الرمل","اللبان"],
-  "الدقهلية":["المنصورة","طلخا","ميت غمر","أجا","السنبلاوين"],
-  "البحيرة":["دمنهور","أبو حمص","كفر الدوار","الرحمانية"],
-  "الشرقية":["الزقازيق","العاشر من رمضان","أبو كبير","فاقوس"],
-  "الغربية":["طنطا","المحلة الكبرى","كفر الزيات","زفتى"],
-  "المنوفية":["شبين الكوم","مينوف","قويسنا","الباجور"],
-  "القليوبية":["بنها","القناطر الخيرية","شبرا الخيمة","طوخ"],
-  "الإسماعيلية":["الإسماعيلية","فايد","القنطرة","التل الكبير"],
-  "السويس":["السويس","الجناين","عتاقة","الأربعين"],
-  "بورسعيد":["بورسعيد","بورفؤاد","المناخ"],
-  "دمياط":["دمياط","فارسكور","الزرقا","رأس البر"],
-  "كفر الشيخ":["كفر الشيخ","دسوق","قلين","فوه"],
-  "الفيوم":["الفيوم","طامية","سنورس"],
-  "بني سويف":["بني سويف","ناصر","الفشن"],
-  "المنيا":["المنيا","ملوي","سمالوط","أبو قرقاص"],
-  "أسيوط":["أسيوط","ديروط","أبو تيج"],
-  "سوهاج":["سوهاج","طهطا","أخميم","جرجا"],
-  "قنا":["قنا","نجع حمادي","دشنا","قوص"],
-  "أسوان":["أسوان","إدفو","كوم أمبو"],
-  "الأقصر":["الأقصر","إسنا","أرمنت"],
-  "البحر الأحمر":["الغردقة","سفاجا","مرسى علم"],
-  "مطروح":["مرسى مطروح","سيوة","الحمام"],
-  "شمال سيناء":["العريش","رفح","بئر العبد"],
-  "جنوب سيناء":["شرم الشيخ","دهب","طابا"],
-  "الوادي الجديد":["الخارجة","الداخلة","الفرافرة"]
-};
+// Full Egypt governorates/cities dataset — loaded from cities.json
+// EGYPT_GOV is populated on first modal open via loadEgyptData()
+let EGYPT_GOV = {};
+let EGYPT_GOV_LOADED = false;
+
+async function loadEgyptData() {
+  if (EGYPT_GOV_LOADED) return;
+  try {
+    const res  = await fetch("./cities.json");
+    const data = await res.json();
+    // cities.json structure: array where index 2 has { data: [{city_name_ar, governorate_id}] }
+    // and index 0 or 1 has governorate list
+    // Support both flat and structured formats
+    const rows = Array.isArray(data) ? (data[2]?.data || data) : data;
+    const gov  = {};
+    rows.forEach(r => {
+      const g = r.governorate_name_ar || r.governorate || r.province || "";
+      const c = r.city_name_ar || r.city || r.name || "";
+      if (!g || !c) return;
+      if (!gov[g]) gov[g] = [];
+      if (!gov[g].includes(c)) gov[g].push(c);
+    });
+    // Sort cities within each governorate
+    Object.keys(gov).forEach(g => gov[g].sort());
+    EGYPT_GOV = gov;
+    EGYPT_GOV_LOADED = true;
+    console.log("[Cities] Loaded", Object.keys(EGYPT_GOV).length, "governorates from cities.json");
+  } catch(e) {
+    console.warn("[Cities] Failed to load cities.json, using fallback:", e.message);
+    // Minimal fallback — all major governorates
+    EGYPT_GOV = {
+      "القاهرة":["مدينة نصر","المعادي","حلوان","شبرا","مصر الجديدة","التجمع الأول","الزيتون","عين شمس","المطرية","منشية ناصر"],
+      "الجيزة":["الدقي","العجوزة","الهرم","الشيخ زايد","6 أكتوبر","إمبابة","أوسيم","البدرشين","الصف"],
+      "الإسكندرية":["المنتزه","برج العرب","العجمي","سيدي جابر","الرمل","اللبان","محرم بك","الدخيلة","أبو قير"],
+      "الشرقية":["الزقازيق","العاشر من رمضان","أبو كبير","فاقوس","ديرب نجم","منيا القمح","الإبراهيمية"],
+      "الدقهلية":["المنصورة","طلخا","ميت غمر","أجا","السنبلاوين","بلقاس","شربين","دكرنس"],
+      "الغربية":["طنطا","المحلة الكبرى","كفر الزيات","زفتى","السنطة","بسيون"],
+      "البحيرة":["دمنهور","أبو حمص","كفر الدوار","الرحمانية","إيتاي البارود","الدلنجات","حوش عيسى"],
+      "القليوبية":["بنها","القناطر الخيرية","شبرا الخيمة","طوخ","قليوب","الخانكة","كفر شكر"],
+      "المنوفية":["شبين الكوم","مينوف","قويسنا","الباجور","أشمون","تلا","السادات"],
+      "الإسماعيلية":["الإسماعيلية","فايد","القنطرة","التل الكبير","القصاصين","أبو صوير"],
+      "السويس":["السويس","الجناين","عتاقة","الأربعين","فيصل","السلام"],
+      "بورسعيد":["بورسعيد","بورفؤاد","المناخ","الجنوب","الشرق","الغرب","الضواحي"],
+      "دمياط":["دمياط","فارسكور","الزرقا","كفر سعد","رأس البر","الروضة","ميت أبو غالب"],
+      "كفر الشيخ":["كفر الشيخ","دسوق","قلين","فوه","مطوبس","الرياض","سيدي سالم","برج البرلس"],
+      "الفيوم":["الفيوم","طامية","سنورس","يوسف الصديق","إطسا","أبشواي","الحادقة"],
+      "بني سويف":["بني سويف","ناصر","الفشن","إهناسيا","ببا","بياض العرب","سمسطا"],
+      "المنيا":["المنيا","ملوي","سمالوط","أبو قرقاص","مطاي","العدوة","بني مزار","دير مواس"],
+      "أسيوط":["أسيوط","ديروط","أبو تيج","الفتح","منفلوط","القوصية","الغنايم","صدفا"],
+      "سوهاج":["سوهاج","طهطا","أخميم","جرجا","المنشاه","الكوثر","ساقلتة","دار السلام"],
+      "قنا":["قنا","نجع حمادي","دشنا","قوص","الوقف","أبو تشت","فرشوط","نقادة"],
+      "الأقصر":["الأقصر","إسنا","أرمنت","القرنة","الطود","البياضية","الزينية"],
+      "أسوان":["أسوان","إدفو","كوم أمبو","أبو سمبل","دراو","نصر النوبة","كلابشة"],
+      "البحر الأحمر":["الغردقة","سفاجا","مرسى علم","القصير","رأس غارب","الشلاتين"],
+      "مطروح":["مرسى مطروح","سيوة","الحمام","الضبعة","العلمين","النجيلة","سيدي براني"],
+      "شمال سيناء":["العريش","رفح","بئر العبد","الشيخ زويد","الحسنة","نخل","القسيمة"],
+      "جنوب سيناء":["شرم الشيخ","دهب","طابا","أبو رديس","أبو زنيمة","الطور","سانت كاترين"],
+      "الوادي الجديد":["الخارجة","الداخلة","الفرافرة","بريس","باريس"]
+    };
+    EGYPT_GOV_LOADED = true;
+  }
+}
 
 // ── STATE ─────────────────────────────────────────────────
 const AppState = {
@@ -252,11 +285,19 @@ const DB = {
     return data.map(mapRow);
   },
   async loadCouriers() {
-    const{data,error}=await db.from("profiles")
-      .select("id,full_name,phone,email,is_active")
-      .eq("primary_role","courier").eq("is_active",true).order("full_name");
-    if(error){console.warn("loadCouriers:",error.message);return[];}
-    return data||[];
+    const { data, error } = await db.from("profiles")
+      .select("id,full_name,phone,email,primary_role,is_active")
+      .eq("primary_role","courier")
+      .eq("is_active", true)
+      .eq("is_deleted", false)
+      .order("full_name");
+    if (error) {
+      console.warn("loadCouriers:", error.message);
+      return [];
+    }
+    const result = data || [];
+    console.log("[Couriers] Loaded:", result.length);
+    return result;
   },
   async loadUsers() {
     const{data,error}=await db.from("profiles").select("*").order("created_at",{ascending:false});
@@ -424,8 +465,21 @@ function renderHomepage() {
           </div>
         </div>
         <div class="hp-hero-visual">
-          <div class="hp-mock-stat"><div class="ms-label">شحنات اليوم</div><div class="ms-val">48</div><div class="hp-mock-badge">+12% عن أمس</div></div>
-          <div class="hp-mock-stat"><div class="ms-label">تحصيلات</div><div class="ms-val">24,500 ج.م</div><div class="hp-mock-badge">✅ 38 مسلمة</div></div>
+          <div class="hp-mock-stat">
+            <div class="ms-label">نتابع شحنتك</div>
+            <div class="ms-val">لحظة بلحظة</div>
+            <div class="hp-mock-badge">📍 تتبع مباشر</div>
+          </div>
+          <div class="hp-mock-stat">
+            <div class="ms-label">توصيل سريع</div>
+            <div class="ms-val">خلال 24-48 ساعة</div>
+            <div class="hp-mock-badge">🚚 في كل مصر</div>
+          </div>
+          <div class="hp-mock-stat">
+            <div class="ms-label">تحصيل آمن</div>
+            <div class="ms-val">ودفع موثوق</div>
+            <div class="hp-mock-badge">💰 مضمون 100%</div>
+          </div>
         </div>
       </div>
     </section>
@@ -791,10 +845,53 @@ function renderView() {
 }
 
 function rerenderContent() {
-  const vc=$("viewContent");if(!vc){render();return;}
-  vc.innerHTML=renderView();
-  bindDashboardEvents();
+  const vc = $("viewContent");
+  if (!vc) { render(); return; }
+  vc.innerHTML = renderView();
+  // Bind only content-level events (not shell-level which are already bound)
+  bindContentEvents();
   postRender();
+}
+
+// Content-level events — safe to re-bind on every rerenderContent
+function bindContentEvents() {
+  // [data-open] — shipment detail
+  $("[data-open]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      AppState.selectedShipment = btn.dataset.open;
+      rerenderContent();
+    });
+  });
+  // Filter buttons (onclick= in HTML, no binding needed)
+  // New shipment button
+  $("newShipBtn")?.addEventListener("click", () => Modals.newShipment());
+  $("addUserBtn")?.addEventListener("click", Modals.addUser);
+  $("openScanner")?.addEventListener("click", Modals.scanner);
+  // Search inputs
+  const si = $("searchInput");
+  if (si) {
+    let t;
+    si.addEventListener("input", e => {
+      clearTimeout(t);
+      t = setTimeout(() => { AppState.query = e.target.value; rerenderContent(); si.focus(); }, 250);
+    });
+  }
+  const ui = $("userSearch");
+  if (ui) {
+    let t;
+    ui.addEventListener("input", e => {
+      clearTimeout(t);
+      t = setTimeout(() => { AppState.userFilter = e.target.value; rerenderContent(); ui.focus(); }, 250);
+    });
+  }
+  const ai = $("auditSearch");
+  if (ai) {
+    let t;
+    ai.addEventListener("input", e => {
+      clearTimeout(t);
+      t = setTimeout(() => { AppState.auditFilter = e.target.value; App.loadAudit(); }, 300);
+    });
+  }
 }
 
 function render() {
@@ -865,7 +962,7 @@ function alertRow(label,count,filter,color) {
 // ── OVERVIEW ──────────────────────────────────────────────
 function viewOverview() {
   const list=visible();
-  const total=list.length,today=list.filter(s=>s.createdAt&&new Date(s.createdAt).toDateString()===new Date().toDateString()).length;
+  const total=list.length;
   const onWay=list.filter(s=>s.status==="out_for_delivery").length;
   const done=list.filter(s=>s.status==="delivered").length;
   const ret=list.filter(s=>s.status==="returned").length;
@@ -892,11 +989,10 @@ function viewOverview() {
   return `
     <div class="kpi-grid">
       ${kpi("إجمالي الشحنات",total,"box","var(--brand)","var(--brand-light)","all")}
-      ${kpi("شحنات اليوم",today,"pkg","var(--info)","var(--info-bg)")}
+      ${kpi("تنتظر الاستلام",pending,"qr","var(--warning)","var(--warning-bg)","created")}
       ${kpi("خارج للتسليم",onWay,"truck","var(--purple)","var(--purple-bg)","out_for_delivery")}
       ${kpi("تم التسليم",done,"chart","var(--success)","var(--success-bg)","delivered",pct(done,total)+"%")}
       ${kpi("مرتجعات",ret,"refresh","var(--danger)","var(--danger-bg)","returned")}
-      ${kpi("تنتظر الاستلام",pending,"qr","var(--warning)","var(--warning-bg)","created")}
     </div>
     <div style="display:grid;grid-template-columns:1fr 340px;gap:20px;">
       <div class="card">
@@ -942,7 +1038,7 @@ function shipTable(list) {
     </div>`;
 
   return `<div class="table-wrap"><table>
-    <thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>المنطقة</th><th>الحالة</th><th>المبلغ</th><th>المندوب</th><th>إجراءات</th></tr></thead>
+    <thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>المنطقة</th><th>الحالة</th><th>المبلغ</th><th>التاجر</th><th>المندوب</th><th>إجراءات</th></tr></thead>
     <tbody>
       ${list.map(s=>`<tr>
         <td><div class="td-mono">${esc(s.id)}</div><div style="font-size:11px;color:var(--gray-400);margin-top:2px;">${fmtDate(s.createdAt)}</div></td>
@@ -954,7 +1050,8 @@ function shipTable(list) {
         <td style="font-size:12px;">${esc(s.governorate||s.address?.split("-")[0]||"—")}</td>
         <td><span class="badge ${STATUS_MAP[s.status]?.badge||"badge-gray"}">${STATUS_MAP[s.status]?.label||s.status}</span></td>
         <td style="font-weight:600;">${money(s.amount)}</td>
-        <td style="font-size:12px;color:var(--gray-600);">${s.courierName?esc(s.courierName):`<span style="color:var(--gray-300);">—</span>`}</td>
+        <td style="font-size:12px;color:var(--gray-600);">${s.merchantName?esc(s.merchantName):'<span style="color:var(--gray-300);">—</span>'}</td>
+        <td style="font-size:12px;color:var(--gray-600);">${s.courierName?esc(s.courierName):'<span style="color:var(--gray-300);">—</span>'}</td>
         <td>
           <div class="td-actions">
             <button class="btn btn-secondary btn-sm" data-open="${esc(s.id)}">عرض</button>
@@ -1240,15 +1337,29 @@ function bindDashboardEvents() {
   $$("[data-view]").forEach(btn=>{
     btn.addEventListener("click",()=>{AppState.view=btn.dataset.view;AppState.statusFilter="all";rerenderContent();});
   });
-  $("roleSwitcher")?.addEventListener("change",e=>{
-    const r=e.target.value;if(!r)return;
-    AppState.user.role = r;
+  $("roleSwitcher")?.addEventListener("change", async e => {
+    const r = e.target.value;
+    if (!r) return;
+
+    // Store original admin identity for restoring later
+    const isPreview = r !== "admin";
+    if (!AppState._originalRole) AppState._originalRole = "admin";
+
+    // Update both role fields for full compatibility
+    AppState.user.role         = r;
     AppState.user.primary_role = r;
-    AppState.view=r==="customer"?"track":r==="courier"?"tasks":"overview";
-    // Reload permissions for the previewed role using fallback
+
+    // Set appropriate default view for the previewed role
+    AppState.view         = r === "customer" ? "track" : r === "courier" ? "tasks" : r === "merchant" ? "shipments" : "overview";
+    AppState.statusFilter = "all";
+    AppState.query        = "";
+
+    // Reload permissions using fallback (no DB call for preview)
     AppPerms.clear();
-    (PERMS_FALLBACK[r]||PERMS_FALLBACK.customer).forEach(p=>AppPerms.add(p));
-    renderDashboard();bindDashboardEvents();postRender();
+    (PERMS_FALLBACK[r] || PERMS_FALLBACK.customer).forEach(p => AppPerms.add(p));
+
+    // Full re-render — renderDashboard rebuilds shell + content
+    renderDashboard();
   });
   $("logoutBtn")?.addEventListener("click",async()=>{
     await DB.addAudit("LOGOUT","","User logged out","auth");
@@ -1260,18 +1371,8 @@ function bindDashboardEvents() {
     AppState.notifications=[];AppState.page="home";
     render();toast("تم تسجيل الخروج","info");
   });
-  const si=$("searchInput");
-  if(si){let t;si.addEventListener("input",e=>{clearTimeout(t);t=setTimeout(()=>{AppState.query=e.target.value;rerenderContent();si.focus();},250);});}
-  const ui=$("userSearch");
-  if(ui){let t;ui.addEventListener("input",e=>{clearTimeout(t);t=setTimeout(()=>{AppState.userFilter=e.target.value;rerenderContent();ui.focus();},250);});}
-  const ai=$("auditSearch");
-  if(ai){let t;ai.addEventListener("input",e=>{clearTimeout(t);t=setTimeout(()=>{AppState.auditFilter=e.target.value;App.loadAudit();},300);});}
-  $$("[data-open]").forEach(btn=>{
-    btn.addEventListener("click",()=>{AppState.selectedShipment=btn.dataset.open;rerenderContent();});
-  });
-  $("newShipBtn")?.addEventListener("click",Modals.newShipment);
-  $("addUserBtn")?.addEventListener("click",Modals.addUser);
-  $("openScanner")?.addEventListener("click",Modals.scanner);
+  // Search inputs handled by bindContentEvents() on each rerenderContent
+  // Content-level events handled by bindContentEvents() — called from rerenderContent()
   $("toggleNotif")?.addEventListener("click",()=>{
     const d=$("notifDropdown");if(!d)return;
     const open=d.style.display==="block";
@@ -1321,10 +1422,12 @@ const Modals={
     Modals.close=async()=>{try{if(scanner)await scanner.stop();}catch(e){}orig();Modals.close=orig;};
   },
 
-  newShipment(){
-    const govOpts=Object.keys(EGYPT_GOV).map(g=>`<option value="${g}">${g}</option>`).join("");
-    const couriers=AppState.couriers;
-    const autoCode=`ANE-${Date.now().toString().slice(-6)}`;
+  async newShipment(){
+    // Reload couriers fresh + load full cities dataset
+    const [freshCouriers] = await Promise.all([DB.loadCouriers(), loadEgyptData()]);
+    AppState.couriers = freshCouriers;
+    const couriers = AppState.couriers;
+    const autoCode = `ANE-${Date.now().toString().slice(-6)}`;
     Modals.open(`<div class="modal modal-xl">
       <div class="modal-header">
         <h3>${icon("pkg",18)} شحنة جديدة</h3>
@@ -1350,7 +1453,7 @@ const Modals={
         </div>
         <div class="form-section-label">العنوان</div>
         <div class="form-row">
-          <div class="field"><label>المحافظة *</label><select id="fGov"><option value="">اختر المحافظة</option>${govOpts}</select></div>
+          <div class="field"><label>المحافظة *</label><select id="fGov"><option value="">جاري التحميل...</option></select></div>
           <div class="field"><label>المدينة / المركز</label><select id="fCity"><option value="">اختر المدينة</option></select></div>
         </div>
         <div class="form-row three">
@@ -1380,9 +1483,16 @@ const Modals={
       </div>
     </div>`);
 
-    $("fGov").addEventListener("change",e=>{
-      const cities=EGYPT_GOV[e.target.value]||[];
-      $("fCity").innerHTML=`<option value="">اختر المدينة</option>`+cities.map(c=>`<option value="${c}">${c}</option>`).join("");
+    // Populate governorate dropdown after loading full dataset
+    await loadEgyptData();
+    const govOpts2 = Object.keys(EGYPT_GOV).sort()
+      .map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("");
+    $("fGov").innerHTML = `<option value="">اختر المحافظة</option>` + govOpts2;
+
+    $("fGov").addEventListener("change", e => {
+      const cities = (EGYPT_GOV[e.target.value] || []);
+      $("fCity").innerHTML = `<option value="">اختر المدينة / المركز</option>` +
+        cities.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
     });
 
     $("saveShipBtn").addEventListener("click",async()=>{
@@ -1398,29 +1508,50 @@ const Modals={
       errEl.style.display="none";
       if(!code||!cName||!cPhone||!amount){errEl.style.display="block";errEl.textContent="الحقول المطلوبة: الكود، اسم العميل، الهاتف، القيمة";return;}
       if(!gov){errEl.style.display="block";errEl.textContent="يرجى اختيار المحافظة";return;}
-      const address=[gov,city,street?`شارع ${street}`:"",build?`عمارة ${build}`:"",floor?`دور ${floor}`:""].filter(Boolean).join(" - ");
-      btn.disabled=true;btn.innerHTML=`<span class="spinner"></span> جاري الحفظ...`;
+      // No 'address' column — schema computes address_full from parts automatically
+      btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> جاري الحفظ...`;
       try {
-        const{data:{session}}=await db.auth.getSession();
-        const uid=session?.user?.id||AppState.user?.id||null;
-        const isMerchant=(AppState.user.primary_role||AppState.user.role)==="merchant";
+        const { data:{ session } } = await db.auth.getSession();
+        const uid         = session?.user?.id || AppState.user?.id || null;
+        const isMerchant  = (AppState.user.primary_role||AppState.user.role) === "merchant";
         await DB.createShipment({
-          shipment_code:code,customer_name:cName,customer_phone:cPhone,
-          customer_phone2:cPhone2||null,address,governorate:gov,city:city||null,
-          street:street||null,building:build||null,floor:floor||null,
-          amount,delivery_fee:fee,status:"created",eta:eta||null,notes:notes||null,
-          merchant_id:isMerchant?uid:null,
-          merchant_name:isMerchant?AppState.user.name:null,
-          merchant_phone:isMerchant?(AppState.user.phone||null):null,
-          courier_id:courierId,courier_name:courierName||null,
-          created_by:uid,
+          shipment_code:   code,
+          customer_name:   cName,
+          customer_phone:  cPhone,
+          customer_phone2: cPhone2 || null,
+          // Address parts — address_full is GENERATED ALWAYS in the DB
+          governorate: gov,
+          city:        city   || null,
+          street:      street || null,
+          building:    build  || null,
+          floor:       floor  || null,
+          apartment:   null,   // field reserved for future use
+          // Financials
+          amount:       amount,
+          delivery_fee: fee,
+          // Status
+          status: "created",
+          eta:    eta || null,
+          notes:  notes || null,
+          // Merchant (snapshot at creation time — no FK risk)
+          merchant_id:    isMerchant ? uid  : null,
+          merchant_name:  isMerchant ? (AppState.user.name  || "") : null,
+          merchant_phone: isMerchant ? (AppState.user.phone || "") : null,
+          // Courier (optional at creation)
+          courier_id:   courierId || null,
+          courier_name: courierName || null,
+          // Metadata
+          created_by: uid,
         });
         await DB.addTimeline(code,"تم إنشاء الشحنة",AppState.user.name,(AppState.user.primary_role||AppState.user.role));
         await DB.addNotification(`شحنة جديدة: ${code} — ${cName}`,"admin",code,"shipment");
         await DB.addAudit("CREATE_SHIPMENT",code,`By ${AppState.user.name} for ${cName}`);
         Modals.close();
-        AppState.shipments=await DB.loadShipments();
-        rerenderContent();toast(`✅ تم إضافة الشحنة ${code}`);
+        // Reload shipments to get the DB-computed address_full
+        AppState.shipments = await DB.loadShipments();
+        // Realtime subscription will also pick this up for admin
+        rerenderContent();
+        toast(`✅ تم إضافة الشحنة ${code}`);
       } catch(err) {
         errEl.style.display="block";
         errEl.textContent=err.message?.includes("23505")?"كود الشحنة موجود بالفعل":"خطأ: "+err.message;
