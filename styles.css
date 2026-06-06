@@ -929,8 +929,23 @@ tbody tr.muted { opacity: .5; }
 .sb-overlay{
     display:block;
 }
-}
+.dash{
+      width:100%;
+      max-width:100%;
+      overflow-x:hidden;
+  }
 
+  .main{
+      margin-right:0 !important;
+      width:100%;
+      max-width:100%;
+      overflow-x:hidden;
+  }
+}
+html,
+body{
+    overflow-x:hidden;
+}
 @media (max-width: 540px) {
   .auth-card { padding: 28px 20px; }
   .kpi-grid { grid-template-columns: 1fr 1fr; }
@@ -957,3 +972,17 @@ tbody tr.muted { opacity: .5; }
   align-items: center; justify-content: center; cursor: pointer;
 }
 @media (max-width: 768px) { .menu-toggle { display: flex; } }
+html,
+body {
+    max-width: 100%;
+    overflow-x: hidden;
+}
+
+.app,
+.dashboard,
+.main,
+.page,
+.layout {
+    max-width: 100%;
+    overflow-x: hidden;
+}
