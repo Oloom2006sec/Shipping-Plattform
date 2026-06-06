@@ -917,7 +917,15 @@ tbody tr.muted { opacity: .5; }
   .hp-nav-links { display: none; }
   .notif-dropdown { width: calc(100vw - 32px); right: 16px; left: auto; }
   
+ .table-wrap{
+      overflow-x:auto !important;
+      width:100%;
+      max-width:100%;
+  }
 
+  table{
+      min-width:900px;
+  }
   .sidebar{
       right:0;
       width:260px;
