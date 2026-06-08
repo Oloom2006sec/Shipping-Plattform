@@ -921,9 +921,9 @@ tbody tr.muted { opacity: .5; }
   .form-row.three { grid-template-columns: 1fr; }
   .hp-nav-links { display: none; }
   .notif-dropdown { width: calc(100vw - 32px); right: 16px; left: auto; }
-  .kpi-grid{
-      grid-template-columns:1fr !important;
-      width:100%;
+    .kpi-grid{
+      grid-template-columns:repeat(2,1fr) !important;
+      gap:12px;
   }
  .table-wrap{
       overflow-x:auto !important;
