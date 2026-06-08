@@ -1010,7 +1010,7 @@ function viewOverview() {
       ${kpi("تم التسليم",done,"chart","var(--success)","var(--success-bg)","delivered",pct(done,total)+"%")}
       ${kpi("مرتجعات",ret,"refresh","var(--danger)","var(--danger-bg)","returned")}
     </div>
-    <div style="display:grid;grid-template-columns:1fr 340px;gap:20px;">
+    <div style="display:grid;grid-template-columns:${window.innerWidth<=768?'1fr':'1fr 340px'};gap:20px;">
       <div class="card">
         <div class="card-header">
           <h3 class="card-title">${icon("box")} آخر الشحنات
@@ -1897,14 +1897,3 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
 })();
 
 
-$("menuToggle")?.addEventListener("click",()=>{
-    console.log("MENU CLICKED");
-
-    $("sidebar")?.classList.toggle("open");
-    $("sbOverlay")?.classList.toggle("active");
-
-    console.log(
-      $("sidebar")?.className,
-      $("sbOverlay")?.className
-    );
-});
