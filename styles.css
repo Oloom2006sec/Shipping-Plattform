@@ -643,7 +643,12 @@ svg { display: block; }
 
 /* Tables */
 .table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--gray-200); }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
 thead { background: var(--gray-50); }
 thead th {
   padding: 10px 14px; text-align: right; font-size: 11px;
