@@ -916,10 +916,29 @@ tbody tr.muted { opacity: .5; }
   .form-row.three { grid-template-columns: 1fr; }
   .hp-nav-links { display: none; }
   .notif-dropdown { width: calc(100vw - 32px); right: 16px; left: auto; }
-  .kpi-grid{
-      grid-template-columns:1fr !important;
-      width:100%;
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+    width: 100%;
   }
+
+  /* Collapse work-grid sidebar panel on mobile */
+  .page > div[style*="340px"],
+  .tab-body > div[style*="340px"],
+  div[style*="grid-template-columns:1fr 340px"],
+  div[style*="grid-template-columns: 1fr 340px"] {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Reduce chart height on mobile */
+  .chart-box { height: 160px !important; }
+
+  /* Reduce page padding at 768px (currently only at 540px) */
+  .page     { padding: 14px; }
+  .tab-body { padding: 14px; }
+
+  /* stats-grid: always 2 cols on mobile */
+  .stats-grid                           { grid-template-columns: repeat(2,1fr) !important; }
+  .stats-grid.two                       { grid-template-columns: 1fr 1fr !important; }
  .table-wrap{
       overflow-x:auto !important;
       width:100%;
