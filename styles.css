@@ -892,6 +892,13 @@ tbody tr.muted { opacity: .5; }
 /* ════════════════════════════════════════════════════════
    RESPONSIVE
 ════════════════════════════════════════════════════════ */
+/* Overview dashboard two-column layout (desktop) */
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 20px;
+}
+
 @media (min-width: 1024px) {
   .auth-right { display: flex; }
   .auth-wrap { gap: 0; }
@@ -920,25 +927,6 @@ tbody tr.muted { opacity: .5; }
     grid-template-columns: repeat(2, 1fr) !important;
     width: 100%;
   }
-
-  /* Collapse work-grid sidebar panel on mobile */
-  .page > div[style*="340px"],
-  .tab-body > div[style*="340px"],
-  div[style*="grid-template-columns:1fr 340px"],
-  div[style*="grid-template-columns: 1fr 340px"] {
-    grid-template-columns: 1fr !important;
-  }
-
-  /* Reduce chart height on mobile */
-  .chart-box { height: 160px !important; }
-
-  /* Reduce page padding at 768px (currently only at 540px) */
-  .page     { padding: 14px; }
-  .tab-body { padding: 14px; }
-
-  /* stats-grid: always 2 cols on mobile */
-  .stats-grid                           { grid-template-columns: repeat(2,1fr) !important; }
-  .stats-grid.two                       { grid-template-columns: 1fr 1fr !important; }
  .table-wrap{
       overflow-x:auto !important;
       width:100%;
@@ -971,6 +959,21 @@ tbody tr.muted { opacity: .5; }
       overflow-x:hidden;
   }
 
+
+
+  /* Overview grid: collapse to single column on mobile */
+  .overview-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* Page and tab padding */
+  .page, .tab-body { padding: 14px; }
+
+  /* Chart height reduction */
+  .chart-box { height: 160px !important; }
+
+  /* Stats grid: keep 2 columns */
+  .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
 }
 html,
 body{
