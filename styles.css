@@ -605,8 +605,10 @@ svg { display: block; }
 
 /* KPI cards */
 .kpi-grid {
-  display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr));
-  gap: 16px; margin-bottom: 24px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
 }
 .kpi {
   background: #fff; border: 1px solid var(--gray-200);
@@ -892,13 +894,6 @@ tbody tr.muted { opacity: .5; }
 /* ════════════════════════════════════════════════════════
    RESPONSIVE
 ════════════════════════════════════════════════════════ */
-/* Overview dashboard two-column layout (desktop) */
-.overview-grid {
-  display: grid;
-  grid-template-columns: 1fr 340px;
-  gap: 20px;
-}
-
 @media (min-width: 1024px) {
   .auth-right { display: flex; }
   .auth-wrap { gap: 0; }
@@ -923,9 +918,9 @@ tbody tr.muted { opacity: .5; }
   .form-row.three { grid-template-columns: 1fr; }
   .hp-nav-links { display: none; }
   .notif-dropdown { width: calc(100vw - 32px); right: 16px; left: auto; }
-  .kpi-grid {
-    grid-template-columns: repeat(2, 1fr) !important;
-    width: 100%;
+  .kpi-grid{
+      grid-template-columns:1fr !important;
+      width:100%;
   }
  .table-wrap{
       overflow-x:auto !important;
@@ -961,19 +956,57 @@ tbody tr.muted { opacity: .5; }
 
 
 
-  /* Overview grid: collapse to single column on mobile */
+  /* ── KPI grid: force 2 columns regardless of minmax ── */
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  /* ── KPI card: compact layout on mobile ── */
+  .kpi {
+    padding: 12px 14px;
+  }
+  .kpi-icon {
+    width: 28px;
+    height: 28px;
+    margin-bottom: 8px;
+  }
+  .kpi-value {
+    font-size: 20px;
+  }
+  .kpi-label {
+    font-size: 11px;
+  }
+  .kpi-hint {
+    display: none;
+  }
+
+  /* ── Overview grid: single column ── */
   .overview-grid {
     grid-template-columns: 1fr !important;
   }
 
-  /* Page and tab padding */
-  .page, .tab-body { padding: 14px; }
+  /* ── Stats grid: 2 columns ── */
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 10px;
+  }
 
-  /* Chart height reduction */
-  .chart-box { height: 160px !important; }
+  /* ── Chart: reduce height ── */
+  .chart-box, #statusChart {
+    height: 160px !important;
+  }
 
-  /* Stats grid: keep 2 columns */
-  .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+  /* ── Page padding ── */
+  .page, .tab-body {
+    padding: 14px;
+  }
+
+  /* ── Alert list items: compact ── */
+  .alert-item, .alert-list > div {
+    padding: 8px 12px;
+  }
 }
 html,
 body{
