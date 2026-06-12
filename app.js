@@ -1010,7 +1010,7 @@ function viewOverview() {
       ${kpi("تم التسليم",done,"chart","var(--success)","var(--success-bg)","delivered",pct(done,total)+"%")}
       ${kpi("مرتجعات",ret,"refresh","var(--danger)","var(--danger-bg)","returned")}
     </div>
-    <div class="overview-grid">
+    <div style="display:grid;grid-template-columns:1fr 340px;gap:20px;">
       <div class="card">
         <div class="card-header">
           <h3 class="card-title">${icon("box")} آخر الشحنات
@@ -1350,8 +1350,15 @@ function viewAudit() {
 // BIND EVENTS
 // ══════════════════════════════════════════════════════════
 function bindDashboardEvents() {
-  $$("[data-view]").forEach(btn=>{
-    btn.addEventListener("click",()=>{AppState.view=btn.dataset.view;AppState.statusFilter="all";rerenderContent();});
+  $$("[data-view]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      AppState.view         = btn.dataset.view;
+      AppState.statusFilter = "all";
+      $$("[data-view]").forEach(b => {
+        b.classList.toggle("active", b.dataset.view === AppState.view);
+      });
+      rerenderContent();
+    });
   });
   $("roleSwitcher")?.addEventListener("change", async e => {
     const r = e.target.value;
@@ -1745,31 +1752,92 @@ const App={
       btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
       const{error}=await db.from("profiles").update({full_name:name,phone,primary_role:role}).eq("id",id);
       if(error){errEl.style.display="block";errEl.textContent="خطأ: "+error.message;btn.disabled=false;btn.textContent="حفظ";return;}
-      await DB.addAudit("EDIT_USER",id,`name=${name},role=${role}`);
+      // Find original user for full context
+      const _u = AppState.users.find(x => x.id === id);
+      await DB.addAudit(
+        "EDIT_USER", id,
+        `Target: ${name} | Email: ${_u?.email||""} | Role: ${role} | Phone: ${phone||""} | By: ${AppState.user.name}`,
+        "user"
+      );
       const idx=AppState.users.findIndex(x=>x.id===id);
       if(idx>=0)AppState.users[idx]={...AppState.users[idx],name,phone,role};
       Modals.close();rerenderContent();toast(`✅ تم تحديث ${name}`);
     });
   },
 
-  async toggleUser(id){
-    const u=AppState.users.find(x=>x.id===id);if(!u)return;
-    const ns=!u.is_suspended;
-    const{error}=await db.from("profiles").update({is_suspended:ns}).eq("id",id);
-    if(error){toast("فشل التحديث","error");return;}
-    u.is_suspended=ns;
-    await DB.addAudit(ns?"SUSPEND_USER":"ACTIVATE_USER",id,`by ${AppState.user.name}`);
-    toast(`${ns?"تم إيقاف":"تم تفعيل"} ${u.name}`);rerenderContent();
+  async toggleUser(id) {
+    const u = AppState.users.find(x => x.id === id);
+    if (!u) return;
+    const ns = !u.is_suspended;
+    // Disable the button immediately to prevent double-click
+    const btn = document.querySelector(`[onclick*="toggleUser('${id}')"]`);
+    if (btn) { btn.disabled = true; btn.textContent = "…"; }
+    try {
+      const { error } = await db.from("profiles")
+        .update({
+          is_suspended:    ns,
+          suspended_at:    ns ? new Date().toISOString() : null,
+          suspended_by:    ns ? (AppState.user?.id || null) : null,
+          suspension_note: ns ? "Suspended by admin" : null
+        })
+        .eq("id", id);
+      if (error) throw error;
+      // Update local state
+      u.is_suspended    = ns;
+      u.suspended       = ns;
+      // Human-readable audit with full user context
+      await DB.addAudit(
+        ns ? "SUSPEND_USER" : "ACTIVATE_USER",
+        id,
+        `Target: ${u.name} | Email: ${u.email} | Role: ${u.role} | By: ${AppState.user.name}`,
+        "user"
+      );
+      toast(`${ns ? "تم إيقاف" : "تم تفعيل"} ${u.name}`, ns ? "warning" : "success");
+    } catch(err) {
+      toast("فشل التحديث: " + err.message, "error");
+    } finally {
+      // Always re-enable button and re-render — prevents frozen UI
+      if (btn) { btn.disabled = false; }
+      rerenderContent();
+    }
   },
 
-  async deleteUser(id){
-    const u=AppState.users.find(x=>x.id===id);if(!u)return;
-    if(!confirm(`حذف ${u.name}؟ لا يمكن التراجع.`))return;
-    const{error}=await db.from("profiles").delete().eq("id",id);
-    if(error){toast("فشل الحذف: "+error.message,"error");return;}
-    await DB.addAudit("DELETE_USER",id,`by ${AppState.user.name}`);
-    AppState.users=AppState.users.filter(x=>x.id!==id);
-    toast(`تم حذف ${u.name}`,"info");rerenderContent();
+  async deleteUser(id) {
+    const u = AppState.users.find(x => x.id === id);
+    if (!u) return;
+    if (!confirm(`حذف ${u.name}؟ سيتم إخفاؤه من القوائم مع الحفاظ على السجلات التاريخية.`)) return;
+
+    const btn = document.querySelector(`[onclick*="deleteUser('${id}')"]`);
+    if (btn) { btn.disabled = true; btn.innerHTML = "…"; }
+
+    try {
+      // SOFT DELETE — never hard-delete profiles
+      // Hard delete breaks FK on shipment_timeline.actor_id
+      const { error } = await db.from("profiles")
+        .update({
+          is_deleted: true,
+          deleted_at: new Date().toISOString(),
+          deleted_by: AppState.user?.id || null
+        })
+        .eq("id", id);
+      if (error) throw error;
+
+      // Human-readable audit
+      await DB.addAudit(
+        "SOFT_DELETE_USER", id,
+        `Target: ${u.name} | Email: ${u.email} | Role: ${u.role} | By: ${AppState.user.name}`,
+        "user"
+      );
+
+      // Remove from local list (they won't appear in next loadUsers either)
+      AppState.users = AppState.users.filter(x => x.id !== id);
+      toast(`تم حذف ${u.name}`, "info");
+    } catch(err) {
+      toast("فشل الحذف: " + err.message, "error");
+    } finally {
+      if (btn) btn.disabled = false;
+      rerenderContent();
+    }
   },
 
   async loadAudit(){
