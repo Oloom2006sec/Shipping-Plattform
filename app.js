@@ -9,21 +9,49 @@ const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ── CONFIG ────────────────────────────────────────────────
 const STATUS_MAP = {
-  created:          { label:"تم إنشاء الشحنة",  badge:"badge-info",    step:0 },
-  received:         { label:"تم الاستلام",       badge:"badge-warning", step:1 },
-  warehouse:        { label:"في المخزن",         badge:"badge-warning", step:2 },
-  hub:              { label:"مركز الفرز",        badge:"badge-brand",   step:3 },
-  out_for_delivery: { label:"خرجت للتسليم",      badge:"badge-brand",   step:4 },
-  delivered:        { label:"تم التسليم",        badge:"badge-success", step:5 },
-  returned:         { label:"مرتجع",             badge:"badge-danger",  step:6 },
-  cancelled:        { label:"ملغية",             badge:"badge-gray",    step:-1 }
+  draft:            { label:"مسودة",             badge:"badge-gray",    step:0  },
+  submitted:        { label:"تم الإرسال",        badge:"badge-info",    step:1  },
+  pickup_requested: { label:"طلب استلام",        badge:"badge-info",    step:2  },
+  picked_up:        { label:"تم الاستلام",       badge:"badge-warning", step:3  },
+  at_warehouse:     { label:"في المستودع",       badge:"badge-warning", step:4  },
+  in_transit:       { label:"في الطريق",         badge:"badge-brand",   step:5  },
+  at_branch:        { label:"في الفرع",          badge:"badge-brand",   step:6  },
+  out_for_delivery: { label:"خرجت للتسليم",      badge:"badge-brand",   step:7  },
+  delivered:        { label:"تم التسليم",        badge:"badge-success", step:8  },
+  returned:         { label:"مرتجع",             badge:"badge-danger",  step:-1 },
+  rescheduled:      { label:"إعادة جدولة",       badge:"badge-warning", step:-1 },
+  cancelled:        { label:"ملغية",             badge:"badge-gray",    step:-1 },
+  suspended:        { label:"موقوفة",            badge:"badge-danger",  step:-1 },
+  // Legacy aliases
+  created:          { label:"تم إنشاء الشحنة",  badge:"badge-info",    step:1  },
+  received:         { label:"تم الاستلام",       badge:"badge-warning", step:3  },
+  warehouse:        { label:"في المخزن",         badge:"badge-warning", step:4  },
+  hub:              { label:"مركز الفرز",        badge:"badge-brand",   step:6  },
 };
 
-const STATUS_STEPS = ["created","received","warehouse","hub","out_for_delivery","delivered"];
+const SERVICE_MAP = {
+  door_to_door: { label:"توصيل للباب",     icon:"🚪" },
+  drop_off:     { label:"إيداع في الفرع",  icon:"📦" },
+  pickup:       { label:"استلام من الفرع", icon:"🏪" },
+};
+
+const ORDER_TYPE_MAP = {
+  express:   { label:"سريع",   badge:"badge-danger",  icon:"⚡" },
+  standard:  { label:"عادي",   badge:"badge-info",    icon:"📦" },
+  scheduled: { label:"مجدول",  badge:"badge-warning", icon:"📅" },
+};
+
+const STATUS_STEPS = [
+  "submitted","pickup_requested","picked_up",
+  "at_warehouse","in_transit","at_branch",
+  "out_for_delivery","delivered"
+];
+
+// STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
   admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","reports","users","audit","track"] },
-  merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","accounts"] },
+  merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["track","accounts"] }
 };
@@ -31,7 +59,9 @@ const ROLE_MAP = {
 const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
-  audit:"سجل النشاط",  track:"تتبع"
+  audit:"سجل النشاط",  track:"تتبع",
+  addresses:"دفتر العناوين", recipients:"العملاء",
+  products:"المنتجات",       pickup:"طلبات الاستلام"
 };
 
 // Live permission set — loaded from DB on login via get_user_permissions(uid)
@@ -160,10 +190,14 @@ async function loadEgyptData() {
 // ── STATE ─────────────────────────────────────────────────
 const AppState = {
   page:"home", authMode:"login", user:null, view:"overview",
-  query:"", statusFilter:"all", selectedShipment:null,
+  query:"", statusFilter:"all", serviceFilter:"", orderFilter:"",
+  selectedShipment:null,
   userFilter:"", auditFilter:"",
   shipments:[], users:[], couriers:[], notifications:[],
   realtimeChannel:null,
+  // Phase 2A
+  merchantAddresses:[], merchantRecipients:[], merchantProducts:[],
+  pickupRequests:[], merchantBalance:0,
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -384,6 +418,65 @@ const DB = {
     const f=filter.toLowerCase();
     return logs.filter(l=>`${l.actor_name} ${l.action} ${l.entity_id} ${l.actor_role} ${l.details}`.toLowerCase().includes(f));
   },
+  // ── Phase 2A: Merchant Portal ─────────────────────────────
+  async loadMerchantAddresses(merchantId) {
+    const { data, error } = await db.from("merchant_addresses")
+      .select("*").eq("merchant_id", merchantId)
+      .eq("is_active", true).order("is_default", { ascending:false });
+    if (error) { console.warn("loadMerchantAddresses:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadMerchantRecipients(merchantId, query="") {
+    let q = db.from("merchant_recipients")
+      .select("*").eq("merchant_id", merchantId)
+      .eq("is_deleted", false).order("order_count", { ascending:false });
+    if (query) q = q.ilike("name", `%${query}%`);
+    const { data, error } = await q.limit(100);
+    if (error) { console.warn("loadMerchantRecipients:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadMerchantProducts(merchantId) {
+    const { data, error } = await db.from("merchant_products")
+      .select("*").eq("merchant_id", merchantId)
+      .eq("is_deleted", false).eq("is_active", true)
+      .order("name");
+    if (error) { console.warn("loadMerchantProducts:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadMerchantLedger(merchantId) {
+    const { data, error } = await db.from("merchant_ledger")
+      .select("*").eq("merchant_id", merchantId)
+      .order("created_at", { ascending:false }).limit(100);
+    if (error) { console.warn("loadMerchantLedger:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadMerchantBalance(merchantId) {
+    const { data, error } = await db.rpc("get_merchant_balance",
+      { p_merchant_id: merchantId });
+    if (error) { console.warn("loadMerchantBalance:", error.message); return 0; }
+    return Number(data) || 0;
+  },
+
+  async loadSettlements(merchantId) {
+    const { data, error } = await db.from("settlements")
+      .select("*").eq("merchant_id", merchantId)
+      .order("created_at", { ascending:false });
+    if (error) { console.warn("loadSettlements:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadPickupRequests(merchantId) {
+    const { data, error } = await db.from("pickup_requests")
+      .select("*").eq("merchant_id", merchantId)
+      .order("created_at", { ascending:false });
+    if (error) { console.warn("loadPickupRequests:", error.message); return []; }
+    return data || [];
+  },
+
   async uploadPOD(shipmentCode,file) {
     const ext=file.name.split(".").pop()||"jpg";
     const path=`pod_${shipmentCode}_${Date.now()}.${ext}`;
@@ -396,17 +489,66 @@ const DB = {
 
 function mapRow(r) {
   return {
-    id:r.shipment_code, merchantId:r.merchant_id||null,
-    merchantName:r.merchant_name||"", merchantPhone:r.merchant_phone||"",
-    courierId:r.courier_id||null, courierName:r.courier_name||"",
-    customerName:r.customer_name||"", customerPhone:r.customer_phone||"",
-    customerPhone2:r.customer_phone2||"", address:r.address_full||r.address||"",
-    governorate:r.governorate||"", city:r.city||"", street:r.street||"",
-    building:r.building||"", floor:r.floor||"", apartment:r.apartment||"",
-    amount:Number(r.amount)||0, deliveryFee:Number(r.delivery_fee)||60,
-    status:r.status||"created", eta:r.eta||"", attempts:r.delivery_attempts||r.attempts||0,
-    podUrl:r.pod_url||null, notes:r.notes||"",
-    createdBy:r.created_by||null, createdAt:r.created_at, updatedAt:r.updated_at,
+    // Identity
+    id:             r.shipment_code,
+    // Merchant
+    merchantId:     r.merchant_id    || null,
+    merchantName:   r.merchant_name  || "",
+    merchantPhone:  r.merchant_phone || "",
+    // Courier
+    courierId:      r.courier_id   || null,
+    courierName:    r.courier_name || "",
+    // Customer
+    customerName:   r.customer_name   || "",
+    customerPhone:  r.customer_phone  || "",
+    customerPhone2: r.customer_phone2 || "",
+    // Address
+    address:        r.address_full || r.address || "",
+    governorate:    r.governorate  || "",
+    city:           r.city         || "",
+    street:         r.street       || "",
+    building:       r.building     || "",
+    floor:          r.floor        || "",
+    apartment:      r.apartment    || "",
+    // Financials
+    amount:         Number(r.amount)       || 0,
+    deliveryFee:    Number(r.delivery_fee) || 60,
+    returnFee:      Number(r.return_fee)   || 0,
+    // Phase 1: service & order type
+    serviceType:    r.service_type || "door_to_door",
+    orderType:      r.order_type   || "standard",
+    scheduledAt:    r.scheduled_at || null,
+    // Phase 1: physical
+    weight:         r.weight   != null ? Number(r.weight)   : null,
+    quantity:       r.quantity != null ? Number(r.quantity)  : 1,
+    width:          r.width    != null ? Number(r.width)     : null,
+    height:         r.height   != null ? Number(r.height)    : null,
+    depth:          r.depth    != null ? Number(r.depth)     : null,
+    barcode:        r.barcode  || null,
+    // Phase 1: return fee
+    returnFee:      Number(r.return_fee) || 0,
+    // Status
+    status:           r.status || "submitted",
+    eta:              r.eta    || "",
+    attempts:         r.delivery_attempts || r.attempts || 0,
+    rescheduleCount:  r.reschedule_count  || 0,
+    rescheduleReason: r.reschedule_reason || "",
+    // Proof
+    podUrl:       r.pod_url       || null,
+    signatureUrl: r.signature_url || null,
+    otpVerified:  r.otp_verified  || false,
+    // Notes
+    notes:         r.notes          || "",
+    internalNotes: r.internal_notes || "",
+    // Branch / warehouse
+    branchCode:    r.branch_code    || "",
+    warehouseCode: r.warehouse_code || "",
+    // Metadata
+    createdBy:   r.created_by  || null,
+    createdAt:   r.created_at,
+    updatedAt:   r.updated_at,
+    deliveredAt: r.delivered_at || null,
+    returnedAt:  r.returned_at  || null,
   };
 }
 
@@ -421,7 +563,11 @@ function visible() {
   const q=AppState.query.trim().toLowerCase();
   return list.filter(s=>{
     const txt=`${s.id} ${s.customerName} ${s.customerPhone} ${s.customerPhone2} ${s.address} ${s.governorate}`.toLowerCase();
-    return(!q||txt.includes(q))&&(AppState.statusFilter==="all"||s.status===AppState.statusFilter);
+    const matchQ       = !q || txt.includes(q);
+    const matchStatus  = AppState.statusFilter==="all"  || s.status===AppState.statusFilter;
+    const matchService = !AppState.serviceFilter || s.serviceType===AppState.serviceFilter;
+    const matchOrder   = !AppState.orderFilter   || s.orderType===AppState.orderFilter;
+    return matchQ && matchStatus && matchService && matchOrder;
   });
 }
 
@@ -696,6 +842,7 @@ async function handleLogin(e) {
 
     // Step 8: start realtime BEFORE render (so first render shows live count)
     if (role === "admin") startRealtime();
+    if (role === "merchant") await App.loadMerchantData();
 
     // Step 9: audit (fire-and-forget, do not await — avoid delaying render)
     DB.addAudit("LOGIN", data.user.id, `role:${role} perms:${AppPerms.size}`, "auth");
@@ -849,14 +996,19 @@ function renderNotifPanel() {
 
 function renderView() {
   switch(AppState.view) {
-    case"shipments":return viewShipments();
-    case"tasks":    return viewTasks();
-    case"accounts": return viewAccounts();
-    case"reports":  return viewReports();
-    case"track":    return viewTrack();
-    case"users":    return viewUsers();
-    case"audit":    return viewAudit();
-    default:        return viewOverview();
+    case"shipments":  return viewShipments();
+    case"tasks":      return viewTasks();
+    case"accounts":   return viewAccounts();
+    case"reports":    return viewReports();
+    case"track":      return viewTrack();
+    case"users":      return viewUsers();
+    case"audit":      return viewAudit();
+    // Phase 2A
+    case"addresses":  return viewAddresses();
+    case"recipients": return viewRecipients();
+    case"products":   return viewProducts();
+    case"pickup":     return viewPickupRequests();
+    default:          return viewOverview();
   }
 }
 
@@ -1054,10 +1206,18 @@ function shipTable(list) {
     </div>`;
 
   return `<div class="table-wrap"><table>
-    <thead><tr><th>الكود</th><th>العميل</th><th>الهاتف</th><th>المنطقة</th><th>الحالة</th><th>المبلغ</th><th>التاجر</th><th>المندوب</th><th>إجراءات</th></tr></thead>
+    <thead><tr><th>الكود</th><th>الخدمة</th><th>العميل</th><th>الهاتف</th><th>المنطقة</th><th>الحالة</th><th>المبلغ</th><th>الوزن</th><th>التاجر</th><th>المندوب</th><th>إجراءات</th></tr></thead>
     <tbody>
       ${list.map(s=>`<tr>
-        <td><div class="td-mono">${esc(s.id)}</div><div style="font-size:11px;color:var(--gray-400);margin-top:2px;">${fmtDate(s.createdAt)}</div></td>
+        <td>
+          <div class="td-mono">${esc(s.id)}</div>
+          <div style="font-size:10px;color:var(--gray-400);margin-top:2px;">${fmtDate(s.createdAt)}</div>
+          ${s.barcode ? `<div style="font-size:10px;color:var(--gray-500);">🔲 ${esc(s.barcode)}</div>` : ""}
+        </td>
+        <td>
+          <div>${SERVICE_MAP[s.serviceType]?.icon||""} <span style="font-size:11px;">${SERVICE_MAP[s.serviceType]?.label||""}</span></div>
+          <span class="badge ${ORDER_TYPE_MAP[s.orderType]?.badge||"badge-gray"}" style="font-size:10px;margin-top:3px;">${ORDER_TYPE_MAP[s.orderType]?.icon||""} ${ORDER_TYPE_MAP[s.orderType]?.label||""}</span>
+        </td>
         <td class="td-primary">${esc(s.customerName)}</td>
         <td class="td-phone">
           <a href="tel:${esc(s.customerPhone)}">${esc(s.customerPhone)}</a>
@@ -1067,6 +1227,7 @@ function shipTable(list) {
         <td><span class="badge ${STATUS_MAP[s.status]?.badge||"badge-gray"}">${STATUS_MAP[s.status]?.label||s.status}</span></td>
         <td style="font-weight:600;">${money(s.amount)}</td>
         <td style="font-size:12px;color:var(--gray-600);">${s.merchantName?esc(s.merchantName):'<span style="color:var(--gray-300);">—</span>'}</td>
+        <td style="font-size:12px;color:var(--gray-500);">${s.weight?s.weight+"كجم":"—"}</td>
         <td style="font-size:12px;color:var(--gray-600);">${s.courierName?esc(s.courierName):'<span style="color:var(--gray-300);">—</span>'}</td>
         <td>
           <div class="td-actions">
@@ -1093,11 +1254,18 @@ function viewShipments() {
           ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn">${icon("plus",13)} إضافة</button>`:""}
         </div>
       </div>
-      <div class="filter-bar">
-        ${["all","created","received","warehouse","hub","out_for_delivery","delivered","returned","cancelled"].map(st=>`
+      <div class="filter-bar" style="margin-bottom:8px;">
+        ${["all","submitted","pickup_requested","picked_up","at_warehouse","in_transit","at_branch","out_for_delivery","delivered","returned","rescheduled","cancelled","suspended"].map(st=>`
           <button class="filter-btn ${AppState.statusFilter===st?"active":""}" onclick="App.setFilter('${st}')">
             ${st==="all"?"الكل":STATUS_MAP[st]?.label||st}
           </button>`).join("")}
+      </div>
+      <div class="filter-bar" style="margin-bottom:14px;">
+        <button class="filter-btn ${!AppState.serviceFilter?"active":""}" onclick="App.setServiceFilter('')">كل الخدمات</button>
+        ${Object.entries(SERVICE_MAP).map(([k,v])=>`<button class="filter-btn ${AppState.serviceFilter===k?"active":""}" onclick="App.setServiceFilter('${k}')">${v.icon} ${v.label}</button>`).join("")}
+        <span style="margin:0 8px;color:var(--gray-300);">|</span>
+        <button class="filter-btn ${!AppState.orderFilter?"active":""}" onclick="App.setOrderFilter('')">كل الأنواع</button>
+        ${Object.entries(ORDER_TYPE_MAP).map(([k,v])=>`<button class="filter-btn ${AppState.orderFilter===k?"active":""}" onclick="App.setOrderFilter('${k}')">${v.icon} ${v.label}</button>`).join("")}
       </div>
       ${shipTable(visible())}
     </div>
@@ -1135,6 +1303,21 @@ function detailPanel(s) {
         ${s.merchantName?`<div class="detail-field"><div class="df-label">التاجر</div><div class="df-value">${esc(s.merchantName)}</div></div>`:""}
         <div class="detail-field"><div class="df-label">المندوب</div><div class="df-value">${esc(s.courierName)||`<span style="color:var(--gray-400);">غير معين</span>`}</div></div>
         ${s.notes?`<div class="detail-field" style="grid-column:1/-1"><div class="df-label">ملاحظات</div><div class="df-value">${esc(s.notes)}</div></div>`:""}
+        ${s.internalNotes && can("shipments.view_internal")?`<div class="detail-field" style="grid-column:1/-1;border:1px solid var(--warning-border);background:var(--warning-bg);"><div class="df-label" style="color:var(--warning);">ملاحظات داخلية</div><div class="df-value">${esc(s.internalNotes)}</div></div>`:""}
+      </div>
+      <!-- Phase 1: Service, order type, physical details -->
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:16px;padding:14px;background:var(--gray-50);border-radius:var(--radius);border:1px solid var(--gray-200);">
+        <div><div class="df-label">نوع الخدمة</div><div style="font-size:14px;font-weight:600;">${SERVICE_MAP[s.serviceType]?.icon||""} ${SERVICE_MAP[s.serviceType]?.label||s.serviceType}</div></div>
+        <div><div class="df-label">نوع الطلب</div><div><span class="badge ${ORDER_TYPE_MAP[s.orderType]?.badge||"badge-gray"}">${ORDER_TYPE_MAP[s.orderType]?.icon||""} ${ORDER_TYPE_MAP[s.orderType]?.label||s.orderType}</span></div></div>
+        ${s.weight?`<div><div class="df-label">الوزن</div><div style="font-size:14px;font-weight:600;">${s.weight} كجم</div></div>`:""}
+        ${s.quantity>1?`<div><div class="df-label">الكمية</div><div style="font-size:14px;font-weight:600;">${s.quantity} قطعة</div></div>`:""}
+        ${s.width?`<div><div class="df-label">الأبعاد</div><div style="font-size:13px;font-weight:600;">${s.width}×${s.height}×${s.depth} سم</div></div>`:""}
+        ${s.returnFee?`<div><div class="df-label">رسوم الإرجاع</div><div style="font-size:14px;font-weight:600;color:var(--danger);">${money(s.returnFee)}</div></div>`:""}
+        ${s.barcode?`<div><div class="df-label">باركود</div><div style="font-size:13px;font-family:monospace;">🔲 ${esc(s.barcode)}</div></div>`:""}
+        ${s.branchCode?`<div><div class="df-label">الفرع</div><div style="font-size:13px;font-weight:600;">${esc(s.branchCode)}</div></div>`:""}
+        ${s.rescheduleCount>0?`<div><div class="df-label">مرات الإعادة</div><div style="font-size:14px;font-weight:600;color:var(--warning);">${s.rescheduleCount} مرة</div></div>`:""}
+        ${s.scheduledAt?`<div><div class="df-label">موعد التسليم المجدول</div><div style="font-size:13px;font-weight:600;">${fmtDate(s.scheduledAt)}</div></div>`:""}
+        ${s.otpVerified?`<div><div class="df-label">OTP</div><div style="font-size:13px;color:var(--success);">✅ تم التحقق</div></div>`:""}
       </div>
       ${can("assign_courier")?`
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px;">
@@ -1145,12 +1328,18 @@ function detailPanel(s) {
           <button class="btn btn-secondary btn-sm" onclick="App.assignCourier('${esc(s.id)}')">${icon("users",13)} تعيين</button>
         </div>`:""}
       ${can("change_status")?`
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+          ${["submitted","pickup_requested","picked_up","at_warehouse","in_transit","at_branch","out_for_delivery"].map(st=>`
+            <button class="btn btn-secondary btn-sm" onclick="App.updateStatus('${esc(s.id)}','${st}')">${STATUS_MAP[st]?.label||st}</button>`).join("")}
+        </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
-          ${["received","warehouse","hub","out_for_delivery"].map(st=>`
-            <button class="btn btn-secondary btn-sm" onclick="App.updateStatus('${esc(s.id)}','${st}')">${STATUS_MAP[st].label}</button>`).join("")}
           <button class="btn btn-primary btn-sm" onclick="App.updateStatus('${esc(s.id)}','delivered')">✅ تم التسليم</button>
           <button class="btn btn-sm" style="background:var(--danger-bg);color:var(--danger);border:1px solid var(--danger-border);"
             onclick="App.updateStatus('${esc(s.id)}','returned')">↩ مرتجع</button>
+          <button class="btn btn-sm" style="background:var(--warning-bg);color:var(--warning);border:1px solid var(--warning-border);"
+            onclick="App.rescheduleShipment('${esc(s.id)}')">📅 إعادة جدولة</button>
+          ${can("shipments.suspend")?`<button class="btn btn-sm" style="background:var(--danger-bg);color:var(--danger);border:1px solid var(--danger-border);"
+            onclick="App.suspendShipment('${esc(s.id)}')">⏸ إيقاف</button>`:""}
         </div>`:""}
       ${can("upload_pod")?`
         <label class="btn btn-secondary btn-sm" style="cursor:pointer;width:fit-content;margin-bottom:16px;">
@@ -1252,20 +1441,46 @@ function viewAccounts() {
     <p>أدخل رقم الشحنة لمعرفة حالتها</p>
     <button class="btn btn-primary" onclick="App.manualTrack()">🔍 تتبع شحنة</button>
   </div>`;
-  const list=visible(),del=list.filter(s=>s.status==="delivered");
-  const rev=del.reduce((a,s)=>a+(s.amount||0),0),fee=del.reduce((a,s)=>a+(s.deliveryFee||0),0);
-  const pay=(AppState.user.primary_role||AppState.user.role)==="courier"?del.length*25:rev-fee;
+  const list=visible();
+  const del=list.filter(s=>s.status==="delivered");
+  const ret=list.filter(s=>s.status==="returned");
+  const rev=del.reduce((a,s)=>a+(s.amount||0),0);
+  const fee=del.reduce((a,s)=>a+(s.deliveryFee||0),0);
+  const retFee=ret.reduce((a,s)=>a+(s.returnFee||0),0);
+  const role=AppState.user.primary_role||AppState.user.role;
+  const isMerchant=role==="merchant";
+  const isCourier=role==="courier";
+  const bal=isMerchant?AppState.merchantBalance:(isCourier?del.length*25:(rev-fee-retFee));
   return `
     <div class="acct-header">
-      <div><div class="ah-label">الرصيد المستحق</div><div class="ah-val">${money(pay)}</div></div>
-      <button class="btn-ghost-white" style="border-color:rgba(255,255,255,.4);">طلب تسوية</button>
+      <div>
+        <div class="ah-label">الرصيد المستحق</div>
+        <div class="ah-val">${money(bal)}</div>
+      </div>
+      ${isMerchant?`<button class="btn btn-secondary btn-sm"
+        style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.4);"
+        onclick="App.requestSettlement()">طلب تسوية</button>`:""}
     </div>
+    ${isMerchant&&AppState.merchantBalance>0?`
+      <div class="card" style="margin-bottom:16px;border-right:4px solid var(--success);">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+          <div>
+            <div style="font-size:12px;color:var(--gray-500);font-weight:600;">رصيد COD المتاح</div>
+            <div style="font-size:24px;font-weight:800;color:var(--success);">${money(AppState.merchantBalance)}</div>
+          </div>
+          <button class="btn btn-primary" onclick="App.requestSettlement()">طلب تسوية</button>
+        </div>
+      </div>`:""}
     <div class="kpi-grid" style="margin-bottom:20px;">
       ${kpi("تحصيلات",money(rev),"wallet","var(--success)","var(--success-bg)")}
       ${kpi("رسوم الشحن",money(fee),"truck","var(--danger)","var(--danger-bg)")}
-      ${kpi("الصافي",money(rev-fee),"chart","var(--brand)","var(--brand-light)")}
+      ${isMerchant?kpi("رسوم إرجاع",money(retFee),"refresh","var(--warning)","var(--warning-bg)"):""}
+      ${kpi("الصافي",money(rev-fee-retFee),"chart","var(--brand)","var(--brand-light)")}
     </div>
-    <div class="card"><h3 class="card-title" style="margin-bottom:14px;">${icon("chart")} كشف الحساب</h3>${shipTable(del)}</div>`;
+    <div class="card">
+      <h3 class="card-title" style="margin-bottom:14px;">${icon("chart")} كشف الحساب — الشحنات المسلمة</h3>
+      ${shipTable(del)}
+    </div>`;
 }
 
 // ── REPORTS VIEW ──────────────────────────────────────────
@@ -1273,7 +1488,23 @@ function viewReports() {
   const list=visible(),total=list.length||1;
   return `
     <div class="kpi-grid">
-      ${Object.entries(STATUS_MAP).filter(([k])=>k!=="cancelled").map(([k,v])=>kpi(v.label,list.filter(s=>s.status===k).length,"box","var(--brand)","var(--brand-light)",k)).join("")}
+      ${Object.entries(STATUS_MAP).filter(([k])=>!["cancelled","suspended","rescheduled","hub","warehouse","received","created"].includes(k)).map(([k,v])=>
+        kpi(v.label, list.filter(s=>s.status===k).length, "box", v.color||"var(--brand)", "var(--brand-light)", k)
+      ).join("")}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:20px;">
+      ${Object.entries(SERVICE_MAP).map(([k,v])=>`
+        <div class="card" style="padding:14px;cursor:pointer;" onclick="App.setServiceFilter('${k}');AppState.view='shipments';rerenderContent();">
+          <div style="font-size:22px;margin-bottom:6px;">${v.icon}</div>
+          <div style="font-size:12px;color:var(--gray-500);font-weight:600;">${v.label}</div>
+          <div style="font-size:22px;font-weight:800;">${list.filter(s=>s.serviceType===k).length}</div>
+        </div>`).join("")}
+      ${Object.entries(ORDER_TYPE_MAP).map(([k,v])=>`
+        <div class="card" style="padding:14px;cursor:pointer;" onclick="App.setOrderFilter('${k}');AppState.view='shipments';rerenderContent();">
+          <div style="font-size:22px;margin-bottom:6px;">${v.icon}</div>
+          <div style="font-size:12px;color:var(--gray-500);font-weight:600;">${v.label}</div>
+          <div style="font-size:22px;font-weight:800;">${list.filter(s=>s.orderType===k).length}</div>
+        </div>`).join("")}
     </div>
     <div class="card">
       <h3 class="card-title" style="margin-bottom:16px;">${icon("chart")} مؤشرات الأداء</h3>
@@ -1350,15 +1581,8 @@ function viewAudit() {
 // BIND EVENTS
 // ══════════════════════════════════════════════════════════
 function bindDashboardEvents() {
-  $$("[data-view]").forEach(btn => {
-    btn.addEventListener("click", () => {
-      AppState.view         = btn.dataset.view;
-      AppState.statusFilter = "all";
-      $$("[data-view]").forEach(b => {
-        b.classList.toggle("active", b.dataset.view === AppState.view);
-      });
-      rerenderContent();
-    });
+  $$("[data-view]").forEach(btn=>{
+    btn.addEventListener("click",()=>{AppState.view=btn.dataset.view;AppState.statusFilter="all";rerenderContent();});
   });
   $("roleSwitcher")?.addEventListener("change", async e => {
     const r = e.target.value;
@@ -1464,7 +1688,43 @@ const Modals={
         </div>
         <div class="form-row">
           <div class="field"><label>رسوم الشحن (ج.م)</label><input id="fFee" type="number" value="60" min="0"/></div>
+          <div class="field"><label>رسوم الإرجاع (ج.م)</label><input id="fReturnFee" type="number" value="0" min="0"/></div>
+        </div>
+        <div class="form-row">
           <div class="field"><label>موعد التسليم</label><input id="fEta" placeholder="مثال: خلال 48 ساعة"/></div>
+          <div class="field"><label>باركود (اختياري)</label><input id="fBarcode" placeholder="رقم الباركود"/></div>
+        </div>
+        <div class="form-section-label">نوع الخدمة والطلب</div>
+        <div class="form-row">
+          <div class="field"><label>نوع الخدمة *</label>
+            <select id="fServiceType">
+              <option value="door_to_door">🚪 توصيل للباب</option>
+              <option value="drop_off">📦 إيداع في الفرع</option>
+              <option value="pickup">🏪 استلام من الفرع</option>
+            </select>
+          </div>
+          <div class="field"><label>نوع الطلب *</label>
+            <select id="fOrderType">
+              <option value="standard">📦 عادي</option>
+              <option value="express">⚡ سريع</option>
+              <option value="scheduled">📅 مجدول</option>
+            </select>
+          </div>
+        </div>
+        <div id="fScheduledRow" class="form-row single" style="display:none;">
+          <div class="field"><label>تاريخ التسليم المجدول</label><input id="fScheduledAt" type="datetime-local"/></div>
+        </div>
+        <div class="form-section-label">المواصفات الفيزيائية (اختياري)</div>
+        <div class="form-row three">
+          <div class="field"><label>الوزن (كجم)</label><input id="fWeight" type="number" step="0.1" min="0" placeholder="0.0"/></div>
+          <div class="field"><label>الكمية</label><input id="fQty" type="number" value="1" min="1"/></div>
+          <div class="field"><label>الأبعاد (سم)</label>
+            <div style="display:flex;gap:4px;">
+              <input id="fWidth"  type="number" step="0.1" min="0" placeholder="ع" style="width:33%"/>
+              <input id="fHeight" type="number" step="0.1" min="0" placeholder="ط" style="width:33%"/>
+              <input id="fDepth"  type="number" step="0.1" min="0" placeholder="ا" style="width:33%"/>
+            </div>
+          </div>
         </div>
         <div class="form-section-label">بيانات العميل</div>
         <div class="form-row">
@@ -1512,6 +1772,12 @@ const Modals={
       .map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("");
     $("fGov").innerHTML = `<option value="">اختر المحافظة</option>` + govOpts2;
 
+    // Show/hide scheduled date field
+    $("fOrderType")?.addEventListener("change", e => {
+      const row = $("fScheduledRow");
+      if (row) row.style.display = e.target.value === "scheduled" ? "" : "none";
+    });
+
     $("fGov").addEventListener("change", e => {
       const cities = (EGYPT_GOV[e.target.value] || []);
       $("fCity").innerHTML = `<option value="">اختر المدينة / المركز</option>` +
@@ -1531,36 +1797,59 @@ const Modals={
       errEl.style.display="none";
       if(!code||!cName||!cPhone||!amount){errEl.style.display="block";errEl.textContent="الحقول المطلوبة: الكود، اسم العميل، الهاتف، القيمة";return;}
       if(!gov){errEl.style.display="block";errEl.textContent="يرجى اختيار المحافظة";return;}
-      // No 'address' column — schema computes address_full from parts automatically
+      // Read Phase 1 fields
+      const serviceType = $("fServiceType")?.value || "door_to_door";
+      const orderType   = $("fOrderType")?.value   || "standard";
+      const scheduledAt = $("fScheduledAt")?.value  || null;
+      const returnFee   = Number($("fReturnFee")?.value) || 0;
+      const barcode     = $("fBarcode")?.value?.trim() || null;
+      const weight      = $("fWeight")?.value  ? Number($("fWeight").value)  : null;
+      const qty         = $("fQty")?.value     ? Number($("fQty").value)     : 1;
+      const width       = $("fWidth")?.value   ? Number($("fWidth").value)   : null;
+      const height      = $("fHeight")?.value  ? Number($("fHeight").value)  : null;
+      const depth       = $("fDepth")?.value   ? Number($("fDepth").value)   : null;
+
       btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> جاري الحفظ...`;
       try {
         const { data:{ session } } = await db.auth.getSession();
-        const uid         = session?.user?.id || AppState.user?.id || null;
-        const isMerchant  = (AppState.user.primary_role||AppState.user.role) === "merchant";
+        const uid        = session?.user?.id || AppState.user?.id || null;
+        const isMerchant = (AppState.user.primary_role||AppState.user.role) === "merchant";
         await DB.createShipment({
           shipment_code:   code,
           customer_name:   cName,
           customer_phone:  cPhone,
           customer_phone2: cPhone2 || null,
-          // Address parts — address_full is GENERATED ALWAYS in the DB
+          // Address
           governorate: gov,
           city:        city   || null,
           street:      street || null,
           building:    build  || null,
           floor:       floor  || null,
-          apartment:   null,   // field reserved for future use
+          apartment:   null,
           // Financials
           amount:       amount,
           delivery_fee: fee,
-          // Status
-          status: "created",
+          return_fee:   returnFee,
+          // Phase 1: service & order
+          service_type: serviceType,
+          order_type:   orderType,
+          scheduled_at: scheduledAt || null,
+          // Phase 1: physical
+          weight:   weight,
+          quantity: qty,
+          width:    width,
+          height:   height,
+          depth:    depth,
+          barcode:  barcode,
+          // Status — start as submitted
+          status: "submitted",
           eta:    eta || null,
           notes:  notes || null,
-          // Merchant (snapshot at creation time — no FK risk)
-          merchant_id:    isMerchant ? uid  : null,
+          // Merchant
+          merchant_id:    isMerchant ? uid : null,
           merchant_name:  isMerchant ? (AppState.user.name  || "") : null,
           merchant_phone: isMerchant ? (AppState.user.phone || "") : null,
-          // Courier (optional at creation)
+          // Courier
           courier_id:   courierId || null,
           courier_name: courierName || null,
           // Metadata
@@ -1632,8 +1921,491 @@ const Modals={
 // ══════════════════════════════════════════════════════════
 // APP GLOBAL FUNCTIONS
 // ══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// PHASE 2A VIEW FUNCTIONS
+// ══════════════════════════════════════════════════════════════
+
+function viewAddresses() {
+  const addrs = AppState.merchantAddresses;
+  const uid   = AppState.user.id;
+  return `
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${icon("map")} دفتر العناوين</h3>
+        <button class="btn btn-primary btn-sm" onclick="App.addAddress()">
+          ${icon("plus",13)} إضافة عنوان
+        </button>
+      </div>
+      ${!addrs.length ? `<div class="empty">
+          <div class="empty-icon">📍</div>
+          <h3>لا توجد عناوين محفوظة</h3>
+          <p>أضف عناوين الاستلام والمخازن والفروع الخاصة بك</p>
+          <button class="btn btn-primary" onclick="App.addAddress()">إضافة عنوان</button>
+        </div>` :
+        `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;">
+          ${addrs.map(a => `
+            <div class="card" style="position:relative;border:1px solid var(--gray-200);${a.is_default?"border-right:3px solid var(--brand);":""}" >
+              ${a.is_default?`<span class="badge badge-brand" style="position:absolute;top:12px;left:12px;font-size:10px;">افتراضي</span>`:""}
+              <div style="font-size:15px;font-weight:700;margin-bottom:6px;">${esc(a.label)}</div>
+              <div style="margin-bottom:8px;">
+                <span class="badge ${a.type==="pickup"?"badge-success":a.type==="warehouse"?"badge-warning":"badge-info"}" style="font-size:11px;">
+                  ${a.type==="pickup"?"📦 استلام":a.type==="warehouse"?"🏭 مستودع":a.type==="branch"?"🏪 فرع":"📍 أخرى"}
+                </span>
+              </div>
+              <div style="font-size:13px;color:var(--gray-600);line-height:1.6;">
+                ${esc(a.governorate)} / ${esc(a.city)}
+                ${a.street?`<br/>${esc(a.street)}`:""}
+                ${a.contact_name?`<br/>📞 ${esc(a.contact_name)} ${a.contact_phone?- " "+esc(a.contact_phone):""}`:""}
+              </div>
+              <div style="display:flex;gap:8px;margin-top:12px;">
+                <button class="btn btn-secondary btn-sm" onclick="App.editAddress('${esc(a.id)}')">${icon("edit",13)} تعديل</button>
+                ${!a.is_default?`<button class="btn btn-secondary btn-sm" onclick="App.setDefaultAddress('${esc(a.id)}')">تعيين كافتراضي</button>`:""}
+                <button class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="App.deleteAddress('${esc(a.id)}')">حذف</button>
+              </div>
+            </div>`).join("")}
+        </div>`}
+    </div>`;
+}
+
+function viewRecipients() {
+  const recs = AppState.merchantRecipients;
+  return `
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${icon("users")} قاعدة العملاء</h3>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-primary btn-sm" onclick="App.addRecipient()">${icon("plus",13)} إضافة عميل</button>
+        </div>
+      </div>
+      <div style="margin-bottom:14px;">
+        <input id="recipientSearch" placeholder="ابحث بالاسم أو الهاتف..."
+          style="width:100%;padding:9px 14px;border-radius:var(--radius);border:1.5px solid var(--gray-300);font-size:13px;"
+          oninput="App.searchRecipients(this.value)"/>
+      </div>
+      ${!recs.length ? `<div class="empty">
+          <div class="empty-icon">👥</div>
+          <h3>لا يوجد عملاء محفوظون</h3>
+          <p>أضف عملاءك لتسريع إنشاء الشحنات</p>
+          <button class="btn btn-primary" onclick="App.addRecipient()">إضافة عميل</button>
+        </div>` :
+        `<div class="table-wrap"><table>
+          <thead><tr><th>الاسم</th><th>الهاتف</th><th>المنطقة</th><th>الشحنات</th><th>إجراءات</th></tr></thead>
+          <tbody>
+            ${recs.map(r => `<tr>
+              <td class="td-primary">${esc(r.name)}</td>
+              <td class="td-phone"><a href="tel:${esc(r.phone)}">${esc(r.phone)}</a>
+                ${r.phone2?`<br/><a href="tel:${esc(r.phone2)}" style="font-size:11px;color:var(--gray-500);">${esc(r.phone2)}</a>`:""}
+              </td>
+              <td style="font-size:12px;">${esc(r.governorate)} ${r.city?"/"+esc(r.city):""}</td>
+              <td><span class="badge badge-brand">${r.order_count||0} شحنة</span></td>
+              <td>
+                <div class="td-actions">
+                  <button class="btn btn-primary btn-sm" onclick="App.shipToRecipient('${esc(r.id)}')">+ شحنة</button>
+                  <button class="btn-icon" onclick="App.editRecipient('${esc(r.id)}')">${icon("edit",13)}</button>
+                  <button class="btn-icon" style="color:var(--danger);" onclick="App.deleteRecipient('${esc(r.id)}')">${icon("trash",13)}</button>
+                </div>
+              </td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>`}
+    </div>`;
+}
+
+function viewProducts() {
+  const prods = AppState.merchantProducts;
+  return `
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${icon("box")} كتالوج المنتجات</h3>
+        <button class="btn btn-primary btn-sm" onclick="App.addProduct()">${icon("plus",13)} إضافة منتج</button>
+      </div>
+      ${!prods.length ? `<div class="empty">
+          <div class="empty-icon">🛍️</div>
+          <h3>لا توجد منتجات</h3>
+          <p>أضف منتجاتك لتسريع إنشاء الشحنات تلقائياً</p>
+          <button class="btn btn-primary" onclick="App.addProduct()">إضافة منتج</button>
+        </div>` :
+        `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px;">
+          ${prods.map(p => `
+            <div class="card" style="border:1px solid var(--gray-200);padding:16px;">
+              ${p.image_url?`<img src="${esc(p.image_url)}" style="width:100%;height:120px;object-fit:cover;border-radius:var(--radius);margin-bottom:10px;"/>`
+                :`<div style="width:100%;height:80px;background:var(--gray-100);border-radius:var(--radius);margin-bottom:10px;display:flex;align-items:center;justify-content:center;font-size:32px;">🛍️</div>`}
+              <div style="font-weight:700;margin-bottom:4px;">${esc(p.name)}</div>
+              ${p.sku?`<div style="font-size:11px;color:var(--gray-500);font-family:monospace;">SKU: ${esc(p.sku)}</div>`:""}
+              ${p.price?`<div style="font-size:14px;font-weight:700;color:var(--brand);margin-top:6px;">${money(p.price)}</div>`:""}
+              ${p.weight?`<div style="font-size:11px;color:var(--gray-500);">${p.weight} كجم</div>`:""}
+              <div style="display:flex;gap:6px;margin-top:10px;">
+                <button class="btn btn-secondary btn-sm" style="flex:1;" onclick="App.editProduct('${esc(p.id)}')">تعديل</button>
+                <button class="btn-icon" style="color:var(--danger);" onclick="App.deleteProduct('${esc(p.id)}')">${icon("trash",13)}</button>
+              </div>
+            </div>`).join("")}
+        </div>`}
+    </div>`;
+}
+
+function viewPickupRequests() {
+  const reqs = AppState.pickupRequests;
+  const STATUS_PICKUP = {
+    pending:    { label:"بانتظار التعيين", badge:"badge-warning" },
+    assigned:   { label:"تم تعيين مندوب", badge:"badge-brand"   },
+    picked_up:  { label:"تم الاستلام",    badge:"badge-success" },
+    cancelled:  { label:"ملغي",           badge:"badge-gray"    },
+  };
+  return `
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${icon("truck")} طلبات الاستلام</h3>
+        <button class="btn btn-primary btn-sm" onclick="App.newPickupRequest()">${icon("plus",13)} طلب استلام</button>
+      </div>
+      ${!reqs.length ? `<div class="empty">
+          <div class="empty-icon">🚚</div>
+          <h3>لا توجد طلبات استلام</h3>
+          <p>اطلب من المندوب الحضور لاستلام شحناتك</p>
+          <button class="btn btn-primary" onclick="App.newPickupRequest()">طلب استلام جديد</button>
+        </div>` :
+        `<div class="table-wrap"><table>
+          <thead><tr><th>#</th><th>الحالة</th><th>العنوان</th><th>عدد الشحنات</th><th>الموعد</th><th>المندوب</th><th>إجراءات</th></tr></thead>
+          <tbody>
+            ${reqs.map(r => `<tr>
+              <td class="td-mono" style="font-size:11px;">${r.id.slice(-6)}</td>
+              <td><span class="badge ${STATUS_PICKUP[r.status]?.badge||"badge-gray"}">${STATUS_PICKUP[r.status]?.label||r.status}</span></td>
+              <td style="font-size:12px;">عنوان محفوظ</td>
+              <td style="font-weight:600;">${r.shipment_count} شحنة</td>
+              <td style="font-size:12px;">${r.scheduled_at?fmtDate(r.scheduled_at):"أسرع وقت ممكن"}</td>
+              <td style="font-size:12px;">${r.courier_name?esc(r.courier_name):`<span style="color:var(--gray-400);">—</span>`}</td>
+              <td>
+                ${r.status==="pending"?`<button class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="App.cancelPickupRequest('${esc(r.id)}')">إلغاء</button>`:""}
+              </td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>`}
+    </div>`;
+}
+
 const App={
-  setFilter(f){AppState.statusFilter=f;rerenderContent();},
+  setFilter(f)       { AppState.statusFilter  = f; rerenderContent(); },
+  setServiceFilter(f){ AppState.serviceFilter = f; rerenderContent(); },
+  setOrderFilter(f)  { AppState.orderFilter   = f; rerenderContent(); },
+
+  // ── Phase 2A: Settlement ──────────────────────────────────
+  async requestSettlement() {
+    const bal = AppState.merchantBalance;
+    if (bal <= 0) { toast("لا يوجد رصيد متاح للتسوية","warning"); return; }
+    const amount = prompt(`الرصيد المتاح: ${money(bal)}\nالمبلغ المطلوب تحصيله:`);
+    if (!amount || isNaN(Number(amount))) return;
+    const req = Number(amount);
+    if (req <= 0 || req > bal) { toast("مبلغ غير صحيح","error"); return; }
+    try {
+      const { error } = await db.from("settlements").insert([{
+        merchant_id:    AppState.user.id,
+        amount:         req,
+        status:         "pending",
+        payment_method: "bank_transfer",
+      }]);
+      if (error) throw error;
+      await DB.addAudit("REQUEST_SETTLEMENT", AppState.user.id,
+        `Merchant ${AppState.user.name} requested settlement of ${money(req)}`, "shipment");
+      toast(`✅ تم إرسال طلب التسوية بمبلغ ${money(req)}`);
+    } catch(err) { toast("خطأ: "+err.message,"error"); }
+  },
+
+  // ── Phase 2A: Address Book ────────────────────────────────
+  async loadMerchantData() {
+    const uid = AppState.user.id;
+    const [addrs, recs, prods, reqs, bal] = await Promise.all([
+      DB.loadMerchantAddresses(uid),
+      DB.loadMerchantRecipients(uid),
+      DB.loadMerchantProducts(uid),
+      DB.loadPickupRequests(uid),
+      DB.loadMerchantBalance(uid),
+    ]);
+    AppState.merchantAddresses  = addrs;
+    AppState.merchantRecipients = recs;
+    AppState.merchantProducts   = prods;
+    AppState.pickupRequests     = reqs;
+    AppState.merchantBalance    = bal;
+  },
+
+  async addAddress() {
+    const govOpts = Object.keys(EGYPT_GOV).sort()
+      .map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("");
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>📍 إضافة عنوان</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>اسم العنوان *</label><input id="aLabel" placeholder="مثال: المخزن الرئيسي"/></div>
+        <div class="form-row">
+          <div class="field"><label>النوع</label>
+            <select id="aType">
+              <option value="pickup">📦 نقطة استلام</option>
+              <option value="warehouse">🏭 مستودع</option>
+              <option value="branch">🏪 فرع</option>
+              <option value="other">📍 أخرى</option>
+            </select>
+          </div>
+          <div class="field"><label>المحافظة *</label><select id="aGov"><option value="">اختر</option>${govOpts}</select></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>المدينة</label><select id="aCity"><option value="">اختر المدينة</option></select></div>
+          <div class="field"><label>الشارع</label><input id="aStreet"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>اسم جهة الاتصال</label><input id="aContact"/></div>
+          <div class="field"><label>هاتف جهة الاتصال</label><input id="aPhone" type="tel"/></div>
+        </div>
+        <div class="field"><label><input type="checkbox" id="aDefault"/> تعيين كعنوان افتراضي</label></div>
+        <div id="aErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveAddrBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("aGov")?.addEventListener("change", e => {
+      const cities = (EGYPT_GOV[e.target.value]||[]);
+      $("aCity").innerHTML = `<option value="">اختر المدينة</option>`+cities.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
+    });
+    $("saveAddrBtn")?.addEventListener("click", async () => {
+      const label = $("aLabel")?.value.trim();
+      const gov   = $("aGov")?.value;
+      const errEl = $("aErr"); errEl.style.display="none";
+      if (!label||!gov) { errEl.style.display="block"; errEl.textContent="الاسم والمحافظة مطلوبان"; return; }
+      const btn = $("saveAddrBtn"); btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+      try {
+        const { error } = await db.from("merchant_addresses").insert([{
+          merchant_id:   AppState.user.id,
+          label,
+          type:          $("aType")?.value||"pickup",
+          governorate:   gov,
+          city:          $("aCity")?.value||"",
+          street:        $("aStreet")?.value.trim()||null,
+          contact_name:  $("aContact")?.value.trim()||null,
+          contact_phone: $("aPhone")?.value.trim()||null,
+          is_default:    $("aDefault")?.checked||false,
+        }]);
+        if (error) throw error;
+        await App.loadMerchantData();
+        Modals.close(); rerenderContent();
+        toast("✅ تم إضافة العنوان");
+      } catch(err) { errEl.style.display="block"; errEl.textContent="خطأ: "+err.message; btn.disabled=false; btn.textContent="حفظ"; }
+    });
+  },
+
+  async setDefaultAddress(id) {
+    const uid = AppState.user.id;
+    await db.from("merchant_addresses").update({is_default:false}).eq("merchant_id",uid);
+    await db.from("merchant_addresses").update({is_default:true}).eq("id",id);
+    await App.loadMerchantData(); rerenderContent();
+    toast("تم تعيين العنوان الافتراضي");
+  },
+
+  async deleteAddress(id) {
+    if (!confirm("حذف هذا العنوان؟")) return;
+    const { error } = await db.from("merchant_addresses").update({is_active:false}).eq("id",id);
+    if (error) { toast("خطأ: "+error.message,"error"); return; }
+    await App.loadMerchantData(); rerenderContent();
+    toast("تم حذف العنوان","info");
+  },
+
+  // ── Phase 2A: Recipients ──────────────────────────────────
+  async searchRecipients(q) {
+    const uid = AppState.user.id;
+    AppState.merchantRecipients = await DB.loadMerchantRecipients(uid, q);
+    rerenderContent();
+    $("recipientSearch")?.focus();
+  },
+
+  async addRecipient() {
+    const govOpts = Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("");
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>👤 إضافة عميل</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field"><label>الاسم *</label><input id="rName"/></div>
+          <div class="field"><label>الهاتف *</label><input id="rPhone" type="tel"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>هاتف ثاني</label><input id="rPhone2" type="tel"/></div>
+          <div class="field"><label>المحافظة</label><select id="rGov"><option value="">اختر</option>${govOpts}</select></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>المدينة</label><select id="rCity"><option value="">اختر</option></select></div>
+          <div class="field"><label>الشارع</label><input id="rStreet"/></div>
+        </div>
+        <div class="field"><label>ملاحظات</label><input id="rNotes"/></div>
+        <div id="rErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveRecBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("rGov")?.addEventListener("change", e => {
+      const cities=(EGYPT_GOV[e.target.value]||[]);
+      $("rCity").innerHTML=`<option value="">اختر</option>`+cities.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
+    });
+    $("saveRecBtn")?.addEventListener("click", async () => {
+      const name=$("rName")?.value.trim(), phone=$("rPhone")?.value.trim();
+      const errEl=$("rErr"); errEl.style.display="none";
+      if (!name||!phone){errEl.style.display="block";errEl.textContent="الاسم والهاتف مطلوبان";return;}
+      const btn=$("saveRecBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try {
+        const{error}=await db.from("merchant_recipients").insert([{
+          merchant_id:AppState.user.id,name,phone,
+          phone2:$("rPhone2")?.value.trim()||null,
+          governorate:$("rGov")?.value||"",
+          city:$("rCity")?.value||"",
+          street:$("rStreet")?.value.trim()||null,
+          notes:$("rNotes")?.value.trim()||null,
+        }]);
+        if(error)throw error;
+        await App.loadMerchantData();Modals.close();rerenderContent();
+        toast("✅ تم إضافة العميل");
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async deleteRecipient(id) {
+    if (!confirm("حذف هذا العميل؟")) return;
+    const{error}=await db.from("merchant_recipients").update({is_deleted:true}).eq("id",id);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await App.loadMerchantData();rerenderContent();toast("تم الحذف","info");
+  },
+
+  async shipToRecipient(id) {
+    const r = AppState.merchantRecipients.find(x=>x.id===id);
+    if (!r) return;
+    await loadEgyptData();
+    AppState.view="shipments";
+    rerenderContent();
+    await Modals.newShipment();
+    // Pre-fill recipient data
+    setTimeout(()=>{
+      if($("fCustName")) $("fCustName").value = r.name;
+      if($("fPhone"))    $("fPhone").value    = r.phone;
+      if($("fPhone2"))   $("fPhone2").value   = r.phone2||"";
+      const govSel = $("fGov");
+      if(govSel&&r.governorate){
+        govSel.value = r.governorate;
+        govSel.dispatchEvent(new Event("change"));
+        setTimeout(()=>{ if($("fCity")&&r.city) $("fCity").value=r.city; },100);
+      }
+      if($("fStreet")) $("fStreet").value = r.street||"";
+    },300);
+  },
+
+  // ── Phase 2A: Products ────────────────────────────────────
+  async addProduct() {
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>🛍️ إضافة منتج</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field"><label>اسم المنتج *</label><input id="pName"/></div>
+          <div class="field"><label>SKU</label><input id="pSku" placeholder="رمز المنتج"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>السعر (ج.م)</label><input id="pPrice" type="number" step="0.01" min="0"/></div>
+          <div class="field"><label>الوزن (كجم)</label><input id="pWeight" type="number" step="0.1" min="0"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>باركود</label><input id="pBarcode"/></div>
+          <div class="field"><label>رابط الصورة</label><input id="pImage" placeholder="https://..."/></div>
+        </div>
+        <div class="field"><label>الوصف</label><textarea id="pDesc" rows="2" style="resize:vertical;"></textarea></div>
+        <div id="pErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveProdBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveProdBtn")?.addEventListener("click", async()=>{
+      const name=$("pName")?.value.trim();
+      const errEl=$("pErr");errEl.style.display="none";
+      if(!name){errEl.style.display="block";errEl.textContent="اسم المنتج مطلوب";return;}
+      const btn=$("saveProdBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const{error}=await db.from("merchant_products").insert([{
+          merchant_id:AppState.user.id,name,
+          sku:$("pSku")?.value.trim()||null,
+          price:$("pPrice")?.value?Number($("pPrice").value):null,
+          weight:$("pWeight")?.value?Number($("pWeight").value):null,
+          barcode:$("pBarcode")?.value.trim()||null,
+          image_url:$("pImage")?.value.trim()||null,
+          description:$("pDesc")?.value.trim()||null,
+        }]);
+        if(error)throw error;
+        await App.loadMerchantData();Modals.close();rerenderContent();
+        toast("✅ تم إضافة المنتج");
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async deleteProduct(id){
+    if(!confirm("حذف هذا المنتج؟"))return;
+    const{error}=await db.from("merchant_products").update({is_deleted:true}).eq("id",id);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await App.loadMerchantData();rerenderContent();toast("تم الحذف","info");
+  },
+
+  // ── Phase 2A: Pickup Requests ─────────────────────────────
+  async newPickupRequest(){
+    await App.loadMerchantData();
+    const addrs=AppState.merchantAddresses;
+    const couriers=AppState.couriers;
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>🚚 طلب استلام</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>عنوان الاستلام</label>
+          <select id="prAddr">
+            <option value="">-- اختر عنواناً --</option>
+            ${addrs.map(a=>`<option value="${esc(a.id)}">${esc(a.label)} — ${esc(a.governorate)}${a.is_default?" ⭐":""}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>عدد الشحنات المتوقع</label><input id="prCount" type="number" value="1" min="1"/></div>
+          <div class="field"><label>الموعد المفضل (اختياري)</label><input id="prDate" type="datetime-local"/></div>
+        </div>
+        <div class="field"><label>ملاحظات للمندوب</label><textarea id="prNotes" rows="2" style="resize:vertical;"></textarea></div>
+        <div id="prErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="savePickupBtn">إرسال الطلب</button>
+      </div>
+    </div>`);
+    $("savePickupBtn")?.addEventListener("click",async()=>{
+      const addrId=$("prAddr")?.value;
+      const count=Number($("prCount")?.value)||1;
+      const date=$("prDate")?.value||null;
+      const notes=$("prNotes")?.value.trim()||null;
+      const errEl=$("prErr");errEl.style.display="none";
+      const btn=$("savePickupBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const{error}=await db.from("pickup_requests").insert([{
+          merchant_id:AppState.user.id,
+          address_id:addrId||null,
+          status:"pending",
+          shipment_count:count,
+          scheduled_at:date||null,
+          notes,
+        }]);
+        if(error)throw error;
+        await DB.addAudit("CREATE_PICKUP_REQUEST",AppState.user.id,
+          `Merchant ${AppState.user.name} requested pickup of ${count} shipments`,"shipment");
+        await App.loadMerchantData();Modals.close();rerenderContent();
+        toast("✅ تم إرسال طلب الاستلام");
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="إرسال الطلب";}
+    });
+  },
+
+  async cancelPickupRequest(id){
+    if(!confirm("إلغاء هذا الطلب؟"))return;
+    const{error}=await db.from("pickup_requests").update({status:"cancelled"}).eq("id",id);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await App.loadMerchantData();rerenderContent();toast("تم إلغاء الطلب","info");
+  },
+  setServiceFilter(f){ AppState.serviceFilter = f; rerenderContent(); },
+  setOrderFilter(f)  { AppState.orderFilter   = f; rerenderContent(); },
   manualTrack(){const c=prompt("أدخل رقم الشحنة:");if(c)location.href=`${location.origin}${location.pathname}?track=${encodeURIComponent(c.trim())}`;},
 
   async updateStatus(id,status){
@@ -1683,13 +2455,63 @@ const App={
     }catch(err){toast("فشل الرفع: "+err.message,"error");}
   },
 
+  async rescheduleShipment(id) {
+    const s = AppState.shipments.find(x => x.id === id);
+    if (!s) return;
+    const reason  = prompt("سبب إعادة الجدولة (اختياري):");
+    if (reason === null) return;
+    try {
+      await DB.updateShipment(id, { status:"rescheduled", reschedule_reason:reason||null });
+      s.status = "rescheduled"; s.rescheduleCount = (s.rescheduleCount||0)+1;
+      await DB.addTimeline(id, "إعادة جدولة"+(reason?": "+reason:""),
+        AppState.user.name, AppState.user.primary_role||AppState.user.role, "rescheduled");
+      await DB.addAudit("RESCHEDULE_SHIPMENT", id,
+        "Rescheduled by "+AppState.user.name+(reason?": "+reason:""), "shipment");
+      rerenderContent(); toast("تم إعادة جدولة الشحنة", "info");
+    } catch(err) { toast("خطأ: "+err.message,"error"); }
+  },
+
+  async suspendShipment(id) {
+    const s = AppState.shipments.find(x => x.id === id);
+    if (!s) return;
+    const reason = prompt("سبب الإيقاف:");
+    if (!reason) return;
+    try {
+      await DB.updateShipment(id, { status:"suspended", suspension_reason:reason });
+      s.status = "suspended";
+      await DB.addTimeline(id, "إيقاف: "+reason,
+        AppState.user.name, AppState.user.primary_role||AppState.user.role, "suspended");
+      await DB.addAudit("SUSPEND_SHIPMENT", id,
+        "Suspended by "+AppState.user.name+": "+reason, "shipment");
+      rerenderContent(); toast("تم إيقاف الشحنة","warning");
+    } catch(err) { toast("خطأ: "+err.message,"error"); }
+  },
+
   exportExcel(){
     if(!can("export_excel")){toast("غير مصرح","error");return;}
     const data=visible().map(s=>({
-      "الكود":s.id,"العميل":s.customerName,"الهاتف":s.customerPhone,"هاتف 2":s.customerPhone2||"",
-      "المحافظة":s.governorate,"العنوان":s.address,"الحالة":STATUS_MAP[s.status]?.label||s.status,
-      "المبلغ":s.amount,"الرسوم":s.deliveryFee,"التاجر":s.merchantName||"","المندوب":s.courierName||"",
-      "تاريخ الإنشاء":fmtDate(s.createdAt)
+      "الكود":           s.id,
+      "العميل":          s.customerName,
+      "الهاتف":          s.customerPhone,
+      "هاتف 2":          s.customerPhone2||"",
+      "المحافظة":        s.governorate,
+      "المدينة":         s.city,
+      "العنوان":         s.address,
+      "الحالة":          STATUS_MAP[s.status]?.label||s.status,
+      "نوع الخدمة":      SERVICE_MAP[s.serviceType]?.label||s.serviceType,
+      "نوع الطلب":       ORDER_TYPE_MAP[s.orderType]?.label||s.orderType,
+      "المبلغ":          s.amount,
+      "رسوم الشحن":      s.deliveryFee,
+      "رسوم الإرجاع":    s.returnFee||0,
+      "الوزن (كجم)":     s.weight||"",
+      "الكمية":          s.quantity||1,
+      "باركود":          s.barcode||"",
+      "التاجر":          s.merchantName||"",
+      "المندوب":         s.courierName||"",
+      "تاريخ الإنشاء":  fmtDate(s.createdAt),
+      "تاريخ التسليم":  s.deliveredAt ? fmtDate(s.deliveredAt) : "",
+      "محاولات التوصيل": s.attempts||0,
+      "مرات الإعادة":   s.rescheduleCount||0,
     }));
     const ws=XLSX.utils.json_to_sheet(data);
     const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Shipments");
@@ -1752,92 +2574,31 @@ const App={
       btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
       const{error}=await db.from("profiles").update({full_name:name,phone,primary_role:role}).eq("id",id);
       if(error){errEl.style.display="block";errEl.textContent="خطأ: "+error.message;btn.disabled=false;btn.textContent="حفظ";return;}
-      // Find original user for full context
-      const _u = AppState.users.find(x => x.id === id);
-      await DB.addAudit(
-        "EDIT_USER", id,
-        `Target: ${name} | Email: ${_u?.email||""} | Role: ${role} | Phone: ${phone||""} | By: ${AppState.user.name}`,
-        "user"
-      );
+      await DB.addAudit("EDIT_USER",id,`name=${name},role=${role}`);
       const idx=AppState.users.findIndex(x=>x.id===id);
       if(idx>=0)AppState.users[idx]={...AppState.users[idx],name,phone,role};
       Modals.close();rerenderContent();toast(`✅ تم تحديث ${name}`);
     });
   },
 
-  async toggleUser(id) {
-    const u = AppState.users.find(x => x.id === id);
-    if (!u) return;
-    const ns = !u.is_suspended;
-    // Disable the button immediately to prevent double-click
-    const btn = document.querySelector(`[onclick*="toggleUser('${id}')"]`);
-    if (btn) { btn.disabled = true; btn.textContent = "…"; }
-    try {
-      const { error } = await db.from("profiles")
-        .update({
-          is_suspended:    ns,
-          suspended_at:    ns ? new Date().toISOString() : null,
-          suspended_by:    ns ? (AppState.user?.id || null) : null,
-          suspension_note: ns ? "Suspended by admin" : null
-        })
-        .eq("id", id);
-      if (error) throw error;
-      // Update local state
-      u.is_suspended    = ns;
-      u.suspended       = ns;
-      // Human-readable audit with full user context
-      await DB.addAudit(
-        ns ? "SUSPEND_USER" : "ACTIVATE_USER",
-        id,
-        `Target: ${u.name} | Email: ${u.email} | Role: ${u.role} | By: ${AppState.user.name}`,
-        "user"
-      );
-      toast(`${ns ? "تم إيقاف" : "تم تفعيل"} ${u.name}`, ns ? "warning" : "success");
-    } catch(err) {
-      toast("فشل التحديث: " + err.message, "error");
-    } finally {
-      // Always re-enable button and re-render — prevents frozen UI
-      if (btn) { btn.disabled = false; }
-      rerenderContent();
-    }
+  async toggleUser(id){
+    const u=AppState.users.find(x=>x.id===id);if(!u)return;
+    const ns=!u.is_suspended;
+    const{error}=await db.from("profiles").update({is_suspended:ns}).eq("id",id);
+    if(error){toast("فشل التحديث","error");return;}
+    u.is_suspended=ns;
+    await DB.addAudit(ns?"SUSPEND_USER":"ACTIVATE_USER",id,`by ${AppState.user.name}`);
+    toast(`${ns?"تم إيقاف":"تم تفعيل"} ${u.name}`);rerenderContent();
   },
 
-  async deleteUser(id) {
-    const u = AppState.users.find(x => x.id === id);
-    if (!u) return;
-    if (!confirm(`حذف ${u.name}؟ سيتم إخفاؤه من القوائم مع الحفاظ على السجلات التاريخية.`)) return;
-
-    const btn = document.querySelector(`[onclick*="deleteUser('${id}')"]`);
-    if (btn) { btn.disabled = true; btn.innerHTML = "…"; }
-
-    try {
-      // SOFT DELETE — never hard-delete profiles
-      // Hard delete breaks FK on shipment_timeline.actor_id
-      const { error } = await db.from("profiles")
-        .update({
-          is_deleted: true,
-          deleted_at: new Date().toISOString(),
-          deleted_by: AppState.user?.id || null
-        })
-        .eq("id", id);
-      if (error) throw error;
-
-      // Human-readable audit
-      await DB.addAudit(
-        "SOFT_DELETE_USER", id,
-        `Target: ${u.name} | Email: ${u.email} | Role: ${u.role} | By: ${AppState.user.name}`,
-        "user"
-      );
-
-      // Remove from local list (they won't appear in next loadUsers either)
-      AppState.users = AppState.users.filter(x => x.id !== id);
-      toast(`تم حذف ${u.name}`, "info");
-    } catch(err) {
-      toast("فشل الحذف: " + err.message, "error");
-    } finally {
-      if (btn) btn.disabled = false;
-      rerenderContent();
-    }
+  async deleteUser(id){
+    const u=AppState.users.find(x=>x.id===id);if(!u)return;
+    if(!confirm(`حذف ${u.name}؟ لا يمكن التراجع.`))return;
+    const{error}=await db.from("profiles").delete().eq("id",id);
+    if(error){toast("فشل الحذف: "+error.message,"error");return;}
+    await DB.addAudit("DELETE_USER",id,`by ${AppState.user.name}`);
+    AppState.users=AppState.users.filter(x=>x.id!==id);
+    toast(`تم حذف ${u.name}`,"info");rerenderContent();
   },
 
   async loadAudit(){
