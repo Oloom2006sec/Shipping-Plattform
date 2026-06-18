@@ -50,7 +50,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","reports","users","merchants","audit","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","reports","users","merchants","audit","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["track","accounts"] }
@@ -60,7 +60,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -204,6 +204,9 @@ const AppState = {
   // Phase 2B finance
   financeTab:"overview", financeRange:"today",
   driverWallet:[], codReconciliation:[], expenses:[],
+  // Phase 2C pricing
+  pricingZones:[], pricingRules:[], pricingTab:"rules",
+  lastFeeCalc:null,
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -473,6 +476,37 @@ const DB = {
     const result = {};
     (data||[]).forEach(r => { result[r.metric] = Number(r.value)||0; });
     return result;
+  },
+
+  // ── Phase 2C: Pricing Engine ─────────────────────────────
+  async loadPricingZones() {
+    const { data, error } = await db.from("pricing_zones")
+      .select("*").eq("is_active", true).order("sort_order");
+    if (error) { console.warn("loadPricingZones:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadPricingRules(merchantId) {
+    let q = db.from("pricing_rules")
+      .select(`*, pricing_zones(name,code)`)
+      .eq("is_active", true)
+      .order("priority", { ascending: false });
+    if (merchantId) q = q.or(`merchant_id.eq.${merchantId},merchant_id.is.null`);
+    const { data, error } = await q.limit(200);
+    if (error) { console.warn("loadPricingRules:", error.message); return []; }
+    return data || [];
+  },
+
+  async calculateFee(merchantId, governorate, serviceType, orderType, weight) {
+    const { data, error } = await db.rpc("calculate_shipping_fee", {
+      p_merchant_id:  merchantId  || null,
+      p_governorate:  governorate || "",
+      p_service_type: serviceType || "door_to_door",
+      p_order_type:   orderType   || "standard",
+      p_weight:       weight      || 0,
+    });
+    if (error) { console.warn("calculateFee:", error.message); return null; }
+    return (data && data.length > 0) ? data[0] : null;
   },
 
   async loadAllMerchants() {
@@ -1121,6 +1155,7 @@ function renderView() {
     case"users":      return viewUsers();
     case"merchants":  return viewAdminMerchants();
     case"finance":    return viewFinance();
+    case"pricing":    return viewPricing();
     case"audit":      return viewAudit();
     // Phase 2A
     case"addresses":  return viewAddresses();
@@ -1206,6 +1241,9 @@ function postRender() {
   if(AppState.view==="finance"){
     const tab=AppState.financeTab||"overview";
     if(tab!=="overview")setTimeout(()=>App._loadFinanceTabData(tab),100);
+  }
+  if(AppState.view==="pricing" && !AppState.pricingZones.length){
+    App.loadPricingData();
   }
 }
 
@@ -1813,6 +1851,8 @@ const Modals={
           <div class="field"><label>رسوم الشحن (ج.م)</label><input id="fFee" type="number" value="60" min="0"/></div>
           <div class="field"><label>رسوم الإرجاع (ج.م)</label><input id="fReturnFee" type="number" value="0" min="0"/></div>
         </div>
+        <div id="fFeeHint" style="font-size:11px;color:var(--brand);background:var(--brand-light);
+          border-radius:var(--radius);padding:6px 12px;margin-bottom:4px;display:block;"></div>
         <div class="form-row">
           <div class="field"><label>موعد التسليم</label><input id="fEta" placeholder="مثال: خلال 48 ساعة"/></div>
           <div class="field"><label>باركود (اختياري)</label><input id="fBarcode" placeholder="رقم الباركود"/></div>
@@ -1896,16 +1936,42 @@ const Modals={
     $("fGov").innerHTML = `<option value="">اختر المحافظة</option>` + govOpts2;
 
     // Show/hide scheduled date field
+    // Auto-calculate fee when key fields change
+    const recalcFee = async () => {
+      const gov = $("fGov")?.value;
+      const svc = $("fServiceType")?.value || "door_to_door";
+      const ord = $("fOrderType")?.value   || "standard";
+      const wgt = Number($("fWeight")?.value) || 0;
+      if (!gov) return;
+      const result = await DB.calculateFee(
+        (AppState.user.primary_role||AppState.user.role)==="merchant" ? AppState.user.id : null,
+        gov, svc, ord, wgt
+      );
+      const hint = $("fFeeHint");
+      if (result && result.delivery_fee != null) {
+        if ($("fFee"))       $("fFee").value       = result.delivery_fee;
+        if ($("fReturnFee")) $("fReturnFee").value  = result.return_fee || 0;
+        if (hint) hint.textContent = `✓ سعر تلقائي: ${result.zone_name||""} — ${result.matched_on||""}`;
+      } else {
+        if (hint) hint.textContent = "ℹ️ لا توجد قاعدة سعر — يُستخدم السعر الافتراضي";
+      }
+    };
+
     $("fOrderType")?.addEventListener("change", e => {
       const row = $("fScheduledRow");
       if (row) row.style.display = e.target.value === "scheduled" ? "" : "none";
+      recalcFee();
     });
 
     $("fGov").addEventListener("change", e => {
       const cities = (EGYPT_GOV[e.target.value] || []);
       $("fCity").innerHTML = `<option value="">اختر المدينة / المركز</option>` +
         cities.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+      recalcFee();
     });
+
+    $("fServiceType")?.addEventListener("change", recalcFee);
+    $("fWeight")?.addEventListener("change", recalcFee);
 
     $("saveShipBtn").addEventListener("click",async()=>{
       const code=$("fCode")?.value.trim(),cName=$("fCustName")?.value.trim();
@@ -2044,6 +2110,206 @@ const Modals={
 // ══════════════════════════════════════════════════════════
 // APP GLOBAL FUNCTIONS
 // ══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// PHASE 2C — PRICING ENGINE VIEW
+// ══════════════════════════════════════════════════════════════
+
+function viewPricing() {
+  const tab   = AppState.pricingTab || "rules";
+  const zones = AppState.pricingZones;
+  const rules = AppState.pricingRules;
+
+  const TABS = [
+    { id:"rules",     label:"قواعد الأسعار",  icon:"chart"  },
+    { id:"zones",     label:"مناطق التوصيل",  icon:"map"    },
+    { id:"simulator", label:"حاسبة الشحن",    icon:"search" },
+  ];
+
+  const tabBar = `
+    <div style="display:flex;gap:0;overflow-x:auto;border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+      ${TABS.map(t=>`
+        <button onclick="App.setPricingTab('${t.id}')"
+          style="padding:12px 18px;border:none;background:none;font-size:13px;font-weight:500;
+            white-space:nowrap;cursor:pointer;
+            border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+            color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">
+          ${t.label}
+        </button>`).join("")}
+    </div>`;
+
+  const SVC_LABELS  = { door_to_door:"توصيل للباب", drop_off:"إيداع", pickup:"استلام" };
+  const ORD_LABELS  = { express:"سريع", standard:"عادي", scheduled:"مجدول" };
+
+  let content = "";
+
+  if (tab === "rules") {
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("chart")} قواعد التسعير (${rules.length})</h3>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-secondary btn-sm" onclick="App.loadPricingData()">${icon("refresh",13)} تحديث</button>
+            ${can("pricing.manage")?`<button class="btn btn-primary btn-sm" onclick="App.addPricingRule()">${icon("plus",13)} إضافة قاعدة</button>`:""}
+          </div>
+        </div>
+        ${!rules.length
+          ? `<div class="empty"><div class="empty-icon">💰</div><h3>لا توجد قواعد تسعير</h3>
+              <p>أضف قواعد الأسعار لكل منطقة وخدمة</p>
+              ${can("pricing.manage")?`<button class="btn btn-primary" onclick="App.addPricingRule()">إضافة قاعدة</button>`:""}
+            </div>`
+          : `<div class="table-wrap"><table>
+              <thead><tr>
+                <th>المنطقة</th><th>الخدمة</th><th>نوع الطلب</th>
+                <th>الوزن (كجم)</th><th>رسوم أساسية</th><th>لكل كجم</th>
+                <th>رسوم الإرجاع</th><th>رسوم السرعة</th><th>الأولوية</th>
+                <th>التاجر</th><th>إجراءات</th>
+              </tr></thead>
+              <tbody>
+                ${rules.map(r=>`<tr>
+                  <td>
+                    ${r.pricing_zones
+                      ? `<span class="badge badge-brand" style="font-size:11px;">${esc(r.pricing_zones.name)}</span>`
+                      : `<span style="color:var(--gray-400);font-size:12px;">كل المناطق</span>`}
+                  </td>
+                  <td style="font-size:12px;">${r.service_type?SVC_LABELS[r.service_type]||r.service_type:`<span style="color:var(--gray-400);">الكل</span>`}</td>
+                  <td style="font-size:12px;">${r.order_type?ORD_LABELS[r.order_type]||r.order_type:`<span style="color:var(--gray-400);">الكل</span>`}</td>
+                  <td style="font-size:12px;">
+                    ${r.weight_from||0} — ${r.weight_to?r.weight_to+"kg":"∞"}
+                  </td>
+                  <td style="font-weight:700;color:var(--brand);">${money(r.base_fee)}</td>
+                  <td style="font-size:12px;">${r.per_kg_fee?money(r.per_kg_fee)+"/ كجم":"—"}</td>
+                  <td style="font-size:12px;color:var(--danger);">${money(r.return_fee)}</td>
+                  <td style="font-size:12px;">${r.express_surcharge?(r.express_surcharge*100).toFixed(0)+"%":"—"}</td>
+                  <td><span class="badge ${r.priority>=10?"badge-brand":"badge-gray"}" style="font-size:11px;">${r.priority}</span></td>
+                  <td style="font-size:12px;">${r.merchant_id
+                    ? `<span class="badge badge-success" style="font-size:10px;">خاص</span>`
+                    : `<span style="color:var(--gray-400);">عام</span>`}</td>
+                  <td>
+                    ${can("pricing.manage")?`
+                      <div class="td-actions">
+                        <button class="btn-icon" onclick="App.editPricingRule('${esc(r.id)}')">${icon("edit",13)}</button>
+                        <button class="btn-icon" style="color:var(--danger);" onclick="App.deletePricingRule('${esc(r.id)}')">${icon("trash",13)}</button>
+                      </div>`:"—"}
+                  </td>
+                </tr>`).join("")}
+              </tbody>
+            </table></div>`}
+      </div>`;
+
+  } else if (tab === "zones") {
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("map")} مناطق التوصيل (${zones.length})</h3>
+          ${can("pricing.manage_zones")?`<button class="btn btn-primary btn-sm" onclick="App.addPricingZone()">${icon("plus",13)} إضافة منطقة</button>`:""}
+        </div>
+        ${!zones.length
+          ? `<div class="empty"><div class="empty-icon">🗺️</div><h3>لا توجد مناطق</h3></div>`
+          : `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;">
+              ${zones.map(z=>`
+                <div class="card" style="border:1px solid var(--gray-200);padding:16px;">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">
+                    <div>
+                      <div style="font-size:15px;font-weight:700;">${esc(z.name)}</div>
+                      <div class="td-mono" style="font-size:11px;color:var(--gray-400);">${esc(z.code)}</div>
+                    </div>
+                    <span class="badge badge-brand">${(z.governorates||[]).length} محافظة</span>
+                  </div>
+                  <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:12px;">
+                    ${(z.governorates||[]).map(g=>`
+                      <span style="background:var(--gray-100);padding:2px 8px;border-radius:99px;font-size:11px;">${esc(g)}</span>
+                    `).join("")}
+                  </div>
+                  ${can("pricing.manage_zones")?`
+                    <div style="display:flex;gap:6px;">
+                      <button class="btn btn-secondary btn-sm" onclick="App.editPricingZone('${esc(z.id)}')">${icon("edit",13)} تعديل</button>
+                    </div>`:""}
+                </div>`).join("")}
+            </div>`}
+      </div>`;
+
+  } else if (tab === "simulator") {
+    const calc = AppState.lastFeeCalc;
+    content = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:16px;">${icon("search")} حاسبة رسوم الشحن</h3>
+          <div class="field"><label>المحافظة</label>
+            <select id="simGov">
+              <option value="">اختر المحافظة</option>
+              ${Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("")}
+            </select>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>نوع الخدمة</label>
+              <select id="simSvc">
+                <option value="door_to_door">توصيل للباب</option>
+                <option value="drop_off">إيداع في الفرع</option>
+                <option value="pickup">استلام من الفرع</option>
+              </select>
+            </div>
+            <div class="field"><label>نوع الطلب</label>
+              <select id="simOrd">
+                <option value="standard">عادي</option>
+                <option value="express">سريع</option>
+                <option value="scheduled">مجدول</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>الوزن (كجم)</label>
+              <input id="simWeight" type="number" step="0.1" min="0" value="1" placeholder="0.0"/>
+            </div>
+            <div class="field"><label>التاجر (اختياري)</label>
+              <select id="simMerchant">
+                <option value="">— سعر عام —</option>
+                ${AppState.allMerchants.map(m=>`<option value="${esc(m.id)}">${esc(m.full_name)}</option>`).join("")}
+              </select>
+            </div>
+          </div>
+          <button class="btn btn-primary btn-full" onclick="App.simulateFee()" style="margin-top:8px;">
+            ${icon("search",14)} احسب الرسوم
+          </button>
+        </div>
+
+        <div class="card" style="${calc?"border-right:4px solid var(--brand)":""}">
+          <h3 class="card-title" style="margin-bottom:16px;">💰 النتيجة</h3>
+          ${!calc
+            ? `<div class="empty" style="padding:40px 20px;">
+                <div class="empty-icon">🧮</div>
+                <h3 style="font-size:14px;">أدخل البيانات واضغط احسب</h3>
+              </div>`
+            : calc.delivery_fee == null
+              ? `<div style="background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:var(--radius);padding:16px;">
+                  <div style="font-weight:700;color:var(--warning);margin-bottom:6px;">⚠️ لا توجد قاعدة تسعير</div>
+                  <div style="font-size:13px;color:var(--gray-600);">لا يوجد سعر محدد لهذه المنطقة/الخدمة. يُستخدم السعر الافتراضي (60 ج.م).</div>
+                </div>`
+              : `<div style="display:flex;flex-direction:column;gap:12px;">
+                  <div style="background:var(--brand-light);border-radius:var(--radius);padding:16px;text-align:center;">
+                    <div style="font-size:12px;color:var(--gray-500);margin-bottom:4px;">رسوم الشحن</div>
+                    <div style="font-size:32px;font-weight:800;color:var(--brand-dark);">${money(calc.delivery_fee)}</div>
+                  </div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+                    <div style="background:var(--danger-bg);border-radius:var(--radius);padding:12px;text-align:center;">
+                      <div style="font-size:11px;color:var(--gray-500);margin-bottom:2px;">رسوم الإرجاع</div>
+                      <div style="font-size:18px;font-weight:700;color:var(--danger);">${money(calc.return_fee||0)}</div>
+                    </div>
+                    <div style="background:var(--gray-50);border-radius:var(--radius);padding:12px;text-align:center;">
+                      <div style="font-size:11px;color:var(--gray-500);margin-bottom:2px;">المنطقة</div>
+                      <div style="font-size:13px;font-weight:700;">${esc(calc.zone_name||"غير محددة")}</div>
+                    </div>
+                  </div>
+                  <div style="font-size:11px;color:var(--gray-400);background:var(--gray-50);border-radius:var(--radius);padding:10px;">
+                    <b>القاعدة المطبقة:</b> ${esc(calc.matched_on||"—")}
+                  </div>
+                </div>`}
+        </div>
+      </div>`;
+  }
+
+  return `<div>${tabBar}${content}</div>`;
+}
+
 // ══════════════════════════════════════════════════════════════
 // PHASE 2B — FINANCIAL MANAGEMENT VIEW
 // ══════════════════════════════════════════════════════════════
@@ -2741,6 +3007,197 @@ function viewPickupRequests() {
 
 const App={
   setFilter(f)       { AppState.statusFilter  = f; rerenderContent(); },
+
+  // ── Phase 2C: Pricing ─────────────────────────────────────
+  setPricingTab(tab) {
+    AppState.pricingTab = tab;
+    rerenderContent();
+  },
+
+  async loadPricingData() {
+    const [zones, rules] = await Promise.all([
+      DB.loadPricingZones(),
+      DB.loadPricingRules(null),
+    ]);
+    AppState.pricingZones = zones;
+    AppState.pricingRules = rules;
+    rerenderContent();
+  },
+
+  async simulateFee() {
+    const gov     = $("simGov")?.value;
+    const svc     = $("simSvc")?.value || "door_to_door";
+    const ord     = $("simOrd")?.value || "standard";
+    const weight  = Number($("simWeight")?.value) || 0;
+    const merchant= $("simMerchant")?.value || null;
+    if (!gov) { toast("اختر المحافظة أولاً","warning"); return; }
+    const result = await DB.calculateFee(merchant, gov, svc, ord, weight);
+    AppState.lastFeeCalc = result || { delivery_fee: null };
+    rerenderContent();
+  },
+
+  async addPricingRule() {
+    const zones    = AppState.pricingZones;
+    const merchants= AppState.allMerchants;
+    const SVC = [{v:"",l:"كل الخدمات"},{v:"door_to_door",l:"توصيل للباب"},{v:"drop_off",l:"إيداع"},{v:"pickup",l:"استلام"}];
+    const ORD = [{v:"",l:"كل الأنواع"},{v:"standard",l:"عادي"},{v:"express",l:"سريع"},{v:"scheduled",l:"مجدول"}];
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header"><h3>${icon("chart",18)} إضافة قاعدة تسعير</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-section-label">النطاق (اتركها فارغة للتطبيق على الكل)</div>
+        <div class="form-row">
+          <div class="field"><label>المنطقة</label>
+            <select id="prZone">
+              <option value="">كل المناطق</option>
+              ${zones.map(z=>`<option value="${esc(z.id)}">${esc(z.name)}</option>`).join("")}
+            </select></div>
+          <div class="field"><label>التاجر (لسعر خاص)</label>
+            <select id="prMerchant">
+              <option value="">كل التجار</option>
+              ${merchants.map(m=>`<option value="${esc(m.id)}">${esc(m.full_name)}</option>`).join("")}
+            </select></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>نوع الخدمة</label>
+            <select id="prSvc">${SVC.map(s=>`<option value="${s.v}">${s.l}</option>`).join("")}</select></div>
+          <div class="field"><label>نوع الطلب</label>
+            <select id="prOrd">${ORD.map(o=>`<option value="${o.v}">${o.l}</option>`).join("")}</select></div>
+        </div>
+        <div class="form-section-label">نطاق الوزن (اتركها فارغة للتطبيق على كل الأوزان)</div>
+        <div class="form-row">
+          <div class="field"><label>من (كجم)</label><input id="prWFrom" type="number" step="0.1" value="0" min="0"/></div>
+          <div class="field"><label>إلى (كجم) — فارغ = بلا حد</label><input id="prWTo" type="number" step="0.1" min="0"/></div>
+        </div>
+        <div class="form-section-label">التسعير</div>
+        <div class="form-row three">
+          <div class="field"><label>رسوم أساسية (ج.م) *</label><input id="prBase" type="number" step="0.01" min="0" value="60"/></div>
+          <div class="field"><label>لكل كجم إضافي (ج.م)</label><input id="prPerKg" type="number" step="0.01" min="0" value="0"/></div>
+          <div class="field"><label>رسوم الإرجاع (ج.م)</label><input id="prReturn" type="number" step="0.01" min="0" value="30"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>رسوم إضافية للسريع (%)</label><input id="prExpress" type="number" step="1" min="0" max="100" value="30" placeholder="30 = 30%"/></div>
+          <div class="field"><label>الأولوية (أعلى = يُطبق أولاً)</label><input id="prPriority" type="number" value="10" min="0"/></div>
+        </div>
+        <div class="field"><label>ملاحظات</label><input id="prNotes"/></div>
+        <div id="prErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="savePrBtn">حفظ القاعدة</button>
+      </div>
+    </div>`);
+    $("savePrBtn")?.addEventListener("click", async()=>{
+      const base=Number($("prBase")?.value);
+      const errEl=$("prErr");errEl.style.display="none";
+      if(!base&&base!==0){errEl.style.display="block";errEl.textContent="الرسوم الأساسية مطلوبة";return;}
+      const btn=$("savePrBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const{error}=await db.from("pricing_rules").insert([{
+          zone_id:          $("prZone")?.value||null,
+          merchant_id:      $("prMerchant")?.value||null,
+          service_type:     $("prSvc")?.value||null,
+          order_type:       $("prOrd")?.value||null,
+          weight_from:      Number($("prWFrom")?.value)||0,
+          weight_to:        $("prWTo")?.value?Number($("prWTo").value):null,
+          base_fee:         base,
+          per_kg_fee:       Number($("prPerKg")?.value)||0,
+          return_fee:       Number($("prReturn")?.value)||0,
+          express_surcharge:(Number($("prExpress")?.value)||0)/100,
+          priority:         Number($("prPriority")?.value)||10,
+          notes:            $("prNotes")?.value.trim()||null,
+          created_by:       AppState.user.id,
+        }]);
+        if(error)throw error;
+        await DB.addAudit("ADD_PRICING_RULE","",
+          `Base:${base} by ${AppState.user.name}`,"setting");
+        Modals.close();await App.loadPricingData();
+        toast("✅ تم إضافة قاعدة التسعير");
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async deletePricingRule(id){
+    if(!confirm("حذف هذه القاعدة؟"))return;
+    const{error}=await db.from("pricing_rules").update({is_active:false}).eq("id",id);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("DELETE_PRICING_RULE",id,`By ${AppState.user.name}`,"setting");
+    await App.loadPricingData();toast("تم الحذف","info");
+  },
+
+  async addPricingZone(){
+    const govOpts=Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("");
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header"><h3>${icon("map",18)} إضافة منطقة توصيل</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field"><label>اسم المنطقة *</label><input id="pzName" placeholder="مثال: القاهرة الكبرى"/></div>
+          <div class="field"><label>كود المنطقة *</label><input id="pzCode" placeholder="CAIRO" style="font-family:monospace;text-transform:uppercase;"/></div>
+        </div>
+        <div class="field"><label>المحافظات (اختر كل المحافظات في هذه المنطقة)</label>
+          <select id="pzGovs" multiple style="height:160px;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);width:100%;">
+            ${govOpts}
+          </select>
+          <div style="font-size:11px;color:var(--gray-500);margin-top:4px;">Ctrl+Click لاختيار أكثر من محافظة</div>
+        </div>
+        <div id="pzErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="savePzBtn">حفظ المنطقة</button>
+      </div>
+    </div>`);
+    $("savePzBtn")?.addEventListener("click",async()=>{
+      const name=$("pzName")?.value.trim(),code=$("pzCode")?.value.trim().toUpperCase();
+      const govs=Array.from($("pzGovs")?.selectedOptions||[]).map(o=>o.value);
+      const errEl=$("pzErr");errEl.style.display="none";
+      if(!name||!code||!govs.length){errEl.style.display="block";errEl.textContent="الاسم والكود والمحافظات مطلوبة";return;}
+      const btn=$("savePzBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const{error}=await db.from("pricing_zones").insert([{name,code,governorates:govs}]);
+        if(error)throw error;
+        Modals.close();await App.loadPricingData();
+        toast(`✅ تم إضافة منطقة ${name}`);
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async editPricingZone(id){
+    const z=AppState.pricingZones.find(x=>x.id===id);if(!z)return;
+    const govOpts=Object.keys(EGYPT_GOV).sort().map(g=>
+      `<option value="${esc(g)}" ${(z.governorates||[]).includes(g)?"selected":""}>${esc(g)}</option>`).join("");
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header"><h3>${icon("map",18)} تعديل منطقة: ${esc(z.name)}</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field"><label>اسم المنطقة *</label><input id="pzName2" value="${esc(z.name)}"/></div>
+          <div class="field"><label>كود المنطقة</label><input id="pzCode2" value="${esc(z.code)}" disabled style="font-family:monospace;opacity:.6;"/></div>
+        </div>
+        <div class="field"><label>المحافظات</label>
+          <select id="pzGovs2" multiple style="height:160px;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);width:100%;">
+            ${govOpts}
+          </select>
+        </div>
+        <div id="pzErr2" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="savePz2Btn">حفظ التعديلات</button>
+      </div>
+    </div>`);
+    $("savePz2Btn")?.addEventListener("click",async()=>{
+      const name=$("pzName2")?.value.trim();
+      const govs=Array.from($("pzGovs2")?.selectedOptions||[]).map(o=>o.value);
+      const errEl=$("pzErr2");errEl.style.display="none";
+      if(!name||!govs.length){errEl.style.display="block";errEl.textContent="الاسم والمحافظات مطلوبة";return;}
+      const btn=$("savePz2Btn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      const{error}=await db.from("pricing_zones").update({name,governorates:govs}).eq("id",id);
+      if(error){errEl.style.display="block";errEl.textContent="خطأ: "+error.message;btn.disabled=false;btn.textContent="حفظ";return;}
+      Modals.close();await App.loadPricingData();toast(`✅ تم تحديث ${name}`);
+    });
+  },
   setServiceFilter(f){ AppState.serviceFilter = f; rerenderContent(); },
   setOrderFilter(f)  { AppState.orderFilter   = f; rerenderContent(); },
 
