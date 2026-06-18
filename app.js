@@ -50,7 +50,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","reports","users","audit","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","reports","users","merchants","audit","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["track","accounts"] }
@@ -60,6 +60,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
+  merchants:"التجار",  finance:"المالية",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -195,9 +196,14 @@ const AppState = {
   userFilter:"", auditFilter:"",
   shipments:[], users:[], couriers:[], notifications:[],
   realtimeChannel:null,
-  // Phase 2A
+  // Phase 2A — merchant portal (own data)
   merchantAddresses:[], merchantRecipients:[], merchantProducts:[],
   pickupRequests:[], merchantBalance:0,
+  // Admin merchant management
+  allMerchants:[], selectedMerchantId:"", adminMerchantTab:"shipments",
+  // Phase 2B finance
+  financeTab:"overview", financeRange:"today",
+  driverWallet:[], codReconciliation:[], expenses:[],
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -419,6 +425,114 @@ const DB = {
     return logs.filter(l=>`${l.actor_name} ${l.action} ${l.entity_id} ${l.actor_role} ${l.details}`.toLowerCase().includes(f));
   },
   // ── Phase 2A: Merchant Portal ─────────────────────────────
+  // ── Admin: load all merchants list ──────────────────────────
+  // ── Phase 2B: Financial ─────────────────────────────────────
+  async loadDriverTransactions(driverId) {
+    const { data, error } = await db.from("driver_transactions")
+      .select("*").eq("driver_id", driverId)
+      .order("created_at",{ascending:false}).limit(100);
+    if (error) { console.warn("loadDriverTransactions:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadDriverBalance(driverId) {
+    const { data, error } = await db.rpc("get_driver_balance",{p_driver_id:driverId});
+    if (error) { console.warn("loadDriverBalance:", error.message); return 0; }
+    return Number(data)||0;
+  },
+
+  async loadInvoices(merchantId) {
+    let q = db.from("invoices").select("*").order("created_at",{ascending:false});
+    if (merchantId) q = q.eq("merchant_id", merchantId);
+    const { data, error } = await q.limit(100);
+    if (error) { console.warn("loadInvoices:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadExpenses(category) {
+    let q = db.from("expenses").select("*").order("expense_date",{ascending:false}).limit(200);
+    if (category) q = q.eq("category", category);
+    const { data, error } = await q;
+    if (error) { console.warn("loadExpenses:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadCodReconciliation(driverId, date) {
+    let q = db.from("cod_reconciliation").select("*").order("reconcile_date",{ascending:false});
+    if (driverId) q = q.eq("driver_id", driverId);
+    if (date)     q = q.eq("reconcile_date", date);
+    const { data, error } = await q.limit(100);
+    if (error) { console.warn("loadCodReconciliation:", error.message); return []; }
+    return data || [];
+  },
+
+  async getFinancialSummary(start, end) {
+    const { data, error } = await db.rpc("get_financial_summary",
+      { p_start:start, p_end:end });
+    if (error) { console.warn("getFinancialSummary:", error.message); return {}; }
+    const result = {};
+    (data||[]).forEach(r => { result[r.metric] = Number(r.value)||0; });
+    return result;
+  },
+
+  async loadAllMerchants() {
+    const { data, error } = await db.from("profiles")
+      .select("id,full_name,email,phone,primary_role,is_active,is_suspended,created_at")
+      .eq("primary_role","merchant")
+      .eq("is_deleted",false)
+      .order("full_name");
+    if (error) { console.warn("loadAllMerchants:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadAdminMerchantAddresses(merchantId) {
+    const { data, error } = await db.from("merchant_addresses")
+      .select("*").eq("merchant_id", merchantId)
+      .order("is_default", { ascending:false });
+    if (error) { console.warn("loadAdminMerchantAddresses:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadAdminMerchantRecipients(merchantId) {
+    const { data, error } = await db.from("merchant_recipients")
+      .select("*").eq("merchant_id", merchantId)
+      .eq("is_deleted",false).order("order_count", { ascending:false });
+    if (error) { console.warn("loadAdminMerchantRecipients:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadAdminMerchantProducts(merchantId) {
+    const { data, error } = await db.from("merchant_products")
+      .select("*").eq("merchant_id", merchantId)
+      .eq("is_deleted",false).order("name");
+    if (error) { console.warn("loadAdminMerchantProducts:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadAdminPickupRequests(merchantId) {
+    let q = db.from("pickup_requests").select("*").order("created_at",{ascending:false});
+    if (merchantId) q = q.eq("merchant_id", merchantId);
+    const { data, error } = await q.limit(200);
+    if (error) { console.warn("loadAdminPickupRequests:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadAdminSettlements(merchantId) {
+    let q = db.from("settlements").select("*").order("created_at",{ascending:false});
+    if (merchantId) q = q.eq("merchant_id", merchantId);
+    const { data, error } = await q.limit(200);
+    if (error) { console.warn("loadAdminSettlements:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadAdminLedger(merchantId) {
+    const { data, error } = await db.from("merchant_ledger")
+      .select("*").eq("merchant_id", merchantId)
+      .order("created_at",{ascending:false}).limit(200);
+    if (error) { console.warn("loadAdminLedger:", error.message); return []; }
+    return data || [];
+  },
+
   async loadMerchantAddresses(merchantId) {
     const { data, error } = await db.from("merchant_addresses")
       .select("*").eq("merchant_id", merchantId)
@@ -841,7 +955,10 @@ async function handleLogin(e) {
     saveSession(user);
 
     // Step 8: start realtime BEFORE render (so first render shows live count)
-    if (role === "admin") startRealtime();
+    if (role === "admin") {
+      startRealtime();
+      DB.loadAllMerchants().then(m => { AppState.allMerchants = m; });
+    }
     if (role === "merchant") await App.loadMerchantData();
 
     // Step 9: audit (fire-and-forget, do not await — avoid delaying render)
@@ -1002,6 +1119,8 @@ function renderView() {
     case"reports":    return viewReports();
     case"track":      return viewTrack();
     case"users":      return viewUsers();
+    case"merchants":  return viewAdminMerchants();
+    case"finance":    return viewFinance();
     case"audit":      return viewAudit();
     // Phase 2A
     case"addresses":  return viewAddresses();
@@ -1084,6 +1203,10 @@ function postRender() {
   const sel=AppState.shipments.find(s=>s.id===AppState.selectedShipment);
   if(sel)loadTimeline(sel.id);
   if(AppState.view==="audit")App.loadAudit();
+  if(AppState.view==="finance"){
+    const tab=AppState.financeTab||"overview";
+    if(tab!=="overview")setTimeout(()=>App._loadFinanceTabData(tab),100);
+  }
 }
 
 function renderChart() {
@@ -1922,6 +2045,540 @@ const Modals={
 // APP GLOBAL FUNCTIONS
 // ══════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════
+// PHASE 2B — FINANCIAL MANAGEMENT VIEW
+// ══════════════════════════════════════════════════════════════
+
+function viewFinance() {
+  const tab = AppState.financeTab || "overview";
+  const TABS = [
+    { id:"overview",     label:"نظرة عامة",       icon:"chart"  },
+    { id:"drivers",      label:"محافظ المناديب",   icon:"truck"  },
+    { id:"cod",          label:"مطابقة COD",       icon:"wallet" },
+    { id:"settlements",  label:"التسويات",         icon:"chart"  },
+    { id:"invoices",     label:"الفواتير",         icon:"log"    },
+    { id:"expenses",     label:"المصروفات",        icon:"refresh"},
+  ];
+
+  const tabBar = `
+    <div style="display:flex;gap:0;overflow-x:auto;border-bottom:1px solid var(--gray-200);margin-bottom:20px;background:#fff;border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:0 4px;">
+      ${TABS.map(t=>`
+        <button onclick="App.setFinanceTab('${t.id}')"
+          style="padding:12px 18px;border:none;background:none;font-size:13px;font-weight:500;white-space:nowrap;cursor:pointer;
+            border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+            color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">
+          ${t.label}
+        </button>`).join("")}
+    </div>`;
+
+  let content = "";
+
+  if (tab === "overview") {
+    const list       = AppState.shipments.filter(s=>!s.isDeleted);
+    const delivered  = list.filter(s=>s.status==="delivered");
+    const returned   = list.filter(s=>s.status==="returned");
+    const todayStr   = new Date().toDateString();
+    const today      = list.filter(s=>s.createdAt&&new Date(s.createdAt).toDateString()===todayStr);
+    const todayDel   = delivered.filter(s=>s.deliveredAt&&new Date(s.deliveredAt).toDateString()===todayStr);
+    const cod        = delivered.reduce((a,s)=>a+(s.amount||0),0);
+    const fees       = delivered.reduce((a,s)=>a+(s.deliveryFee||0),0);
+    const retFees    = returned.reduce((a,s)=>a+(s.returnFee||0),0);
+    const revenue    = fees + retFees;
+    const todayCod   = todayDel.reduce((a,s)=>a+(s.amount||0),0);
+    const todayFees  = todayDel.reduce((a,s)=>a+(s.deliveryFee||0),0);
+
+    // Build daily chart data (last 7 days)
+    const days = [];
+    for (let i=6;i>=0;i--) {
+      const d=new Date(); d.setDate(d.getDate()-i);
+      const ds=d.toDateString();
+      const dd=delivered.filter(s=>s.deliveredAt&&new Date(s.deliveredAt).toDateString()===ds);
+      days.push({
+        label:d.toLocaleDateString("ar-EG",{weekday:"short",day:"numeric"}),
+        cod:dd.reduce((a,s)=>a+(s.amount||0),0),
+        fee:dd.reduce((a,s)=>a+(s.deliveryFee||0),0),
+        count:dd.length
+      });
+    }
+    const maxCod = Math.max(...days.map(d=>d.cod),1);
+
+    content = `
+      <div class="kpi-grid">
+        ${kpi("إجمالي التحصيلات",money(cod),"wallet","var(--success)","var(--success-bg)")}
+        ${kpi("إجمالي الرسوم",money(revenue),"chart","var(--brand)","var(--brand-light)")}
+        ${kpi("رسوم الإرجاع",money(retFees),"refresh","var(--danger)","var(--danger-bg)")}
+        ${kpi("تحصيلات اليوم",money(todayCod),"wallet","var(--info)","var(--info-bg)")}
+        ${kpi("رسوم اليوم",money(todayFees),"chart","var(--purple)","var(--purple-bg)")}
+        ${kpi("شحنات اليوم",today.length,"box","var(--warning)","var(--warning-bg)")}
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <h3 class="card-title" style="margin-bottom:16px;">${icon("chart")} التحصيلات - آخر 7 أيام</h3>
+        <div style="display:flex;gap:6px;align-items:flex-end;height:140px;padding:0 8px;">
+          ${days.map(d=>`
+            <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;">
+              <div style="font-size:10px;color:var(--gray-500);font-weight:600;">${d.count}</div>
+              <div style="width:100%;background:var(--brand);border-radius:3px 3px 0 0;min-height:4px;
+                height:${Math.max((d.cod/maxCod)*110,4)}px;transition:height .3s;"
+                title="${money(d.cod)}"></div>
+              <div style="font-size:10px;color:var(--gray-400);text-align:center;">${d.label}</div>
+            </div>`).join("")}
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:14px;">💰 ملخص مالي</h3>
+          ${[
+            ["إجمالي COD المحصل",   money(cod),     "var(--success)"],
+            ["رسوم الشحن المستحقة", money(fees),    "var(--brand)"],
+            ["رسوم الإرجاع",        money(retFees), "var(--danger)"],
+            ["صافي الإيرادات",      money(revenue), "var(--info)"],
+          ].map(([l,v,c])=>`
+            <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--gray-100);">
+              <span style="font-size:13px;color:var(--gray-600);">${l}</span>
+              <span style="font-weight:700;color:${c};">${v}</span>
+            </div>`).join("")}
+        </div>
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:14px;">📊 معدلات الأداء</h3>
+          ${[
+            ["معدل التسليم",  Math.round(delivered.length/(list.length||1)*100)+"%", "var(--success)"],
+            ["معدل الإرجاع",  Math.round(returned.length/(list.length||1)*100)+"%",  "var(--danger)"],
+            ["إجمالي الشحنات",list.length,   "var(--brand)"],
+            ["تم التسليم",    delivered.length,"var(--success)"],
+            ["مرتجع",         returned.length, "var(--danger)"],
+          ].map(([l,v,c])=>`
+            <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--gray-100);">
+              <span style="font-size:13px;color:var(--gray-600);">${l}</span>
+              <span style="font-weight:700;color:${c};">${v}</span>
+            </div>`).join("")}
+        </div>
+      </div>`;
+
+  } else if (tab === "drivers") {
+    const couriers = AppState.users.filter(u=>(u.role||u.primary_role)==="courier");
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("truck")} محافظ المناديب</h3>
+          <button class="btn btn-primary btn-sm" onclick="App.addDriverTransaction()">
+            ${icon("plus",13)} إضافة حركة
+          </button>
+        </div>
+        ${!couriers.length?`<div class="empty"><div class="empty-icon">🚚</div><h3>لا يوجد مناديب</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>المندوب</th><th>الهاتف</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+            <tbody>
+              ${couriers.map(c=>`<tr>
+                <td><div style="display:flex;align-items:center;gap:8px;">
+                  <div style="width:28px;height:28px;border-radius:50%;background:var(--brand-light);color:var(--brand-dark);
+                    display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">${initials(c.name)}</div>
+                  <b>${esc(c.name)}</b></div></td>
+                <td style="font-size:12px;">${esc(c.phone||"—")}</td>
+                <td><span class="badge ${c.suspended?"badge-danger":"badge-success"}">${c.suspended?"موقوف":"نشط"}</span></td>
+                <td>
+                  <button class="btn btn-primary btn-sm" onclick="App.viewDriverWallet('${esc(c.id)}','${esc(c.name)}')">
+                    ${icon("wallet",13)} المحفظة
+                  </button>
+                </td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+      </div>`;
+
+  } else if (tab === "cod") {
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("wallet")} مطابقة COD اليومية</h3>
+          <button class="btn btn-primary btn-sm" onclick="App.newCodReconciliation()">
+            ${icon("plus",13)} مطابقة جديدة
+          </button>
+        </div>
+        <div id="codReconContent">
+          <div class="page-loader"><span class="spinner"></span> جاري التحميل...</div>
+        </div>
+      </div>`;
+
+  } else if (tab === "settlements") {
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("chart")} كل طلبات التسوية</h3>
+          <div style="display:flex;gap:8px;">
+            ${["all","pending","approved","paid","rejected"].map(s=>`
+              <button class="filter-btn ${!AppState.settleFilter&&s==="all"||AppState.settleFilter===s?"active":""}"
+                onclick="App.setSettleFilter('${s==="all"?"":s}')">
+                ${s==="all"?"الكل":s==="pending"?"بانتظار":s==="approved"?"موافق":s==="paid"?"مدفوع":"مرفوض"}
+              </button>`).join("")}
+          </div>
+        </div>
+        <div id="settleContent">
+          <div class="page-loader"><span class="spinner"></span> جاري التحميل...</div>
+        </div>
+      </div>`;
+
+  } else if (tab === "invoices") {
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("log")} الفواتير</h3>
+          <button class="btn btn-primary btn-sm" onclick="App.generateInvoice()">
+            ${icon("plus",13)} إنشاء فاتورة
+          </button>
+        </div>
+        <div id="invoiceContent">
+          <div class="page-loader"><span class="spinner"></span> جاري التحميل...</div>
+        </div>
+      </div>`;
+
+  } else if (tab === "expenses") {
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("refresh")} المصروفات التشغيلية</h3>
+          <button class="btn btn-primary btn-sm" onclick="App.addExpense()">
+            ${icon("plus",13)} إضافة مصروف
+          </button>
+        </div>
+        <div class="filter-bar" style="margin-bottom:14px;">
+          ${["","driver","branch","office","fuel","maintenance","other"].map(c=>`
+            <button class="filter-btn ${AppState.expenseCategory===c?"active":""}"
+              onclick="App.setExpenseCategory('${c}')">
+              ${c===""?"الكل":c==="driver"?"مندوب":c==="branch"?"فرع":c==="office"?"مكتب":c==="fuel"?"وقود":c==="maintenance"?"صيانة":"أخرى"}
+            </button>`).join("")}
+        </div>
+        <div id="expenseContent">
+          <div class="page-loader"><span class="spinner"></span> جاري التحميل...</div>
+        </div>
+      </div>`;
+  }
+
+  return `<div>${tabBar}${content}</div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// ADMIN MERCHANT MANAGEMENT VIEW
+// ══════════════════════════════════════════════════════════════
+
+function viewAdminMerchants() {
+  const merchants  = AppState.allMerchants;
+  const selId      = AppState.selectedMerchantId;
+  const selMerch   = merchants.find(m=>m.id===selId);
+  const tab        = AppState.adminMerchantTab;
+
+  const merchantList = `
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header">
+        <h3 class="card-title">${icon("users")} التجار (${merchants.length})</h3>
+        <div class="search-wrap" style="width:200px;">
+          ${icon("search",14)}
+          <input id="merchantSearchInput" placeholder="بحث..."
+            value="${esc(AppState.userFilter)}"
+            oninput="App.filterMerchants(this.value)"/>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>التاجر</th><th>البريد</th><th>الهاتف</th><th>تاريخ الانضمام</th><th>الحالة</th><th></th></tr></thead>
+          <tbody>
+            ${!merchants.length
+              ? `<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--gray-400);">لا يوجد تجار</td></tr>`
+              : merchants.filter(m=>{
+                  const f=(AppState.userFilter||"").toLowerCase();
+                  return !f || (m.full_name+m.email+m.phone).toLowerCase().includes(f);
+                }).map(m=>`
+                <tr style="${m.id===selId?"background:var(--brand-light);":""}">
+                  <td>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                      <div style="width:28px;height:28px;border-radius:50%;background:var(--brand-light);color:var(--brand-dark);
+                        display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">
+                        ${initials(m.full_name)}
+                      </div>
+                      <b>${esc(m.full_name)}</b>
+                    </div>
+                  </td>
+                  <td style="font-size:12px;">${esc(m.email||"—")}</td>
+                  <td style="font-size:12px;">${esc(m.phone||"—")}</td>
+                  <td style="font-size:11px;color:var(--gray-400);">${fmtDate(m.created_at)}</td>
+                  <td><span class="badge ${m.is_suspended?"badge-danger":"badge-success"}">${m.is_suspended?"موقوف":"نشط"}</span></td>
+                  <td>
+                    <button class="btn btn-primary btn-sm" onclick="App.selectMerchant('${esc(m.id)}')">
+                      ${m.id===selId?"✓ محدد":"عرض"}
+                    </button>
+                  </td>
+                </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+
+  if (!selId || !selMerch) {
+    return merchantList + `
+      <div class="empty" style="padding:60px;">
+        <div class="empty-icon">🏢</div>
+        <h3>اختر تاجراً لعرض بياناته</h3>
+        <p>اضغط على "عرض" بجانب أي تاجر لعرض عناوينه وعملاؤه ومنتجاته وطلباته</p>
+      </div>`;
+  }
+
+  // Merchant detail tabs
+  const TABS = [
+    { id:"shipments",  label:"الشحنات",       icon:"box"    },
+    { id:"addresses",  label:"العناوين",       icon:"map"    },
+    { id:"recipients", label:"العملاء",        icon:"users"  },
+    { id:"products",   label:"المنتجات",       icon:"pkg"    },
+    { id:"pickup",     label:"طلبات الاستلام", icon:"truck"  },
+    { id:"ledger",     label:"الحساب",         icon:"wallet" },
+    { id:"settlements",label:"التسويات",       icon:"chart"  },
+  ];
+
+  const tabBar = `
+    <div style="display:flex;gap:0;overflow-x:auto;border-bottom:1px solid var(--gray-200);margin-bottom:16px;">
+      ${TABS.map(t=>`
+        <button onclick="App.setAdminMerchantTab('${t.id}')"
+          style="padding:10px 16px;border:none;background:none;font-size:13px;font-weight:500;white-space:nowrap;
+            border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+            color:${tab===t.id?"var(--brand)":"var(--gray-500)"};cursor:pointer;">
+          ${t.label}
+        </button>`).join("")}
+    </div>`;
+
+  const merchantHeader = `
+    <div class="card" style="margin-bottom:16px;border-right:4px solid var(--brand);">
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+        <div style="display:flex;align-items:center;gap:14px;">
+          <div style="width:48px;height:48px;border-radius:50%;background:var(--brand-light);color:var(--brand-dark);
+            display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;">
+            ${initials(selMerch.full_name)}
+          </div>
+          <div>
+            <div style="font-size:18px;font-weight:800;">${esc(selMerch.full_name)}</div>
+            <div style="font-size:13px;color:var(--gray-500);">${esc(selMerch.email||"")} ${selMerch.phone?"· "+esc(selMerch.phone):""}</div>
+            <div style="margin-top:4px;">
+              <span class="badge ${selMerch.is_suspended?"badge-danger":"badge-success"}">${selMerch.is_suspended?"موقوف":"نشط"}</span>
+              <span style="font-size:11px;color:var(--gray-400);margin-right:8px;">انضم ${fmtDate(selMerch.created_at)}</span>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="App.toggleUser('${esc(selMerch.id)}')">
+            ${selMerch.is_suspended?"✅ تفعيل":"🚫 إيقاف"}
+          </button>
+          <button class="btn btn-secondary btn-sm" onclick="App.editUser('${esc(selMerch.id)}')">${icon("edit",13)} تعديل</button>
+        </div>
+      </div>
+    </div>`;
+
+  // Tab content
+  let tabContent = "";
+  const d = AppState._adminMerchantData || {};
+
+  if (tab === "shipments") {
+    const merchantShipments = AppState.shipments.filter(s=>s.merchantId===selId);
+    tabContent = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("box")} شحنات ${esc(selMerch.full_name)} (${merchantShipments.length})</h3>
+          ${can("export_excel")?`<button class="btn btn-secondary btn-sm" onclick="App.exportMerchantShipments('${esc(selId)}')">${icon("chart",13)} Excel</button>`:""}
+        </div>
+        ${shipTable(merchantShipments.slice(0,50))}
+      </div>`;
+
+  } else if (tab === "addresses") {
+    const addrs = d.addresses||[];
+    tabContent = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("map")} عناوين التاجر (${addrs.length})</h3>
+        </div>
+        ${!addrs.length?`<div class="empty"><div class="empty-icon">📍</div><h3>لا توجد عناوين</h3></div>`
+          :`<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;">
+            ${addrs.map(a=>`
+              <div class="card" style="border:1px solid var(--gray-200);padding:14px;">
+                ${a.is_default?`<span class="badge badge-brand" style="font-size:10px;">افتراضي</span><br/>`:""}
+                <div style="font-weight:700;margin-bottom:4px;">${esc(a.label)}</div>
+                <div><span class="badge ${a.type==="pickup"?"badge-success":a.type==="warehouse"?"badge-warning":"badge-info"}" style="font-size:10px;">
+                  ${a.type==="pickup"?"📦 استلام":a.type==="warehouse"?"🏭 مستودع":a.type==="branch"?"🏪 فرع":"📍 أخرى"}
+                </span></div>
+                <div style="font-size:12px;color:var(--gray-600);margin-top:6px;line-height:1.6;">
+                  ${esc(a.governorate)} / ${esc(a.city)}
+                  ${a.street?`<br/>${esc(a.street)}`:""}
+                  ${a.contact_name?`<br/>📞 ${esc(a.contact_name)}`:""}
+                </div>
+                <div style="display:flex;gap:6px;margin-top:10px;">
+                  <button class="btn btn-secondary btn-sm" style="color:var(--danger);"
+                    onclick="App.adminDeleteAddress('${esc(a.id)}','${esc(selId)}')">حذف</button>
+                </div>
+              </div>`).join("")}
+          </div>`}
+      </div>`;
+
+  } else if (tab === "recipients") {
+    const recs = d.recipients||[];
+    tabContent = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("users")} عملاء التاجر (${recs.length})</h3>
+        </div>
+        ${!recs.length?`<div class="empty"><div class="empty-icon">👥</div><h3>لا يوجد عملاء</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>الاسم</th><th>الهاتف</th><th>المنطقة</th><th>الشحنات</th><th>آخر طلب</th><th>إجراءات</th></tr></thead>
+            <tbody>
+              ${recs.map(r=>`<tr>
+                <td class="td-primary">${esc(r.name)}</td>
+                <td class="td-phone"><a href="tel:${esc(r.phone)}">${esc(r.phone)}</a></td>
+                <td style="font-size:12px;">${esc(r.governorate)} ${r.city?"/"+esc(r.city):""}</td>
+                <td><span class="badge badge-brand">${r.order_count||0}</span></td>
+                <td style="font-size:11px;color:var(--gray-400);">${r.last_order_at?fmtDate(r.last_order_at):"—"}</td>
+                <td>
+                  <button class="btn-icon" style="color:var(--danger);" onclick="App.adminDeleteRecipient('${esc(r.id)}','${esc(selId)}')">${icon("trash",13)}</button>
+                </td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+      </div>`;
+
+  } else if (tab === "products") {
+    const prods = d.products||[];
+    tabContent = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("box")} منتجات التاجر (${prods.length})</h3>
+        </div>
+        ${!prods.length?`<div class="empty"><div class="empty-icon">🛍️</div><h3>لا توجد منتجات</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>المنتج</th><th>SKU</th><th>الباركود</th><th>السعر</th><th>الوزن</th><th>إجراءات</th></tr></thead>
+            <tbody>
+              ${prods.map(p=>`<tr>
+                <td><div style="display:flex;align-items:center;gap:8px;">
+                  ${p.image_url?`<img src="${esc(p.image_url)}" style="width:32px;height:32px;object-fit:cover;border-radius:4px;"/>`
+                    :`<div style="width:32px;height:32px;background:var(--gray-100);border-radius:4px;display:flex;align-items:center;justify-content:center;">🛍️</div>`}
+                  <b>${esc(p.name)}</b></div></td>
+                <td class="td-mono" style="font-size:11px;">${p.sku?esc(p.sku):"—"}</td>
+                <td class="td-mono" style="font-size:11px;">${p.barcode?esc(p.barcode):"—"}</td>
+                <td style="font-weight:600;">${p.price?money(p.price):"—"}</td>
+                <td style="font-size:12px;">${p.weight?p.weight+"كجم":"—"}</td>
+                <td>
+                  <button class="btn-icon" style="color:var(--danger);" onclick="App.adminDeleteProduct('${esc(p.id)}','${esc(selId)}')">${icon("trash",13)}</button>
+                </td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+      </div>`;
+
+  } else if (tab === "pickup") {
+    const reqs = d.pickupRequests||[];
+    const STATUS_PICKUP = {
+      pending:   {label:"بانتظار التعيين",badge:"badge-warning"},
+      assigned:  {label:"تم التعيين",    badge:"badge-brand"},
+      picked_up: {label:"تم الاستلام",   badge:"badge-success"},
+      cancelled: {label:"ملغي",          badge:"badge-gray"},
+    };
+    tabContent = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("truck")} طلبات الاستلام (${reqs.length})</h3>
+        </div>
+        ${!reqs.length?`<div class="empty"><div class="empty-icon">🚚</div><h3>لا توجد طلبات</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>#</th><th>الحالة</th><th>الشحنات</th><th>الموعد</th><th>المندوب</th><th>إجراءات</th></tr></thead>
+            <tbody>
+              ${reqs.map(r=>`<tr>
+                <td class="td-mono" style="font-size:11px;">${r.id.slice(-6)}</td>
+                <td><span class="badge ${STATUS_PICKUP[r.status]?.badge||"badge-gray"}">${STATUS_PICKUP[r.status]?.label||r.status}</span></td>
+                <td style="font-weight:600;">${r.shipment_count}</td>
+                <td style="font-size:12px;">${r.scheduled_at?fmtDate(r.scheduled_at):"أسرع وقت"}</td>
+                <td style="font-size:12px;">${r.courier_name?esc(r.courier_name):"—"}</td>
+                <td>
+                  ${r.status==="pending"?`
+                    <div style="display:flex;gap:6px;">
+                      <select id="courier_${esc(r.id)}" style="padding:5px 8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);font-size:12px;">
+                        <option value="">اختر مندوب</option>
+                        ${AppState.couriers.map(c=>`<option value="${esc(c.id)}" data-name="${esc(c.full_name)}">${esc(c.full_name)}</option>`).join("")}
+                      </select>
+                      <button class="btn btn-primary btn-sm" onclick="App.adminAssignPickup('${esc(r.id)}','${esc(selId)}')">تعيين</button>
+                      <button class="btn btn-secondary btn-sm" style="color:var(--danger);"
+                        onclick="App.adminCancelPickup('${esc(r.id)}','${esc(selId)}')">إلغاء</button>
+                    </div>`
+                  :r.status==="assigned"?`<button class="btn btn-primary btn-sm" onclick="App.adminMarkPickedUp('${esc(r.id)}','${esc(selId)}')">✅ تم الاستلام</button>`
+                  :"—"}
+                </td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+      </div>`;
+
+  } else if (tab === "ledger") {
+    const entries = d.ledger||[];
+    const TYPE_LABELS = {
+      cod_collected:"تحصيل COD", delivery_fee:"رسوم شحن",
+      return_fee:"رسوم إرجاع",  settlement:"تسوية",
+      adjustment:"تعديل",       refund:"استرداد",
+    };
+    tabContent = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("wallet")} سجل الحساب (${entries.length} حركة)</h3>
+          <button class="btn btn-primary btn-sm" onclick="App.adminAddLedgerEntry('${esc(selId)}')">+ إضافة حركة</button>
+        </div>
+        ${!entries.length?`<div class="empty"><div class="empty-icon">📒</div><h3>لا توجد حركات</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>النوع</th><th>الشحنة</th><th>المبلغ</th><th>الرصيد بعدها</th><th>الوصف</th></tr></thead>
+            <tbody>
+              ${entries.map(e=>`<tr>
+                <td style="font-size:11px;color:var(--gray-400);white-space:nowrap;">${fmtTime(e.created_at)}</td>
+                <td><span class="badge ${e.amount>0?"badge-success":"badge-danger"}">${TYPE_LABELS[e.type]||e.type}</span></td>
+                <td class="td-mono" style="font-size:11px;">${e.shipment_code||"—"}</td>
+                <td style="font-weight:700;color:${e.amount>0?"var(--success)":"var(--danger)"};">${e.amount>0?"+":""}${money(e.amount)}</td>
+                <td style="font-weight:600;">${money(e.balance_after)}</td>
+                <td style="font-size:12px;color:var(--gray-500);">${esc(e.description||"—")}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+      </div>`;
+
+  } else if (tab === "settlements") {
+    const setts = d.settlements||[];
+    const SETT_STATUS = {
+      pending:  {label:"بانتظار الموافقة",badge:"badge-warning"},
+      approved: {label:"موافق عليه",      badge:"badge-brand"},
+      paid:     {label:"تم الصرف",        badge:"badge-success"},
+      rejected: {label:"مرفوض",           badge:"badge-danger"},
+    };
+    tabContent = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("chart")} طلبات التسوية (${setts.length})</h3>
+        </div>
+        ${!setts.length?`<div class="empty"><div class="empty-icon">💰</div><h3>لا توجد طلبات تسوية</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>المبلغ</th><th>الحالة</th><th>طريقة الدفع</th><th>المرجع</th><th>إجراءات</th></tr></thead>
+            <tbody>
+              ${setts.map(s=>`<tr>
+                <td style="font-size:11px;color:var(--gray-400);">${fmtDate(s.created_at)}</td>
+                <td style="font-weight:700;font-size:15px;">${money(s.amount)}</td>
+                <td><span class="badge ${SETT_STATUS[s.status]?.badge||"badge-gray"}">${SETT_STATUS[s.status]?.label||s.status}</span></td>
+                <td style="font-size:12px;">${esc(s.payment_method||"—")}</td>
+                <td class="td-mono" style="font-size:11px;">${esc(s.payment_ref||"—")}</td>
+                <td>
+                  ${s.status==="pending"?`
+                    <div style="display:flex;gap:6px;">
+                      <button class="btn btn-primary btn-sm" onclick="App.approveSettlement('${esc(s.id)}','${esc(selId)}')">✅ موافقة</button>
+                      <button class="btn btn-secondary btn-sm" style="color:var(--danger);"
+                        onclick="App.rejectSettlement('${esc(s.id)}','${esc(selId)}')">رفض</button>
+                    </div>`
+                  :s.status==="approved"?`<button class="btn btn-primary btn-sm" onclick="App.markSettlementPaid('${esc(s.id)}','${esc(selId)}')">💰 تم الصرف</button>`
+                  :"—"}
+                </td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+      </div>`;
+  }
+
+  return merchantList + merchantHeader + tabBar + tabContent;
+}
+
+// ══════════════════════════════════════════════════════════════
 // PHASE 2A VIEW FUNCTIONS
 // ══════════════════════════════════════════════════════════════
 
@@ -2087,7 +2744,700 @@ const App={
   setServiceFilter(f){ AppState.serviceFilter = f; rerenderContent(); },
   setOrderFilter(f)  { AppState.orderFilter   = f; rerenderContent(); },
 
+  // ── Phase 2B: Finance ────────────────────────────────────
+  setFinanceTab(tab) {
+    AppState.financeTab = tab;
+    rerenderContent();
+    // Lazy-load tab data
+    setTimeout(() => App._loadFinanceTabData(tab), 50);
+  },
+
+  async _loadFinanceTabData(tab) {
+    if (tab === "cod") {
+      const data = await DB.loadCodReconciliation();
+      const el = $("codReconContent"); if (!el) return;
+      const STATUS = {
+        pending:  {label:"بانتظار المطابقة",badge:"badge-warning"},
+        submitted:{label:"تم التسليم",     badge:"badge-brand"},
+        verified: {label:"تم التحقق",      badge:"badge-success"},
+        flagged:  {label:"يحتاج مراجعة",  badge:"badge-danger"},
+      };
+      el.innerHTML = !data.length
+        ? `<div class="empty"><div class="empty-icon">📋</div><h3>لا توجد سجلات مطابقة</h3></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr><th>المندوب</th><th>التاريخ</th><th>المحصل</th><th>المسلم</th><th>الفرق</th><th>الشحنات</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+            <tbody>
+              ${data.map(r=>`<tr>
+                <td class="td-primary">${esc(AppState.users.find(u=>u.id===r.driver_id)?.name||"—")}</td>
+                <td style="font-size:12px;">${fmtDate(r.reconcile_date)}</td>
+                <td style="font-weight:600;color:var(--success);">${money(r.cod_collected)}</td>
+                <td style="font-weight:600;">${money(r.cod_submitted)}</td>
+                <td style="font-weight:700;color:${r.cod_difference>0?"var(--danger)":"var(--success)"};">${r.cod_difference>0?"+":""}${money(r.cod_difference)}</td>
+                <td>${r.shipment_count}</td>
+                <td><span class="badge ${STATUS[r.status]?.badge||"badge-gray"}">${STATUS[r.status]?.label||r.status}</span></td>
+                <td>
+                  ${r.status==="pending"?`<button class="btn btn-primary btn-sm" onclick="App.verifyCodRecon('${esc(r.id)}')">✅ تحقق</button>`:"—"}
+                  ${r.cod_difference>0&&r.status!=="verified"?`<button class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="App.flagCodRecon('${esc(r.id)}')">⚠️ إشارة</button>`:""}
+                </td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`;
+    }
+
+    if (tab === "settlements") {
+      const f    = AppState.settleFilter||"";
+      const data = await DB.loadAdminSettlements(null);
+      const filtered = f ? data.filter(s=>s.status===f) : data;
+      const el   = $("settleContent"); if (!el) return;
+      const SETT = {
+        pending: {label:"بانتظار",badge:"badge-warning"},
+        approved:{label:"موافق", badge:"badge-brand"},
+        paid:    {label:"مدفوع", badge:"badge-success"},
+        rejected:{label:"مرفوض",badge:"badge-danger"},
+      };
+      const pending = data.filter(s=>s.status==="pending");
+      el.innerHTML = `
+        ${pending.length?`<div style="background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:var(--radius);padding:12px 16px;margin-bottom:14px;">
+          ⚠️ يوجد <b>${pending.length}</b> طلب تسوية بانتظار الموافقة
+        </div>`:""}
+        ${!filtered.length?`<div class="empty"><div class="empty-icon">💰</div><h3>لا توجد طلبات</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>التاجر</th><th>المبلغ</th><th>الحالة</th><th>المرجع</th><th>إجراءات</th></tr></thead>
+            <tbody>
+              ${filtered.map(s=>`<tr>
+                <td style="font-size:11px;color:var(--gray-400);">${fmtDate(s.created_at)}</td>
+                <td class="td-primary">${esc(AppState.allMerchants.find(m=>m.id===s.merchant_id)?.full_name||"—")}</td>
+                <td style="font-weight:700;font-size:15px;">${money(s.amount)}</td>
+                <td><span class="badge ${SETT[s.status]?.badge||"badge-gray"}">${SETT[s.status]?.label||s.status}</span></td>
+                <td class="td-mono" style="font-size:11px;">${esc(s.payment_ref||"—")}</td>
+                <td>
+                  ${s.status==="pending"?`
+                    <div style="display:flex;gap:6px;">
+                      <button class="btn btn-primary btn-sm" onclick="App.approveSettlement('${esc(s.id)}','${esc(s.merchant_id)}')">✅ موافقة</button>
+                      <button class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="App.rejectSettlement('${esc(s.id)}','${esc(s.merchant_id)}')">رفض</button>
+                    </div>`
+                  :s.status==="approved"?`<button class="btn btn-primary btn-sm" onclick="App.markSettlementPaid('${esc(s.id)}','${esc(s.merchant_id)}')">💰 صرف</button>`
+                  :"—"}
+                </td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}`;
+    }
+
+    if (tab === "invoices") {
+      const data = await DB.loadInvoices(null);
+      const el   = $("invoiceContent"); if (!el) return;
+      const INV = {draft:{label:"مسودة",badge:"badge-gray"},sent:{label:"مرسلة",badge:"badge-info"},
+                   paid:{label:"مدفوعة",badge:"badge-success"},cancelled:{label:"ملغية",badge:"badge-danger"}};
+      el.innerHTML = !data.length
+        ? `<div class="empty"><div class="empty-icon">📄</div><h3>لا توجد فواتير</h3></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr><th>رقم الفاتورة</th><th>التاجر</th><th>الفترة</th><th>الشحنات</th><th>المبلغ الصافي</th><th>الحالة</th><th>إجراءات</th></tr></thead>
+            <tbody>
+              ${data.map(inv=>`<tr>
+                <td class="td-mono">${esc(inv.invoice_number)}</td>
+                <td class="td-primary">${esc(AppState.allMerchants.find(m=>m.id===inv.merchant_id)?.full_name||"—")}</td>
+                <td style="font-size:12px;">${fmtDate(inv.period_start)} → ${fmtDate(inv.period_end)}</td>
+                <td>${inv.shipment_count}</td>
+                <td style="font-weight:700;">${money(inv.net_payable)}</td>
+                <td><span class="badge ${INV[inv.status]?.badge||"badge-gray"}">${INV[inv.status]?.label||inv.status}</span></td>
+                <td>
+                  <button class="btn btn-secondary btn-sm" onclick="App.exportInvoiceExcel('${esc(inv.id)}')">📊</button>
+                  ${inv.status==="draft"?`<button class="btn btn-primary btn-sm" onclick="App.markInvoicePaid('${esc(inv.id)}')">💰 مدفوعة</button>`:""}
+                </td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`;
+    }
+
+    if (tab === "expenses") {
+      const cat  = AppState.expenseCategory||"";
+      const data = await DB.loadExpenses(cat||null);
+      const el   = $("expenseContent"); if (!el) return;
+      const total = data.reduce((a,e)=>a+(e.amount||0),0);
+      const CAT   = {driver:"مندوب",branch:"فرع",office:"مكتب",fuel:"وقود",maintenance:"صيانة",other:"أخرى"};
+      el.innerHTML = `
+        <div style="background:var(--danger-bg);border:1px solid var(--danger-border);border-radius:var(--radius);padding:12px 16px;margin-bottom:14px;display:flex;justify-content:space-between;">
+          <span style="font-size:13px;font-weight:600;color:var(--danger);">إجمالي المصروفات${cat?" ("+CAT[cat]+")":""}</span>
+          <span style="font-size:18px;font-weight:800;color:var(--danger);">${money(total)}</span>
+        </div>
+        ${!data.length?`<div class="empty"><div class="empty-icon">💸</div><h3>لا توجد مصروفات</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>الفئة</th><th>المبلغ</th><th>الوصف</th><th>المرجع</th></tr></thead>
+            <tbody>
+              ${data.map(e=>`<tr>
+                <td style="font-size:12px;">${fmtDate(e.expense_date)}</td>
+                <td><span class="badge badge-gray" style="font-size:11px;">${CAT[e.category]||e.category}</span></td>
+                <td style="font-weight:700;color:var(--danger);">${money(e.amount)}</td>
+                <td style="font-size:12px;">${esc(e.description)}</td>
+                <td style="font-size:12px;color:var(--gray-500);">${esc(e.reference_name||"—")}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}`;
+    }
+  },
+
+  setSettleFilter(f) {
+    AppState.settleFilter = f;
+    App._loadFinanceTabData("settlements");
+  },
+
+  setExpenseCategory(c) {
+    AppState.expenseCategory = c;
+    App._loadFinanceTabData("expenses");
+  },
+
+  // ── Driver wallet ─────────────────────────────────────────
+  async viewDriverWallet(driverId, driverName) {
+    const [txns, bal] = await Promise.all([
+      DB.loadDriverTransactions(driverId),
+      DB.loadDriverBalance(driverId),
+    ]);
+    const TYPE_LABELS = {
+      delivery_fee:"رسوم تسليم", cod_collected:"تحصيل COD",
+      cod_submitted:"تسليم COD", bonus:"مكافأة",
+      deduction:"خصم",          advance:"سلفة",
+      settlement:"تسوية",
+    };
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header">
+        <h3>${icon("wallet",18)} محفظة: ${esc(driverName)}</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div style="background:linear-gradient(135deg,var(--brand-dark),var(--brand));border-radius:var(--radius-lg);
+          padding:20px;color:#fff;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;">
+          <div>
+            <div style="font-size:12px;opacity:.75;margin-bottom:4px;">الرصيد الحالي</div>
+            <div style="font-size:28px;font-weight:800;">${money(bal)}</div>
+          </div>
+          <button class="btn btn-secondary btn-sm"
+            style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.3);"
+            onclick="App.addDriverWalletEntry('${esc(driverId)}','${esc(driverName)}')">
+            + إضافة حركة
+          </button>
+        </div>
+        ${!txns.length?`<div class="empty"><div class="empty-icon">📋</div><h3>لا توجد حركات</h3></div>`
+          :`<div class="table-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>النوع</th><th>الشحنة</th><th>المبلغ</th><th>الرصيد</th></tr></thead>
+            <tbody>
+              ${txns.map(t=>`<tr>
+                <td style="font-size:11px;color:var(--gray-400);">${fmtTime(t.created_at)}</td>
+                <td><span class="badge ${t.amount>0?"badge-success":"badge-danger"}">${TYPE_LABELS[t.type]||t.type}</span></td>
+                <td class="td-mono" style="font-size:11px;">${t.shipment_code||"—"}</td>
+                <td style="font-weight:700;color:${t.amount>0?"var(--success)":"var(--danger)"};">${t.amount>0?"+":""}${money(t.amount)}</td>
+                <td style="font-weight:600;">${money(t.balance_after)}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إغلاق</button>
+      </div>
+    </div>`);
+  },
+
+  async addDriverWalletEntry(driverId, driverName) {
+    const TYPE_LABELS={delivery_fee:"رسوم تسليم",cod_collected:"تحصيل COD",
+      cod_submitted:"تسليم COD",bonus:"مكافأة",deduction:"خصم",settlement:"تسوية"};
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>+ حركة محفظة: ${esc(driverName)}</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>النوع *</label>
+          <select id="dtType">
+            ${Object.entries(TYPE_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}
+          </select></div>
+        <div class="form-row">
+          <div class="field"><label>المبلغ * (موجب/سالب)</label><input id="dtAmount" type="number" step="0.01"/></div>
+          <div class="field"><label>كود الشحنة (اختياري)</label><input id="dtCode"/></div>
+        </div>
+        <div class="field"><label>الوصف</label><input id="dtDesc"/></div>
+        <div id="dtErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveDtBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveDtBtn")?.addEventListener("click", async()=>{
+      const type=$("dtType")?.value,amount=Number($("dtAmount")?.value);
+      const errEl=$("dtErr");errEl.style.display="none";
+      if(!amount){errEl.style.display="block";errEl.textContent="المبلغ مطلوب";return;}
+      const btn=$("saveDtBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const bal=await DB.loadDriverBalance(driverId);
+        const{error}=await db.from("driver_transactions").insert([{
+          driver_id:driverId,type,amount,
+          balance_after:bal+amount,
+          description:$("dtDesc")?.value.trim()||null,
+          shipment_code:$("dtCode")?.value.trim()||null,
+          created_by:AppState.user.id,
+        }]);
+        if(error)throw error;
+        await DB.addAudit("DRIVER_WALLET_ENTRY",driverId,
+          `Type:${type} Amount:${amount} By:${AppState.user.name}`,"shipment");
+        Modals.close();
+        toast(`✅ تم إضافة ${amount>0?"+":""}${money(amount)} لمحفظة ${driverName}`);
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async addDriverTransaction() {
+    const couriers=AppState.users.filter(u=>(u.role||u.primary_role)==="courier");
+    if(!couriers.length){toast("لا يوجد مناديب","warning");return;}
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>+ حركة مندوب</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>المندوب *</label>
+          <select id="dtDriver">
+            ${couriers.map(c=>`<option value="${esc(c.id)}" data-name="${esc(c.name)}">${esc(c.name)}</option>`).join("")}
+          </select></div>
+        <div class="field"><label>النوع</label>
+          <select id="dtType2">
+            <option value="delivery_fee">رسوم تسليم</option>
+            <option value="bonus">مكافأة</option>
+            <option value="deduction">خصم</option>
+            <option value="settlement">تسوية</option>
+          </select></div>
+        <div class="form-row">
+          <div class="field"><label>المبلغ *</label><input id="dtAmount2" type="number" step="0.01"/></div>
+          <div class="field"><label>الوصف</label><input id="dtDesc2"/></div>
+        </div>
+        <div id="dtErr2" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveDt2Btn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveDt2Btn")?.addEventListener("click", async()=>{
+      const sel=$("dtDriver"),driverId=sel?.value,driverName=sel?.options[sel.selectedIndex]?.dataset.name||"";
+      const type=$("dtType2")?.value,amount=Number($("dtAmount2")?.value);
+      const errEl=$("dtErr2");errEl.style.display="none";
+      if(!driverId||!amount){errEl.style.display="block";errEl.textContent="جميع الحقول مطلوبة";return;}
+      const btn=$("saveDt2Btn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const bal=await DB.loadDriverBalance(driverId);
+        const{error}=await db.from("driver_transactions").insert([{
+          driver_id:driverId,type,amount,balance_after:bal+amount,
+          description:$("dtDesc2")?.value.trim()||null,created_by:AppState.user.id,
+        }]);
+        if(error)throw error;
+        Modals.close();toast(`✅ تم تسجيل الحركة لـ ${driverName}`);
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  // ── COD Reconciliation ────────────────────────────────────
+  async newCodReconciliation() {
+    const couriers=AppState.users.filter(u=>(u.role||u.primary_role)==="courier");
+    const today=new Date().toISOString().split("T")[0];
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>📋 مطابقة COD</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field"><label>المندوب *</label>
+            <select id="crDriver">
+              ${couriers.map(c=>`<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("")}
+            </select></div>
+          <div class="field"><label>التاريخ</label><input id="crDate" type="date" value="${today}"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>إجمالي المحصل</label><input id="crCollected" type="number" step="0.01" min="0"/></div>
+          <div class="field"><label>إجمالي المسلم للشركة</label><input id="crSubmitted" type="number" step="0.01" min="0"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>عدد الشحنات</label><input id="crCount" type="number" min="0"/></div>
+          <div class="field"><label>ملاحظات</label><input id="crNotes"/></div>
+        </div>
+        <div id="crErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveCrBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveCrBtn")?.addEventListener("click", async()=>{
+      const driverId=$("crDriver")?.value,date=$("crDate")?.value;
+      const collected=Number($("crCollected")?.value)||0;
+      const submitted=Number($("crSubmitted")?.value)||0;
+      const errEl=$("crErr");errEl.style.display="none";
+      if(!driverId||!date){errEl.style.display="block";errEl.textContent="المندوب والتاريخ مطلوبان";return;}
+      const btn=$("saveCrBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const{error}=await db.from("cod_reconciliation").upsert([{
+          driver_id:driverId,reconcile_date:date,
+          cod_collected:collected,cod_submitted:submitted,
+          shipment_count:Number($("crCount")?.value)||0,
+          notes:$("crNotes")?.value.trim()||null,
+          status:collected===submitted?"submitted":"pending",
+        }],{onConflict:"driver_id,reconcile_date"});
+        if(error)throw error;
+        Modals.close();App._loadFinanceTabData("cod");
+        toast("✅ تم حفظ المطابقة");
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async verifyCodRecon(id) {
+    const{error}=await db.from("cod_reconciliation").update({
+      status:"verified",verified_by:AppState.user.id,verified_at:new Date().toISOString()
+    }).eq("id",id);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    App._loadFinanceTabData("cod");toast("✅ تم التحقق من المطابقة");
+  },
+
+  async flagCodRecon(id) {
+    const{error}=await db.from("cod_reconciliation").update({status:"flagged"}).eq("id",id);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    App._loadFinanceTabData("cod");toast("تم وضع إشارة على السجل","warning");
+  },
+
+  // ── Expenses ──────────────────────────────────────────────
+  async addExpense() {
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>💸 إضافة مصروف</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field"><label>الفئة *</label>
+            <select id="expCat">
+              <option value="driver">مندوب</option><option value="branch">فرع</option>
+              <option value="office">مكتب</option><option value="fuel">وقود</option>
+              <option value="maintenance">صيانة</option><option value="other">أخرى</option>
+            </select></div>
+          <div class="field"><label>المبلغ *</label><input id="expAmount" type="number" step="0.01" min="0"/></div>
+        </div>
+        <div class="field"><label>الوصف *</label><input id="expDesc"/></div>
+        <div class="form-row">
+          <div class="field"><label>المرجع (اسم المندوب/الفرع)</label><input id="expRef"/></div>
+          <div class="field"><label>التاريخ</label><input id="expDate" type="date" value="${new Date().toISOString().split("T")[0]}"/></div>
+        </div>
+        <div id="expErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveExpBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveExpBtn")?.addEventListener("click", async()=>{
+      const cat=$("expCat")?.value,amount=Number($("expAmount")?.value);
+      const desc=$("expDesc")?.value.trim(),date=$("expDate")?.value;
+      const errEl=$("expErr");errEl.style.display="none";
+      if(!cat||!amount||!desc){errEl.style.display="block";errEl.textContent="الفئة والمبلغ والوصف مطلوبة";return;}
+      const btn=$("saveExpBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const{error}=await db.from("expenses").insert([{
+          category:cat,amount,description:desc,
+          reference_name:$("expRef")?.value.trim()||null,
+          expense_date:date,created_by:AppState.user.id,
+        }]);
+        if(error)throw error;
+        await DB.addAudit("ADD_EXPENSE","",`${cat}: ${money(amount)} - ${desc} by ${AppState.user.name}`,"shipment");
+        Modals.close();App._loadFinanceTabData("expenses");
+        toast(`✅ تم تسجيل مصروف ${money(amount)}`);
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  // ── Invoices ──────────────────────────────────────────────
+  async generateInvoice() {
+    await DB.loadAllMerchants().then(m=>AppState.allMerchants=m);
+    const merchants=AppState.allMerchants;
+    const today=new Date().toISOString().split("T")[0];
+    const firstOfMonth=new Date(); firstOfMonth.setDate(1);
+    const startDef=firstOfMonth.toISOString().split("T")[0];
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>📄 إنشاء فاتورة</h3><button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>التاجر *</label>
+          <select id="invMerch">
+            <option value="">اختر التاجر</option>
+            ${merchants.map(m=>`<option value="${esc(m.id)}">${esc(m.full_name)}</option>`).join("")}
+          </select></div>
+        <div class="form-row">
+          <div class="field"><label>من تاريخ *</label><input id="invStart" type="date" value="${startDef}"/></div>
+          <div class="field"><label>إلى تاريخ *</label><input id="invEnd" type="date" value="${today}"/></div>
+        </div>
+        <div class="field"><label>ملاحظات</label><textarea id="invNotes" rows="2" style="resize:vertical;"></textarea></div>
+        <div id="invErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveInvBtn">إنشاء الفاتورة</button>
+      </div>
+    </div>`);
+    $("saveInvBtn")?.addEventListener("click", async()=>{
+      const merchantId=$("invMerch")?.value;
+      const start=$("invStart")?.value,end=$("invEnd")?.value;
+      const errEl=$("invErr");errEl.style.display="none";
+      if(!merchantId||!start||!end){errEl.style.display="block";errEl.textContent="جميع الحقول مطلوبة";return;}
+      const btn=$("saveInvBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        // Calculate from shipments
+        const mShips=AppState.shipments.filter(s=>s.merchantId===merchantId&&
+          s.createdAt&&s.createdAt.split("T")[0]>=start&&s.createdAt.split("T")[0]<=end);
+        const delivered=mShips.filter(s=>s.status==="delivered");
+        const returned=mShips.filter(s=>s.status==="returned");
+        const codTotal=delivered.reduce((a,s)=>a+(s.amount||0),0);
+        const feesTotal=delivered.reduce((a,s)=>a+(s.deliveryFee||0),0);
+        const retFees=returned.reduce((a,s)=>a+(s.returnFee||0),0);
+        const netPayable=codTotal-feesTotal-retFees;
+        // Get next invoice number via RPC
+        const{data:invNum}=await db.rpc("next_invoice_number");
+        const{error}=await db.from("invoices").insert([{
+          invoice_number:invNum||("INV-"+Date.now()),
+          merchant_id:merchantId,
+          period_start:start,period_end:end,
+          shipment_count:mShips.length,
+          delivered_count:delivered.length,
+          returned_count:returned.length,
+          cod_total:codTotal,
+          fees_total:feesTotal,
+          return_fees:retFees,
+          net_payable:netPayable,
+          status:"draft",
+          notes:$("invNotes")?.value.trim()||null,
+          created_by:AppState.user.id,
+        }]);
+        if(error)throw error;
+        await DB.addAudit("CREATE_INVOICE",merchantId,
+          `Invoice for ${merchants.find(m=>m.id===merchantId)?.full_name}, ${money(netPayable)} net`,"shipment");
+        Modals.close();App._loadFinanceTabData("invoices");
+        toast(`✅ تم إنشاء الفاتورة — صافي: ${money(netPayable)}`);
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="إنشاء";}
+    });
+  },
+
+  async markInvoicePaid(invoiceId){
+    const{error}=await db.from("invoices").update({status:"paid",paid_at:new Date().toISOString()}).eq("id",invoiceId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    App._loadFinanceTabData("invoices");toast("✅ تم تسجيل الفاتورة كمدفوعة");
+  },
+
   // ── Phase 2A: Settlement ──────────────────────────────────
+  // ── Admin: Merchant Management ───────────────────────────
+  filterMerchants(q) {
+    AppState.userFilter = q;
+    rerenderContent();
+    $("merchantSearchInput")?.focus();
+  },
+
+  async selectMerchant(id) {
+    AppState.selectedMerchantId = id;
+    AppState.adminMerchantTab   = "shipments";
+    AppState._adminMerchantData = {};
+    rerenderContent();
+    // Load all merchant data in parallel
+    const [addresses, recipients, products, pickupRequests, ledger, settlements] = await Promise.all([
+      DB.loadAdminMerchantAddresses(id),
+      DB.loadAdminMerchantRecipients(id),
+      DB.loadAdminMerchantProducts(id),
+      DB.loadAdminPickupRequests(id),
+      DB.loadAdminLedger(id),
+      DB.loadAdminSettlements(id),
+    ]);
+    AppState._adminMerchantData = { addresses, recipients, products, pickupRequests, ledger, settlements };
+    rerenderContent();
+  },
+
+  setAdminMerchantTab(tab) {
+    AppState.adminMerchantTab = tab;
+    rerenderContent();
+  },
+
+  exportMerchantShipments(merchantId) {
+    const list = AppState.shipments.filter(s=>s.merchantId===merchantId);
+    const m    = AppState.allMerchants.find(x=>x.id===merchantId);
+    const data = list.map(s=>({
+      "الكود":s.id, "العميل":s.customerName, "الهاتف":s.customerPhone,
+      "المحافظة":s.governorate, "الحالة":STATUS_MAP[s.status]?.label||s.status,
+      "المبلغ":s.amount, "رسوم الشحن":s.deliveryFee, "رسوم الإرجاع":s.returnFee||0,
+      "المندوب":s.courierName||"", "تاريخ الإنشاء":fmtDate(s.createdAt),
+    }));
+    const ws=XLSX.utils.json_to_sheet(data);
+    const wb=XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb,ws,"Shipments");
+    XLSX.writeFile(wb,`merchant_${(m?.full_name||merchantId).replace(/s/g,"_")}.xlsx`);
+    DB.addAudit("EXPORT_MERCHANT_SHIPMENTS",merchantId,
+      `Admin ${AppState.user.name} exported shipments for ${m?.full_name}`,"export");
+  },
+
+  // Admin address management
+  async adminDeleteAddress(addressId, merchantId) {
+    if (!confirm("حذف هذا العنوان؟")) return;
+    const{error}=await db.from("merchant_addresses").update({is_active:false}).eq("id",addressId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("DELETE_MERCHANT_ADDRESS",addressId,
+      `By admin ${AppState.user.name}`,"shipment");
+    await App.selectMerchant(merchantId);
+    toast("تم حذف العنوان","info");
+  },
+
+  // Admin recipient management
+  async adminDeleteRecipient(recipientId, merchantId) {
+    if (!confirm("حذف هذا العميل؟")) return;
+    const{error}=await db.from("merchant_recipients").update({is_deleted:true}).eq("id",recipientId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("DELETE_MERCHANT_RECIPIENT",recipientId,
+      `By admin ${AppState.user.name}`,"shipment");
+    await App.selectMerchant(merchantId);
+    toast("تم الحذف","info");
+  },
+
+  // Admin product management
+  async adminDeleteProduct(productId, merchantId) {
+    if (!confirm("حذف هذا المنتج؟")) return;
+    const{error}=await db.from("merchant_products").update({is_deleted:true}).eq("id",productId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("DELETE_MERCHANT_PRODUCT",productId,
+      `By admin ${AppState.user.name}`,"shipment");
+    await App.selectMerchant(merchantId);
+    toast("تم الحذف","info");
+  },
+
+  // Admin pickup request management
+  async adminAssignPickup(requestId, merchantId) {
+    const sel = $(`#courier_${requestId}`);
+    const courierId   = sel?.value;
+    const courierName = sel?.options[sel.selectedIndex]?.dataset.name||"";
+    if (!courierId) { toast("اختر مندوباً","warning"); return; }
+    const{error}=await db.from("pickup_requests").update({
+      courier_id:courierId, courier_name:courierName, status:"assigned"
+    }).eq("id",requestId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("ASSIGN_PICKUP_REQUEST",requestId,
+      `Assigned ${courierName} by admin ${AppState.user.name}`,"shipment");
+    await App.selectMerchant(merchantId);
+    toast(`✅ تم تعيين ${courierName}`);
+  },
+
+  async adminMarkPickedUp(requestId, merchantId) {
+    const{error}=await db.from("pickup_requests").update({
+      status:"picked_up", picked_up_at:new Date().toISOString()
+    }).eq("id",requestId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("PICKUP_COMPLETED",requestId,
+      `By admin ${AppState.user.name}`,"shipment");
+    await App.selectMerchant(merchantId);
+    toast("✅ تم تأكيد الاستلام");
+  },
+
+  async adminCancelPickup(requestId, merchantId) {
+    if (!confirm("إلغاء طلب الاستلام؟")) return;
+    const{error}=await db.from("pickup_requests").update({status:"cancelled"}).eq("id",requestId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await App.selectMerchant(merchantId);
+    toast("تم الإلغاء","info");
+  },
+
+  // Admin ledger management
+  async adminAddLedgerEntry(merchantId) {
+    const TYPE_LABELS={cod_collected:"تحصيل COD",delivery_fee:"رسوم شحن",
+      return_fee:"رسوم إرجاع",settlement:"تسوية",adjustment:"تعديل",refund:"استرداد"};
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>${icon("wallet",18)} إضافة حركة للحساب</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>النوع *</label>
+          <select id="lType">
+            ${Object.entries(TYPE_LABELS).map(([k,v])=>`<option value="${k}">${v}</option>`).join("")}
+          </select></div>
+        <div class="form-row">
+          <div class="field"><label>المبلغ * (موجب = إضافة، سالب = خصم)</label>
+            <input id="lAmount" type="number" step="0.01" placeholder="0.00"/></div>
+          <div class="field"><label>كود الشحنة (اختياري)</label>
+            <input id="lShipCode" placeholder="ANE-123"/></div>
+        </div>
+        <div class="field"><label>الوصف</label><input id="lDesc"/></div>
+        <div id="lErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveLedgerBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveLedgerBtn")?.addEventListener("click", async()=>{
+      const type=$("lType")?.value;
+      const amount=Number($("lAmount")?.value);
+      const errEl=$("lErr");errEl.style.display="none";
+      if(!amount){errEl.style.display="block";errEl.textContent="المبلغ مطلوب";return;}
+      const btn=$("saveLedgerBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try {
+        // Get current balance
+        const currentBal = await DB.loadMerchantBalance(merchantId);
+        const newBal     = currentBal + amount;
+        const{error}=await db.from("merchant_ledger").insert([{
+          merchant_id:   merchantId,
+          type,
+          amount,
+          balance_after: newBal,
+          description:   $("lDesc")?.value.trim()||null,
+          shipment_code: $("lShipCode")?.value.trim()||null,
+          created_by:    AppState.user.id,
+        }]);
+        if(error)throw error;
+        await DB.addAudit("ADMIN_LEDGER_ENTRY",merchantId,
+          `Type: ${type}, Amount: ${amount}, By: ${AppState.user.name}`,"shipment");
+        Modals.close();
+        await App.selectMerchant(merchantId);
+        toast(`✅ تم إضافة حركة ${amount>0?"+":""}${money(amount)}`);
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  // Admin settlement management
+  async approveSettlement(settlementId, merchantId) {
+    const{error}=await db.from("settlements").update({
+      status:"approved", processed_by:AppState.user.id,
+      processed_at:new Date().toISOString()
+    }).eq("id",settlementId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("APPROVE_SETTLEMENT",settlementId,
+      `Approved by ${AppState.user.name}`,"shipment");
+    await App.selectMerchant(merchantId);
+    toast("✅ تمت الموافقة على طلب التسوية");
+  },
+
+  async rejectSettlement(settlementId, merchantId) {
+    const reason = prompt("سبب الرفض:");
+    if (!reason) return;
+    const{error}=await db.from("settlements").update({
+      status:"rejected", rejection_reason:reason,
+      processed_by:AppState.user.id, processed_at:new Date().toISOString()
+    }).eq("id",settlementId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("REJECT_SETTLEMENT",settlementId,
+      `Rejected by ${AppState.user.name}: ${reason}`,"shipment");
+    await App.selectMerchant(merchantId);
+    toast("تم رفض طلب التسوية","warning");
+  },
+
+  async markSettlementPaid(settlementId, merchantId) {
+    const ref = prompt("رقم مرجع الدفع (اختياري):");
+    if (ref === null) return;
+    const{error}=await db.from("settlements").update({
+      status:"paid", payment_ref:ref||null,
+      processed_by:AppState.user.id, processed_at:new Date().toISOString()
+    }).eq("id",settlementId);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    // Record settlement in ledger
+    const sett = (AppState._adminMerchantData?.settlements||[]).find(s=>s.id===settlementId);
+    if (sett) {
+      const bal = await DB.loadMerchantBalance(merchantId);
+      await db.from("merchant_ledger").insert([{
+        merchant_id:merchantId, type:"settlement",
+        amount:-Math.abs(sett.amount), balance_after:bal-Math.abs(sett.amount),
+        description:`تسوية #${settlementId.slice(-6)}`, reference_id:settlementId,
+        created_by:AppState.user.id,
+      }]);
+    }
+    await DB.addAudit("MARK_SETTLEMENT_PAID",settlementId,
+      `Paid by ${AppState.user.name}, ref: ${ref||"N/A"}`,"shipment");
+    await App.selectMerchant(merchantId);
+    toast(`✅ تم صرف التسوية${ref?" - مرجع: "+ref:""}`);
+  },
+
   async requestSettlement() {
     const bal = AppState.merchantBalance;
     if (bal <= 0) { toast("لا يوجد رصيد متاح للتسوية","warning"); return; }
