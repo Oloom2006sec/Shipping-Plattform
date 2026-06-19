@@ -50,7 +50,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","reports","users","merchants","audit","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","branches","reports","users","merchants","audit","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["track","accounts"] }
@@ -60,7 +60,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -207,6 +207,11 @@ const AppState = {
   // Phase 2C pricing
   pricingZones:[], pricingRules:[], pricingTab:"rules",
   lastFeeCalc:null,
+  // Phase 2D branches & warehouses
+  branches:[], warehouses:[], branchTab:"branches",
+  selectedBranchId:"",
+  // Phase 3: driver self-service wallet
+  myWalletBalance:0, myWalletTxns:[],
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -438,6 +443,42 @@ const DB = {
     return data || [];
   },
 
+  // ── Phase 3: OTP delivery verification ───────────────────
+  // SMS abstraction layer — swap the body of this ONE function
+  // to wire in Twilio/Vonage/local gateway. Currently logs to
+  // console + stores in DB so admin can see codes for testing.
+  async sendSMS(phone, message) {
+    console.log(`[SMS to ${phone}]: ${message}`);
+    // TODO: replace with real provider call, e.g.:
+    // await fetch('https://api.twilio.com/...', {...})
+    return { success: true, provider: "console-log-stub" };
+  },
+
+  async generateAndSendOTP(shipmentCode, customerPhone) {
+    const otp = String(Math.floor(100000 + Math.random()*900000)); // 6-digit
+    const { error } = await db.from("shipments")
+      .update({ otp_code: otp, otp_verified: false })
+      .eq("shipment_code", shipmentCode);
+    if (error) { console.warn("generateAndSendOTP:", error.message); return null; }
+    await DB.sendSMS(customerPhone,
+      `النخبة للشحن السريع: كود التحقق لتسليم شحنتك ${shipmentCode} هو ${otp}`);
+    return otp;
+  },
+
+  async verifyOTP(shipmentCode, enteredCode) {
+    const { data, error } = await db.from("shipments")
+      .select("otp_code").eq("shipment_code", shipmentCode).single();
+    if (error) { console.warn("verifyOTP:", error.message); return false; }
+    const isValid = data?.otp_code && data.otp_code === enteredCode.trim();
+    if (isValid) {
+      await db.from("shipments").update({
+        otp_verified: true,
+        otp_verified_at: new Date().toISOString(),
+      }).eq("shipment_code", shipmentCode);
+    }
+    return isValid;
+  },
+
   async loadDriverBalance(driverId) {
     const { data, error } = await db.rpc("get_driver_balance",{p_driver_id:driverId});
     if (error) { console.warn("loadDriverBalance:", error.message); return 0; }
@@ -507,6 +548,38 @@ const DB = {
     });
     if (error) { console.warn("calculateFee:", error.message); return null; }
     return (data && data.length > 0) ? data[0] : null;
+  },
+
+  // ── Phase 2D: Branches & Warehouses ──────────────────────
+  async loadBranches() {
+    const { data, error } = await db.from("branches")
+      .select("*").eq("is_deleted",false).order("name");
+    if (error) { console.warn("loadBranches:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadWarehouses() {
+    const { data, error } = await db.from("warehouses")
+      .select("*").eq("is_deleted",false).order("name");
+    if (error) { console.warn("loadWarehouses:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadBranchLog(shipmentCode) {
+    const { data, error } = await db.from("shipment_branch_log")
+      .select("*").eq("shipment_code",shipmentCode)
+      .order("created_at",{ascending:true});
+    if (error) { console.warn("loadBranchLog:", error.message); return []; }
+    return data || [];
+  },
+
+  async getBranchMetrics(branchId, start, end) {
+    const { data, error } = await db.rpc("get_branch_metrics",
+      { p_branch_id:branchId, p_start:start, p_end:end });
+    if (error) { console.warn("getBranchMetrics:", error.message); return {}; }
+    const result = {};
+    (data||[]).forEach(r => { result[r.metric] = Number(r.value)||0; });
+    return result;
   },
 
   async loadAllMerchants() {
@@ -992,8 +1065,12 @@ async function handleLogin(e) {
     if (role === "admin") {
       startRealtime();
       DB.loadAllMerchants().then(m => { AppState.allMerchants = m; });
+      Promise.all([DB.loadBranches(), DB.loadWarehouses()]).then(([b,w])=>{
+        AppState.branches = b; AppState.warehouses = w;
+      });
     }
     if (role === "merchant") await App.loadMerchantData();
+    if (role === "courier")  await App.loadMyWallet();
 
     // Step 9: audit (fire-and-forget, do not await — avoid delaying render)
     DB.addAudit("LOGIN", data.user.id, `role:${role} perms:${AppPerms.size}`, "auth");
@@ -1156,6 +1233,7 @@ function renderView() {
     case"merchants":  return viewAdminMerchants();
     case"finance":    return viewFinance();
     case"pricing":    return viewPricing();
+    case"branches":   return viewBranches();
     case"audit":      return viewAudit();
     // Phase 2A
     case"addresses":  return viewAddresses();
@@ -1244,6 +1322,9 @@ function postRender() {
   }
   if(AppState.view==="pricing" && !AppState.pricingZones.length){
     App.loadPricingData();
+  }
+  if(AppState.view==="branches" && !AppState.branches.length){
+    App.loadBranchData();
   }
 }
 
@@ -1597,21 +1678,26 @@ function viewTrack() {
 
 // ── ACCOUNTS VIEW ─────────────────────────────────────────
 function viewAccounts() {
-  if((AppState.user.primary_role||AppState.user.role)==="customer") return `<div class="empty">
+  const role = AppState.user.primary_role||AppState.user.role;
+
+  if (role === "customer") return `<div class="empty">
     <div class="empty-icon">📦</div><h3>تتبع شحنتك</h3>
     <p>أدخل رقم الشحنة لمعرفة حالتها</p>
     <button class="btn btn-primary" onclick="App.manualTrack()">🔍 تتبع شحنة</button>
   </div>`;
+
+  // Courier: real wallet view from driver_transactions
+  if (role === "courier") return viewMyWallet();
+
+  // Merchant / Admin: existing COD account view
   const list=visible();
   const del=list.filter(s=>s.status==="delivered");
   const ret=list.filter(s=>s.status==="returned");
   const rev=del.reduce((a,s)=>a+(s.amount||0),0);
   const fee=del.reduce((a,s)=>a+(s.deliveryFee||0),0);
   const retFee=ret.reduce((a,s)=>a+(s.returnFee||0),0);
-  const role=AppState.user.primary_role||AppState.user.role;
   const isMerchant=role==="merchant";
-  const isCourier=role==="courier";
-  const bal=isMerchant?AppState.merchantBalance:(isCourier?del.length*25:(rev-fee-retFee));
+  const bal=isMerchant?AppState.merchantBalance:(rev-fee-retFee);
   return `
     <div class="acct-header">
       <div>
@@ -1641,6 +1727,61 @@ function viewAccounts() {
     <div class="card">
       <h3 class="card-title" style="margin-bottom:14px;">${icon("chart")} كشف الحساب — الشحنات المسلمة</h3>
       ${shipTable(del)}
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
+// PHASE 3: DRIVER SELF-SERVICE WALLET VIEW
+// ══════════════════════════════════════════════════════════════
+function viewMyWallet() {
+  const bal  = AppState.myWalletBalance;
+  const txns = AppState.myWalletTxns;
+  const TYPE_LABELS = {
+    delivery_fee:"رسوم تسليم", cod_collected:"تحصيل COD",
+    cod_submitted:"تسليم COD", bonus:"مكافأة",
+    deduction:"خصم",          advance:"سلفة",
+    settlement:"تسوية",
+  };
+
+  const todayStr = new Date().toDateString();
+  const todayTxns = txns.filter(t=>new Date(t.created_at).toDateString()===todayStr);
+  const todayEarned = todayTxns.filter(t=>t.amount>0).reduce((a,t)=>a+t.amount,0);
+  const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate()-7);
+  const weekTxns = txns.filter(t=>new Date(t.created_at)>=weekAgo);
+  const weekEarned = weekTxns.filter(t=>t.amount>0).reduce((a,t)=>a+t.amount,0);
+
+  return `
+    <div class="acct-header">
+      <div>
+        <div class="ah-label">رصيد المحفظة</div>
+        <div class="ah-val">${money(bal)}</div>
+      </div>
+      <button class="btn btn-secondary btn-sm"
+        style="background:rgba(255,255,255,.15);color:#fff;border-color:rgba(255,255,255,.4);"
+        onclick="App.refreshMyWallet()">${icon("refresh",13)} تحديث</button>
+    </div>
+    <div class="kpi-grid" style="margin-bottom:20px;">
+      ${kpi("أرباح اليوم",money(todayEarned),"wallet","var(--success)","var(--success-bg)")}
+      ${kpi("أرباح الأسبوع",money(weekEarned),"chart","var(--brand)","var(--brand-light)")}
+      ${kpi("عدد الحركات",txns.length,"box","var(--info)","var(--info-bg)")}
+    </div>
+    <div class="card">
+      <h3 class="card-title" style="margin-bottom:14px;">${icon("log")} سجل المحفظة</h3>
+      ${!txns.length
+        ? `<div class="empty"><div class="empty-icon">💰</div><h3>لا توجد حركات بعد</h3>
+            <p>ستظهر هنا أرباحك من التسليمات وأي مكافآت أو خصومات</p></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr><th>التاريخ</th><th>النوع</th><th>الشحنة</th><th>المبلغ</th><th>الرصيد بعدها</th></tr></thead>
+            <tbody>
+              ${txns.map(t=>`<tr>
+                <td style="font-size:11px;color:var(--gray-400);white-space:nowrap;">${fmtTime(t.created_at)}</td>
+                <td><span class="badge ${t.amount>0?"badge-success":"badge-danger"}">${TYPE_LABELS[t.type]||t.type}</span></td>
+                <td class="td-mono" style="font-size:11px;">${t.shipment_code||"—"}</td>
+                <td style="font-weight:700;color:${t.amount>0?"var(--success)":"var(--danger)"};">${t.amount>0?"+":""}${money(t.amount)}</td>
+                <td style="font-weight:600;">${money(t.balance_after)}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
     </div>`;
 }
 
@@ -1877,6 +2018,21 @@ const Modals={
         <div id="fScheduledRow" class="form-row single" style="display:none;">
           <div class="field"><label>تاريخ التسليم المجدول</label><input id="fScheduledAt" type="datetime-local"/></div>
         </div>
+        ${AppState.branches.length?`
+        <div class="form-row">
+          <div class="field"><label>الفرع (اختياري)</label>
+            <select id="fBranch">
+              <option value="">-- بدون تحديد --</option>
+              ${AppState.branches.map(b=>`<option value="${esc(b.id)}" data-name="${esc(b.name)}">${esc(b.name)} (${esc(b.code)})</option>`).join("")}
+            </select>
+          </div>
+          <div class="field"><label>المستودع (اختياري)</label>
+            <select id="fWarehouse">
+              <option value="">-- بدون تحديد --</option>
+              ${AppState.warehouses.map(w=>`<option value="${esc(w.id)}" data-name="${esc(w.name)}">${esc(w.name)} (${esc(w.code)})</option>`).join("")}
+            </select>
+          </div>
+        </div>`:""}
         <div class="form-section-label">المواصفات الفيزيائية (اختياري)</div>
         <div class="form-row three">
           <div class="field"><label>الوزن (كجم)</label><input id="fWeight" type="number" step="0.1" min="0" placeholder="0.0"/></div>
@@ -2030,6 +2186,8 @@ const Modals={
           height:   height,
           depth:    depth,
           barcode:  barcode,
+          branch_id:    $("fBranch")?.value||null,
+          warehouse_id: $("fWarehouse")?.value||null,
           // Status — start as submitted
           status: "submitted",
           eta:    eta || null,
@@ -2110,6 +2268,112 @@ const Modals={
 // ══════════════════════════════════════════════════════════
 // APP GLOBAL FUNCTIONS
 // ══════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// PHASE 2D — BRANCH & WAREHOUSE MANAGEMENT VIEW
+// ══════════════════════════════════════════════════════════════
+
+function viewBranches() {
+  const tab        = AppState.branchTab || "branches";
+  const branches    = AppState.branches;
+  const warehouses  = AppState.warehouses;
+
+  const TABS = [
+    { id:"branches",   label:"الفروع",     icon:"map"   },
+    { id:"warehouses", label:"المستودعات", icon:"pkg"   },
+  ];
+
+  const tabBar = `
+    <div style="display:flex;gap:0;overflow-x:auto;border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+      ${TABS.map(t=>`
+        <button onclick="App.setBranchTab('${t.id}')"
+          style="padding:12px 18px;border:none;background:none;font-size:13px;font-weight:500;
+            white-space:nowrap;cursor:pointer;
+            border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+            color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">
+          ${t.label}
+        </button>`).join("")}
+    </div>`;
+
+  let content = "";
+
+  if (tab === "branches") {
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("map")} الفروع (${branches.length})</h3>
+          ${can("branches.create")?`<button class="btn btn-primary btn-sm" onclick="App.addBranch()">${icon("plus",13)} إضافة فرع</button>`:""}
+        </div>
+        ${!branches.length
+          ? `<div class="empty"><div class="empty-icon">🏢</div><h3>لا توجد فروع</h3>
+              <p>أضف فروعك لتنظيم عمليات التوصيل</p>
+              ${can("branches.create")?`<button class="btn btn-primary" onclick="App.addBranch()">إضافة فرع</button>`:""}
+            </div>`
+          : `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;">
+              ${branches.map(b=>`
+                <div class="card" style="border:1px solid var(--gray-200);padding:16px;">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px;">
+                    <div>
+                      <div style="font-size:15px;font-weight:700;">${esc(b.name)}</div>
+                      <div class="td-mono" style="font-size:11px;color:var(--gray-400);">${esc(b.code)}</div>
+                    </div>
+                    <span class="badge ${b.is_active?"badge-success":"badge-gray"}">${b.is_active?"نشط":"غير نشط"}</span>
+                  </div>
+                  <div style="font-size:13px;color:var(--gray-600);margin-bottom:10px;line-height:1.6;">
+                    📍 ${esc(b.governorate)} ${b.city?"/ "+esc(b.city):""}
+                    ${b.address?`<br/>${esc(b.address)}`:""}
+                    ${b.phone?`<br/>📞 ${esc(b.phone)}`:""}
+                  </div>
+                  <div style="font-size:12px;color:var(--gray-500);margin-bottom:12px;">
+                    ${b.manager_name?`👤 المدير: ${esc(b.manager_name)}`:`<span style="color:var(--gray-400);">لا يوجد مدير معين</span>`}
+                  </div>
+                  <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <button class="btn btn-secondary btn-sm" onclick="App.viewBranchMetrics('${esc(b.id)}','${esc(b.name)}')">📊 الأداء</button>
+                    ${can("branches.edit")?`<button class="btn btn-secondary btn-sm" onclick="App.editBranch('${esc(b.id)}')">${icon("edit",13)} تعديل</button>`:""}
+                    ${can("branches.delete")?`<button class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="App.deleteBranch('${esc(b.id)}')">حذف</button>`:""}
+                  </div>
+                </div>`).join("")}
+            </div>`}
+      </div>`;
+
+  } else if (tab === "warehouses") {
+    content = `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("pkg")} المستودعات (${warehouses.length})</h3>
+          ${can("warehouses.create")?`<button class="btn btn-primary btn-sm" onclick="App.addWarehouse()">${icon("plus",13)} إضافة مستودع</button>`:""}
+        </div>
+        ${!warehouses.length
+          ? `<div class="empty"><div class="empty-icon">🏭</div><h3>لا توجد مستودعات</h3>
+              ${can("warehouses.create")?`<button class="btn btn-primary" onclick="App.addWarehouse()">إضافة مستودع</button>`:""}
+            </div>`
+          : `<div class="table-wrap"><table>
+              <thead><tr><th>المستودع</th><th>الفرع</th><th>المنطقة</th><th>المدير</th><th>السعة</th><th>إجراءات</th></tr></thead>
+              <tbody>
+                ${warehouses.map(w=>`<tr>
+                  <td><div class="td-mono" style="font-size:11px;color:var(--gray-400);">${esc(w.code)}</div><b>${esc(w.name)}</b></td>
+                  <td style="font-size:12px;">${w.branch_name?esc(w.branch_name):`<span style="color:var(--gray-400);">غير مرتبط</span>`}</td>
+                  <td style="font-size:12px;">${esc(w.governorate)} ${w.city?"/"+esc(w.city):""}</td>
+                  <td style="font-size:12px;">${w.manager_name?esc(w.manager_name):"—"}</td>
+                  <td>
+                    ${w.capacity
+                      ? `<span class="badge ${(w.current_load/w.capacity)>0.8?"badge-danger":"badge-brand"}">${w.current_load||0}/${w.capacity}</span>`
+                      : `<span style="color:var(--gray-400);font-size:12px;">غير محدد</span>`}
+                  </td>
+                  <td>
+                    <div class="td-actions">
+                      ${can("warehouses.edit")?`<button class="btn-icon" onclick="App.editWarehouse('${esc(w.id)}')">${icon("edit",13)}</button>`:""}
+                      ${can("warehouses.delete")?`<button class="btn-icon" style="color:var(--danger);" onclick="App.deleteWarehouse('${esc(w.id)}')">${icon("trash",13)}</button>`:""}
+                    </div>
+                  </td>
+                </tr>`).join("")}
+              </tbody>
+            </table></div>`}
+      </div>`;
+  }
+
+  return `<div>${tabBar}${content}</div>`;
+}
+
 // ══════════════════════════════════════════════════════════════
 // PHASE 2C — PRICING ENGINE VIEW
 // ══════════════════════════════════════════════════════════════
@@ -3009,6 +3273,268 @@ const App={
   setFilter(f)       { AppState.statusFilter  = f; rerenderContent(); },
 
   // ── Phase 2C: Pricing ─────────────────────────────────────
+  // ── Phase 2D: Branches & Warehouses ──────────────────────
+  // ── Phase 3: driver self-service wallet ──────────────────
+  async loadMyWallet() {
+    const uid = AppState.user.id;
+    const [bal, txns] = await Promise.all([
+      DB.loadDriverBalance(uid),
+      DB.loadDriverTransactions(uid),
+    ]);
+    AppState.myWalletBalance = bal;
+    AppState.myWalletTxns    = txns;
+  },
+
+  async refreshMyWallet() {
+    await App.loadMyWallet();
+    rerenderContent();
+    toast("✅ تم تحديث المحفظة");
+  },
+
+  setBranchTab(tab) {
+    AppState.branchTab = tab;
+    rerenderContent();
+  },
+
+  async loadBranchData() {
+    const [branches, warehouses] = await Promise.all([
+      DB.loadBranches(), DB.loadWarehouses()
+    ]);
+    AppState.branches   = branches;
+    AppState.warehouses = warehouses;
+    rerenderContent();
+  },
+
+  async addBranch() {
+    const govOpts=Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("");
+    const managers=AppState.users.filter(u=>(u.role||u.primary_role)==="branch_manager"||(u.role||u.primary_role)==="admin");
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header"><h3>${icon("map",18)} إضافة فرع</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field"><label>اسم الفرع *</label><input id="brName" placeholder="فرع المعادي"/></div>
+          <div class="field"><label>كود الفرع *</label><input id="brCode" placeholder="CAI-01" style="font-family:monospace;text-transform:uppercase;"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>المحافظة *</label><select id="brGov"><option value="">اختر</option>${govOpts}</select></div>
+          <div class="field"><label>المدينة</label><select id="brCity"><option value="">اختر</option></select></div>
+        </div>
+        <div class="field"><label>العنوان</label><input id="brAddress"/></div>
+        <div class="form-row">
+          <div class="field"><label>الهاتف</label><input id="brPhone" type="tel"/></div>
+          <div class="field"><label>السعة (شحنات نشطة)</label><input id="brCapacity" type="number" min="0"/></div>
+        </div>
+        <div class="field"><label>مدير الفرع (اختياري)</label>
+          <select id="brManager">
+            <option value="">-- بدون تحديد --</option>
+            ${managers.map(m=>`<option value="${esc(m.id)}" data-name="${esc(m.name)}">${esc(m.name)}</option>`).join("")}
+          </select>
+        </div>
+        <div id="brErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveBrBtn">حفظ الفرع</button>
+      </div>
+    </div>`);
+    $("brGov")?.addEventListener("change",e=>{
+      const cities=(EGYPT_GOV[e.target.value]||[]);
+      $("brCity").innerHTML=`<option value="">اختر</option>`+cities.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
+    });
+    $("saveBrBtn")?.addEventListener("click",async()=>{
+      const name=$("brName")?.value.trim(),code=$("brCode")?.value.trim().toUpperCase();
+      const gov=$("brGov")?.value;
+      const errEl=$("brErr");errEl.style.display="none";
+      if(!name||!code||!gov){errEl.style.display="block";errEl.textContent="الاسم والكود والمحافظة مطلوبة";return;}
+      const btn=$("saveBrBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const mgrSel=$("brManager");
+        const{error}=await db.from("branches").insert([{
+          name,code,governorate:gov,city:$("brCity")?.value||"",
+          address:$("brAddress")?.value.trim()||null,
+          phone:$("brPhone")?.value.trim()||null,
+          capacity:$("brCapacity")?.value?Number($("brCapacity").value):null,
+          manager_id:mgrSel?.value||null,
+          manager_name:mgrSel?.value?(mgrSel.options[mgrSel.selectedIndex]?.dataset.name||""):"",
+          created_by:AppState.user.id,
+        }]);
+        if(error)throw error;
+        await DB.addAudit("ADD_BRANCH","",`${name} (${code}) by ${AppState.user.name}`,"setting");
+        Modals.close();await App.loadBranchData();
+        toast(`✅ تم إضافة فرع ${name}`);
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+(err.message.includes("23505")?"كود الفرع موجود بالفعل":err.message);btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async editBranch(id){
+    const b=AppState.branches.find(x=>x.id===id);if(!b)return;
+    const managers=AppState.users.filter(u=>(u.role||u.primary_role)==="branch_manager"||(u.role||u.primary_role)==="admin");
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>✏️ تعديل: ${esc(b.name)}</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>اسم الفرع</label><input id="ebrName" value="${esc(b.name)}"/></div>
+        <div class="field"><label>الهاتف</label><input id="ebrPhone" value="${esc(b.phone||"")}"/></div>
+        <div class="field"><label>الحالة</label>
+          <select id="ebrActive">
+            <option value="true" ${b.is_active?"selected":""}>نشط</option>
+            <option value="false" ${!b.is_active?"selected":""}>غير نشط</option>
+          </select></div>
+        <div class="field"><label>مدير الفرع</label>
+          <select id="ebrManager">
+            <option value="">-- بدون تحديد --</option>
+            ${managers.map(m=>`<option value="${esc(m.id)}" data-name="${esc(m.name)}" ${b.manager_id===m.id?"selected":""}>${esc(m.name)}</option>`).join("")}
+          </select></div>
+        <div id="ebrErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveEbrBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveEbrBtn")?.addEventListener("click",async()=>{
+      const name=$("ebrName")?.value.trim();
+      const mgrSel=$("ebrManager");
+      const errEl=$("ebrErr");errEl.style.display="none";
+      if(!name){errEl.style.display="block";errEl.textContent="الاسم مطلوب";return;}
+      const btn=$("saveEbrBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      const{error}=await db.from("branches").update({
+        name,phone:$("ebrPhone")?.value.trim()||null,
+        is_active:$("ebrActive")?.value==="true",
+        manager_id:mgrSel?.value||null,
+        manager_name:mgrSel?.value?(mgrSel.options[mgrSel.selectedIndex]?.dataset.name||""):"",
+      }).eq("id",id);
+      if(error){errEl.style.display="block";errEl.textContent="خطأ: "+error.message;btn.disabled=false;btn.textContent="حفظ";return;}
+      Modals.close();await App.loadBranchData();toast(`✅ تم تحديث ${name}`);
+    });
+  },
+
+  async deleteBranch(id){
+    if(!confirm("حذف هذا الفرع؟"))return;
+    const{error}=await db.from("branches").update({
+      is_deleted:true,deleted_at:new Date().toISOString(),deleted_by:AppState.user.id
+    }).eq("id",id);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await DB.addAudit("DELETE_BRANCH",id,`By ${AppState.user.name}`,"setting");
+    await App.loadBranchData();toast("تم حذف الفرع","info");
+  },
+
+  async viewBranchMetrics(branchId, branchName){
+    const today=new Date().toISOString().split("T")[0];
+    const monthAgo=new Date();monthAgo.setDate(monthAgo.getDate()-30);
+    const startStr=monthAgo.toISOString().split("T")[0];
+    const m=await DB.getBranchMetrics(branchId,startStr,today);
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>📊 أداء: ${esc(branchName)}</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div style="font-size:12px;color:var(--gray-500);margin-bottom:14px;">آخر 30 يوم</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+          <div style="background:var(--info-bg);border-radius:var(--radius);padding:16px;text-align:center;">
+            <div style="font-size:24px;font-weight:800;color:var(--info);">${m.total_received||0}</div>
+            <div style="font-size:12px;color:var(--gray-500);margin-top:4px;">وارد</div>
+          </div>
+          <div style="background:var(--success-bg);border-radius:var(--radius);padding:16px;text-align:center;">
+            <div style="font-size:24px;font-weight:800;color:var(--success);">${m.total_dispatched||0}</div>
+            <div style="font-size:12px;color:var(--gray-500);margin-top:4px;">صادر</div>
+          </div>
+          <div style="background:var(--warning-bg);border-radius:var(--radius);padding:16px;text-align:center;">
+            <div style="font-size:24px;font-weight:800;color:var(--warning);">${m.active_shipments||0}</div>
+            <div style="font-size:12px;color:var(--gray-500);margin-top:4px;">نشط حالياً</div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إغلاق</button>
+      </div>
+    </div>`);
+  },
+
+  async addWarehouse(){
+    const govOpts=Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("");
+    const branches=AppState.branches;
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header"><h3>${icon("pkg",18)} إضافة مستودع</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field"><label>اسم المستودع *</label><input id="whName"/></div>
+          <div class="field"><label>كود المستودع *</label><input id="whCode" style="font-family:monospace;text-transform:uppercase;"/></div>
+        </div>
+        <div class="field"><label>الفرع المرتبط (اختياري)</label>
+          <select id="whBranch">
+            <option value="">-- بدون ربط --</option>
+            ${branches.map(b=>`<option value="${esc(b.id)}" data-name="${esc(b.name)}">${esc(b.name)}</option>`).join("")}
+          </select></div>
+        <div class="form-row">
+          <div class="field"><label>المحافظة *</label><select id="whGov"><option value="">اختر</option>${govOpts}</select></div>
+          <div class="field"><label>السعة (وحدات تخزين)</label><input id="whCapacity" type="number" min="0"/></div>
+        </div>
+        <div id="whErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveWhBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveWhBtn")?.addEventListener("click",async()=>{
+      const name=$("whName")?.value.trim(),code=$("whCode")?.value.trim().toUpperCase();
+      const gov=$("whGov")?.value;
+      const errEl=$("whErr");errEl.style.display="none";
+      if(!name||!code||!gov){errEl.style.display="block";errEl.textContent="الاسم والكود والمحافظة مطلوبة";return;}
+      const btn=$("saveWhBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const brSel=$("whBranch");
+        const{error}=await db.from("warehouses").insert([{
+          name,code,governorate:gov,
+          branch_id:brSel?.value||null,
+          branch_name:brSel?.value?(brSel.options[brSel.selectedIndex]?.dataset.name||""):"",
+          capacity:$("whCapacity")?.value?Number($("whCapacity").value):null,
+          created_by:AppState.user.id,
+        }]);
+        if(error)throw error;
+        Modals.close();await App.loadBranchData();
+        toast(`✅ تم إضافة مستودع ${name}`);
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+(err.message.includes("23505")?"كود المستودع موجود بالفعل":err.message);btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async editWarehouse(id){
+    const w=AppState.warehouses.find(x=>x.id===id);if(!w)return;
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>✏️ تعديل: ${esc(w.name)}</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>اسم المستودع</label><input id="ewhName" value="${esc(w.name)}"/></div>
+        <div class="field"><label>السعة</label><input id="ewhCapacity" type="number" value="${w.capacity||""}"/></div>
+        <div id="ewhErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveEwhBtn">حفظ</button>
+      </div>
+    </div>`);
+    $("saveEwhBtn")?.addEventListener("click",async()=>{
+      const name=$("ewhName")?.value.trim();
+      const errEl=$("ewhErr");errEl.style.display="none";
+      if(!name){errEl.style.display="block";errEl.textContent="الاسم مطلوب";return;}
+      const btn=$("saveEwhBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      const{error}=await db.from("warehouses").update({
+        name,capacity:$("ewhCapacity")?.value?Number($("ewhCapacity").value):null,
+      }).eq("id",id);
+      if(error){errEl.style.display="block";errEl.textContent="خطأ: "+error.message;btn.disabled=false;btn.textContent="حفظ";return;}
+      Modals.close();await App.loadBranchData();toast(`✅ تم تحديث ${name}`);
+    });
+  },
+
+  async deleteWarehouse(id){
+    if(!confirm("حذف هذا المستودع؟"))return;
+    const{error}=await db.from("warehouses").update({is_deleted:true,deleted_at:new Date().toISOString()}).eq("id",id);
+    if(error){toast("خطأ: "+error.message,"error");return;}
+    await App.loadBranchData();toast("تم حذف المستودع","info");
+  },
+
   setPricingTab(tab) {
     AppState.pricingTab = tab;
     rerenderContent();
