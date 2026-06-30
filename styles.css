@@ -610,6 +610,20 @@ svg { display: block; }
   gap: 16px;
   margin-bottom: 24px;
 }
+
+/* Dashboard overview two-column layout (shipments table + sidebar widgets) */
+.overview-grid {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  gap: 20px;
+}
+
+/* Generic reusable two-column layout (finance summary, pricing simulator, etc.) */
+.grid-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
 .kpi {
   background: #fff; border: 1px solid var(--gray-200);
   border-radius: var(--radius-lg); padding: 18px 20px;
@@ -984,6 +998,11 @@ tbody tr.muted { opacity: .5; }
 
   /* ── Overview grid: single column ── */
   .overview-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  /* ── Generic two-column grid: single column on mobile ── */
+  .grid-2col {
     grid-template-columns: 1fr !important;
   }
 

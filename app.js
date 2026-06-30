@@ -361,11 +361,12 @@ const DB = {
     return result;
   },
   async loadUsers() {
-    const{data,error}=await db.from("profiles").select("*").order("created_at",{ascending:false});
+    const{data,error}=await db.from("profiles").select("*").eq("is_deleted",false).order("created_at",{ascending:false});
     if(error){console.warn("loadUsers:",error.message);return[];}
     return(data||[]).map(u=>({
       id:u.id,name:u.full_name||"—",email:u.email||"—",phone:u.phone||"—",
-      role:u.primary_role||"customer",isActive:u.is_active!==false,suspended:u.is_suspended||false,
+      role:u.primary_role||"customer",isActive:u.is_active!==false,
+      is_suspended:u.is_suspended||false,suspended:u.is_suspended||false,
       createdAt:fmtDate(u.created_at),balance:0
     }));
   },
@@ -1064,10 +1065,15 @@ async function handleLogin(e) {
     // Step 8: start realtime BEFORE render (so first render shows live count)
     if (role === "admin") {
       startRealtime();
-      DB.loadAllMerchants().then(m => { AppState.allMerchants = m; });
-      Promise.all([DB.loadBranches(), DB.loadWarehouses()]).then(([b,w])=>{
-        AppState.branches = b; AppState.warehouses = w;
-      });
+      const [merchants, branches, warehouses] = await Promise.all([
+        DB.loadAllMerchants(),
+        DB.loadBranches(),
+        DB.loadWarehouses(),
+      ]);
+      AppState.allMerchants      = merchants;
+      AppState.branches          = branches;
+      AppState.warehouses        = warehouses;
+      AppState._branchDataLoaded = true;
     }
     if (role === "merchant") await App.loadMerchantData();
     if (role === "courier")  await App.loadMyWallet();
@@ -1320,10 +1326,12 @@ function postRender() {
     const tab=AppState.financeTab||"overview";
     if(tab!=="overview")setTimeout(()=>App._loadFinanceTabData(tab),100);
   }
-  if(AppState.view==="pricing" && !AppState.pricingZones.length){
+  if(AppState.view==="pricing" && !AppState._pricingDataLoaded){
+    AppState._pricingDataLoaded = true;
     App.loadPricingData();
   }
-  if(AppState.view==="branches" && !AppState.branches.length){
+  if(AppState.view==="branches" && !AppState._branchDataLoaded){
+    AppState._branchDataLoaded = true;
     App.loadBranchData();
   }
 }
@@ -1404,7 +1412,7 @@ function viewOverview() {
       ${kpi("تم التسليم",done,"chart","var(--success)","var(--success-bg)","delivered",pct(done,total)+"%")}
       ${kpi("مرتجعات",ret,"refresh","var(--danger)","var(--danger-bg)","returned")}
     </div>
-    <div style="display:grid;grid-template-columns:1fr 340px;gap:20px;">
+    <div class="overview-grid">
       <div class="card">
         <div class="card-header">
           <h3 class="card-title">${icon("box")} آخر الشحنات
@@ -1884,7 +1892,16 @@ function viewAudit() {
 // ══════════════════════════════════════════════════════════
 function bindDashboardEvents() {
   $$("[data-view]").forEach(btn=>{
-    btn.addEventListener("click",()=>{AppState.view=btn.dataset.view;AppState.statusFilter="all";rerenderContent();});
+    btn.addEventListener("click",()=>{
+      AppState.view=btn.dataset.view;
+      AppState.statusFilter="all";
+      // rerenderContent() only replaces #viewContent — it never
+      // touches the sidebar, so the active class must be synced here.
+      $$("[data-view]").forEach(b=>{
+        b.classList.toggle("active", b.dataset.view===AppState.view);
+      });
+      rerenderContent();
+    });
   });
   $("roleSwitcher")?.addEventListener("change", async e => {
     const r = e.target.value;
@@ -2495,7 +2512,7 @@ function viewPricing() {
   } else if (tab === "simulator") {
     const calc = AppState.lastFeeCalc;
     content = `
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+      <div class="grid-2col" style="gap:20px;">
         <div class="card">
           <h3 class="card-title" style="margin-bottom:16px;">${icon("search")} حاسبة رسوم الشحن</h3>
           <div class="field"><label>المحافظة</label>
@@ -2653,7 +2670,7 @@ function viewFinance() {
             </div>`).join("")}
         </div>
       </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div class="grid-2col">
         <div class="card">
           <h3 class="card-title" style="margin-bottom:14px;">💰 ملخص مالي</h3>
           ${[
@@ -3306,6 +3323,7 @@ const App={
   },
 
   async addBranch() {
+    await loadEgyptData();
     const govOpts=Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("");
     const managers=AppState.users.filter(u=>(u.role||u.primary_role)==="branch_manager"||(u.role||u.primary_role)==="admin");
     Modals.open(`<div class="modal modal-lg">
@@ -3452,6 +3470,7 @@ const App={
   },
 
   async addWarehouse(){
+    await loadEgyptData();
     const govOpts=Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("");
     const branches=AppState.branches;
     Modals.open(`<div class="modal modal-lg">
@@ -3640,6 +3659,88 @@ const App={
         Modals.close();await App.loadPricingData();
         toast("✅ تم إضافة قاعدة التسعير");
       }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ";}
+    });
+  },
+
+  async editPricingRule(id){
+    const r = AppState.pricingRules.find(x=>x.id===id);
+    if (!r) { toast("القاعدة غير موجودة، جرّب التحديث","error"); return; }
+    const zones    = AppState.pricingZones;
+    const merchants= AppState.allMerchants;
+    const SVC = [{v:"",l:"كل الخدمات"},{v:"door_to_door",l:"توصيل للباب"},{v:"drop_off",l:"إيداع"},{v:"pickup",l:"استلام"}];
+    const ORD = [{v:"",l:"كل الأنواع"},{v:"standard",l:"عادي"},{v:"express",l:"سريع"},{v:"scheduled",l:"مجدول"}];
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header"><h3>${icon("chart",18)} تعديل قاعدة تسعير</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="form-section-label">النطاق (اتركها فارغة للتطبيق على الكل)</div>
+        <div class="form-row">
+          <div class="field"><label>المنطقة</label>
+            <select id="eprZone">
+              <option value="">كل المناطق</option>
+              ${zones.map(z=>`<option value="${esc(z.id)}" ${r.zone_id===z.id?"selected":""}>${esc(z.name)}</option>`).join("")}
+            </select></div>
+          <div class="field"><label>التاجر (لسعر خاص)</label>
+            <select id="eprMerchant">
+              <option value="">كل التجار</option>
+              ${merchants.map(m=>`<option value="${esc(m.id)}" ${r.merchant_id===m.id?"selected":""}>${esc(m.full_name)}</option>`).join("")}
+            </select></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>نوع الخدمة</label>
+            <select id="eprSvc">${SVC.map(s=>`<option value="${s.v}" ${r.service_type===s.v?"selected":""}>${s.l}</option>`).join("")}</select></div>
+          <div class="field"><label>نوع الطلب</label>
+            <select id="eprOrd">${ORD.map(o=>`<option value="${o.v}" ${r.order_type===o.v?"selected":""}>${o.l}</option>`).join("")}</select></div>
+        </div>
+        <div class="form-section-label">نطاق الوزن (اتركها فارغة للتطبيق على كل الأوزان)</div>
+        <div class="form-row">
+          <div class="field"><label>من (كجم)</label><input id="eprWFrom" type="number" step="0.1" value="${r.weight_from||0}" min="0"/></div>
+          <div class="field"><label>إلى (كجم) — فارغ = بلا حد</label><input id="eprWTo" type="number" step="0.1" value="${r.weight_to??""}" min="0"/></div>
+        </div>
+        <div class="form-section-label">التسعير</div>
+        <div class="form-row three">
+          <div class="field"><label>رسوم أساسية (ج.م) *</label><input id="eprBase" type="number" step="0.01" min="0" value="${r.base_fee}"/></div>
+          <div class="field"><label>لكل كجم إضافي (ج.م)</label><input id="eprPerKg" type="number" step="0.01" min="0" value="${r.per_kg_fee||0}"/></div>
+          <div class="field"><label>رسوم الإرجاع (ج.م)</label><input id="eprReturn" type="number" step="0.01" min="0" value="${r.return_fee||0}"/></div>
+        </div>
+        <div class="form-row">
+          <div class="field"><label>رسوم إضافية للسريع (%)</label><input id="eprExpress" type="number" step="1" min="0" max="100" value="${Math.round((r.express_surcharge||0)*100)}"/></div>
+          <div class="field"><label>الأولوية (أعلى = يُطبق أولاً)</label><input id="eprPriority" type="number" value="${r.priority||10}" min="0"/></div>
+        </div>
+        <div class="field"><label>ملاحظات</label><input id="eprNotes" value="${esc(r.notes||"")}"/></div>
+        <div id="eprErr" class="form-error"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" id="saveEprBtn">حفظ التعديلات</button>
+      </div>
+    </div>`);
+    $("saveEprBtn")?.addEventListener("click", async()=>{
+      const base=Number($("eprBase")?.value);
+      const errEl=$("eprErr");errEl.style.display="none";
+      if(!base&&base!==0){errEl.style.display="block";errEl.textContent="الرسوم الأساسية مطلوبة";return;}
+      const btn=$("saveEprBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
+      try{
+        const{error}=await db.from("pricing_rules").update({
+          zone_id:          $("eprZone")?.value||null,
+          merchant_id:      $("eprMerchant")?.value||null,
+          service_type:     $("eprSvc")?.value||null,
+          order_type:       $("eprOrd")?.value||null,
+          weight_from:      Number($("eprWFrom")?.value)||0,
+          weight_to:        $("eprWTo")?.value?Number($("eprWTo").value):null,
+          base_fee:         base,
+          per_kg_fee:       Number($("eprPerKg")?.value)||0,
+          return_fee:       Number($("eprReturn")?.value)||0,
+          express_surcharge:(Number($("eprExpress")?.value)||0)/100,
+          priority:         Number($("eprPriority")?.value)||10,
+          notes:            $("eprNotes")?.value.trim()||null,
+        }).eq("id",id);
+        if(error)throw error;
+        await DB.addAudit("EDIT_PRICING_RULE",id,
+          `Base:${base} by ${AppState.user.name}`,"setting");
+        Modals.close();await App.loadPricingData();
+        toast("✅ تم تحديث قاعدة التسعير");
+      }catch(err){errEl.style.display="block";errEl.textContent="خطأ: "+err.message;btn.disabled=false;btn.textContent="حفظ التعديلات";}
     });
   },
 
@@ -4914,24 +5015,64 @@ const App={
     });
   },
 
-  async toggleUser(id){
-    const u=AppState.users.find(x=>x.id===id);if(!u)return;
-    const ns=!u.is_suspended;
-    const{error}=await db.from("profiles").update({is_suspended:ns}).eq("id",id);
-    if(error){toast("فشل التحديث","error");return;}
-    u.is_suspended=ns;
-    await DB.addAudit(ns?"SUSPEND_USER":"ACTIVATE_USER",id,`by ${AppState.user.name}`);
-    toast(`${ns?"تم إيقاف":"تم تفعيل"} ${u.name}`);rerenderContent();
+  async toggleUser(id) {
+    const u = AppState.users.find(x => x.id === id);
+    if (!u) return;
+    const ns  = !(u.is_suspended || u.suspended);
+    const btn = document.querySelector(`[onclick*="toggleUser('${id}')"]`);
+    if (btn) { btn.disabled = true; btn.textContent = "…"; }
+    try {
+      const patch = ns
+        ? { is_suspended: true,  suspended_at: new Date().toISOString(), suspended_by: AppState.user?.id || null }
+        : { is_suspended: false, suspended_at: null, suspended_by: null };
+      const { error } = await db.from("profiles").update(patch).eq("id", id);
+      if (error) throw error;
+      // Update both field names so any older render path stays consistent
+      u.is_suspended = ns;
+      u.suspended    = ns;
+      await DB.addAudit(
+        ns ? "SUSPEND_USER" : "ACTIVATE_USER", id,
+        `Target: ${u.name} | Email: ${u.email} | Role: ${u.role} | By: ${AppState.user.name}`,
+        "user"
+      );
+      toast(`${ns ? "تم إيقاف" : "تم تفعيل"} ${u.name}`, ns ? "warning" : "success");
+    } catch(err) {
+      toast("فشل التحديث: " + err.message, "error");
+    } finally {
+      if (btn) btn.disabled = false;
+      rerenderContent();
+    }
   },
 
-  async deleteUser(id){
-    const u=AppState.users.find(x=>x.id===id);if(!u)return;
-    if(!confirm(`حذف ${u.name}؟ لا يمكن التراجع.`))return;
-    const{error}=await db.from("profiles").delete().eq("id",id);
-    if(error){toast("فشل الحذف: "+error.message,"error");return;}
-    await DB.addAudit("DELETE_USER",id,`by ${AppState.user.name}`);
-    AppState.users=AppState.users.filter(x=>x.id!==id);
-    toast(`تم حذف ${u.name}`,"info");rerenderContent();
+  async deleteUser(id) {
+    const u = AppState.users.find(x => x.id === id);
+    if (!u) return;
+    if (!confirm(`حذف ${u.name}؟ سيتم إخفاؤه من القوائم مع الحفاظ على السجلات التاريخية.`)) return;
+    const btn = document.querySelector(`[onclick*="deleteUser('${id}')"]`);
+    if (btn) { btn.disabled = true; btn.innerHTML = "…"; }
+    try {
+      // SOFT DELETE ONLY — hard DELETE on profiles violates
+      // shipment_timeline.actor_id FK constraint for any user
+      // who ever appeared in a shipment's timeline.
+      const { error } = await db.from("profiles").update({
+        is_deleted: true,
+        deleted_at: new Date().toISOString(),
+        deleted_by: AppState.user?.id || null
+      }).eq("id", id);
+      if (error) throw error;
+      await DB.addAudit(
+        "SOFT_DELETE_USER", id,
+        `Target: ${u.name} | Email: ${u.email} | Role: ${u.role} | By: ${AppState.user.name}`,
+        "user"
+      );
+      AppState.users = AppState.users.filter(x => x.id !== id);
+      toast(`تم حذف ${u.name}`, "info");
+    } catch(err) {
+      toast("فشل الحذف: " + err.message, "error");
+    } finally {
+      if (btn) btn.disabled = false;
+      rerenderContent();
+    }
   },
 
   async loadAudit(){
@@ -5046,7 +5187,22 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
       // Persist refreshed session
       saveSession(AppState.user);
 
-      if (role === "admin") startRealtime();
+      if (role === "admin") {
+        startRealtime();
+        const [merchants, branches, warehouses] = await Promise.all([
+          DB.loadAllMerchants(),
+          DB.loadBranches(),
+          DB.loadWarehouses(),
+        ]);
+        AppState.allMerchants = merchants;
+        AppState.branches     = branches;
+        AppState.warehouses   = warehouses;
+        // Mark as loaded so postRender()'s lazy-load guards don't
+        // redundantly re-fetch the moment the user opens those tabs.
+        AppState._branchDataLoaded = true;
+      }
+      if (role === "merchant") await App.loadMerchantData();
+      if (role === "courier")  await App.loadMyWallet();
 
       // Single render — everything ready
       render();
@@ -5057,16 +5213,3 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
   AppState.shipments=await DB.loadShipments().catch(()=>[]);
   AppState.page="home";render();
 })();
-
-
-$("menuToggle")?.addEventListener("click",()=>{
-    console.log("MENU CLICKED");
-
-    $("sidebar")?.classList.toggle("open");
-    $("sbOverlay")?.classList.toggle("active");
-
-    console.log(
-      $("sidebar")?.className,
-      $("sbOverlay")?.className
-    );
-});
