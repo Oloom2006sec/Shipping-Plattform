@@ -1330,6 +1330,9 @@ function postRender() {
     AppState._pricingDataLoaded = true;
     App.loadPricingData();
   }
+  if(AppState.view==="pricing" && AppState.pricingTab==="simulator" && !Object.keys(EGYPT_GOV).length){
+    loadEgyptData().then(()=>rerenderContent());
+  }
   if(AppState.view==="branches" && !AppState._branchDataLoaded){
     AppState._branchDataLoaded = true;
     App.loadBranchData();
@@ -1924,8 +1927,8 @@ function bindDashboardEvents() {
     AppPerms.clear();
     (PERMS_FALLBACK[r] || PERMS_FALLBACK.customer).forEach(p => AppPerms.add(p));
 
-    // Full re-render — renderDashboard rebuilds shell + content
-    renderDashboard();
+    // Full re-render — render() rebuilds entire page including sidebar nav for the new role
+    render();
   });
   $("logoutBtn")?.addEventListener("click",async()=>{
     await DB.addAudit("LOGOUT","","User logged out","auth");
@@ -2209,10 +2212,11 @@ const Modals={
           status: "submitted",
           eta:    eta || null,
           notes:  notes || null,
-          // Merchant
+          // Merchant — merchant_name/phone are NOT NULL DEFAULT '' in DB
+          // send "" for admin-created shipments, never null (violates constraint)
           merchant_id:    isMerchant ? uid : null,
-          merchant_name:  isMerchant ? (AppState.user.name  || "") : null,
-          merchant_phone: isMerchant ? (AppState.user.phone || "") : null,
+          merchant_name:  isMerchant ? (AppState.user.name  || "") : "",
+          merchant_phone: isMerchant ? (AppState.user.phone || "") : "",
           // Courier
           courier_id:   courierId || null,
           courier_name: courierName || null,

@@ -949,6 +949,10 @@ tbody tr.muted { opacity: .5; }
       right:0;
       width:260px;
       max-width:85vw;
+      height:100vh;
+      overflow-y:auto;
+      display:flex;
+      flex-direction:column;
   }
 
   .sidebar.open{
@@ -1038,7 +1042,17 @@ body{
   .hp-footer-grid { grid-template-columns: 1fr; }
   .modal { max-width: 100%; border-radius: var(--radius-lg) var(--radius-lg) 0 0; }
   .modal-wrap { align-items: flex-end; padding: 0; }
-  .page { padding: 14px; }
+  .page {
+    padding: 14px;
+    max-width: 100%;
+    overflow-x: hidden;
+    box-sizing: border-box;
+  }
+  .card {
+    max-width: 100%;
+    overflow-x: hidden;
+    box-sizing: border-box;
+  }
 }
 
 /* Scrollbar */
