@@ -50,8 +50,8 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","branches","reports","users","merchants","audit","track"] },
-  merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","accounts"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","branches","reports","users","merchants","import","audit","track"] },
+  merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["track","accounts"] }
 };
@@ -60,7 +60,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -212,6 +212,8 @@ const AppState = {
   selectedBranchId:"",
   // Phase 3: driver self-service wallet
   myWalletBalance:0, myWalletTxns:[],
+  // Bulk import wizard
+  importBatches:[], importWizard:null,
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -581,6 +583,52 @@ const DB = {
     const result = {};
     (data||[]).forEach(r => { result[r.metric] = Number(r.value)||0; });
     return result;
+  },
+
+  // ── Bulk Import ─────────────────────────────────────────────
+  async loadImportBatches(merchantId) {
+    let q = db.from("import_batches")
+      .select("*").order("created_at",{ascending:false}).limit(100);
+    if (merchantId) q = q.eq("merchant_id", merchantId);
+    const { data, error } = await q;
+    if (error) { console.warn("loadImportBatches:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadImportRows(batchId, statusFilter) {
+    let q = db.from("import_rows").select("*")
+      .eq("batch_id", batchId).order("row_number");
+    if (statusFilter) q = q.eq("status", statusFilter);
+    const { data, error } = await q.limit(500);
+    if (error) { console.warn("loadImportRows:", error.message); return []; }
+    return data || [];
+  },
+
+  async createImportBatch(payload) {
+    const { data, error } = await db.from("import_batches")
+      .insert([payload]).select().single();
+    if (error) throw error;
+    return data;
+  },
+
+  async updateImportBatch(id, patch) {
+    const { error } = await db.from("import_batches")
+      .update({...patch, updated_at: new Date().toISOString()}).eq("id", id);
+    if (error) throw error;
+  },
+
+  async insertImportRows(rows) {
+    const CHUNK = 100;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const { error } = await db.from("import_rows").insert(rows.slice(i, i+CHUNK));
+      if (error) throw error;
+    }
+  },
+
+  async updateImportRow(id, patch) {
+    const { error } = await db.from("import_rows")
+      .update({...patch, updated_at: new Date().toISOString()}).eq("id", id);
+    if (error) throw error;
   },
 
   async loadAllMerchants() {
@@ -1246,6 +1294,7 @@ function renderView() {
     case"recipients": return viewRecipients();
     case"products":   return viewProducts();
     case"pickup":     return viewPickupRequests();
+    case"import":     return viewImport();
     default:          return viewOverview();
   }
 }
@@ -1479,8 +1528,8 @@ function shipTable(list) {
         <td style="font-size:12px;">${esc(s.governorate||s.address?.split("-")[0]||"—")}</td>
         <td><span class="badge ${STATUS_MAP[s.status]?.badge||"badge-gray"}">${STATUS_MAP[s.status]?.label||s.status}</span></td>
         <td style="font-weight:600;">${money(s.amount)}</td>
-        <td style="font-size:12px;color:var(--gray-600);">${s.merchantName?esc(s.merchantName):'<span style="color:var(--gray-300);">—</span>'}</td>
         <td style="font-size:12px;color:var(--gray-500);">${s.weight?s.weight+"كجم":"—"}</td>
+        <td style="font-size:12px;color:var(--gray-600);">${s.merchantName?esc(s.merchantName):'<span style="color:var(--gray-300);">—</span>'}</td>
         <td style="font-size:12px;color:var(--gray-600);">${s.courierName?esc(s.courierName):'<span style="color:var(--gray-300);">—</span>'}</td>
         <td>
           <div class="td-actions">
