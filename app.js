@@ -213,7 +213,7 @@ const AppState = {
   // Phase 3: driver self-service wallet
   myWalletBalance:0, myWalletTxns:[],
   // Bulk import wizard
-  importBatches:[], importWizard:null,
+  importBatches:[], importWizard:null, _importDataLoaded:false,
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -1385,6 +1385,10 @@ function postRender() {
   if(AppState.view==="branches" && !AppState._branchDataLoaded){
     AppState._branchDataLoaded = true;
     App.loadBranchData();
+  }
+  if(AppState.view==="import" && !AppState._importDataLoaded){
+    AppState._importDataLoaded = true;
+    App.loadImportBatches();
   }
 }
 
@@ -3182,6 +3186,389 @@ function viewAdminMerchants() {
 // PHASE 2A VIEW FUNCTIONS
 // ══════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════
+// BULK IMPORT — 6-STEP WIZARD + VALIDATION ENGINE
+// ══════════════════════════════════════════════════════════════
+
+const IMPORT_REQUIRED      = ["customer_name","customer_phone","governorate","amount"];
+const IMPORT_SERVICE_TYPES = ["door_to_door","drop_off","pickup"];
+const IMPORT_ORDER_TYPES   = ["express","standard","scheduled"];
+
+function validateImportRow(r, rowNum, gov) {
+  const errors = [];
+  IMPORT_REQUIRED.forEach(f => {
+    if (!r[f] || String(r[f]).trim()==="") errors.push({field:f, message:"حقل مطلوب"});
+  });
+  if (r.customer_phone && !/^01[0-9]{9}$/.test(String(r.customer_phone).replace(/\s/g,"")))
+    errors.push({field:"customer_phone", message:"رقم هاتف غير صحيح (11 رقم يبدأ بـ 01)"});
+  if (r.customer_phone2 && r.customer_phone2.trim() && !/^01[0-9]{9}$/.test(String(r.customer_phone2).replace(/\s/g,"")))
+    errors.push({field:"customer_phone2", message:"هاتف ثاني غير صحيح"});
+  if (r.governorate && gov && !gov[r.governorate])
+    errors.push({field:"governorate", message:"محافظة غير معروفة: "+r.governorate});
+  if (r.city && r.governorate && gov && gov[r.governorate] && !gov[r.governorate].includes(r.city))
+    errors.push({field:"city", message:"مدينة غير معروفة في "+r.governorate});
+  if (r.amount!==undefined && r.amount!=="") {
+    const a=Number(r.amount); if(isNaN(a)||a<0) errors.push({field:"amount", message:"مبلغ COD غير صحيح"});
+  }
+  if (r.delivery_fee!==undefined && r.delivery_fee!=="") {
+    const f=Number(r.delivery_fee); if(isNaN(f)||f<0) errors.push({field:"delivery_fee", message:"رسوم شحن غير صحيحة"});
+  }
+  if (r.weight!==undefined && r.weight!=="") {
+    const w=Number(r.weight); if(isNaN(w)||w<0||w>999) errors.push({field:"weight", message:"وزن غير صحيح (0-999)"});
+  }
+  if (r.service_type && !IMPORT_SERVICE_TYPES.includes(r.service_type))
+    errors.push({field:"service_type", message:"نوع خدمة غير صحيح: "+IMPORT_SERVICE_TYPES.join("/")});
+  if (r.order_type && !IMPORT_ORDER_TYPES.includes(r.order_type))
+    errors.push({field:"order_type", message:"نوع طلب غير صحيح: "+IMPORT_ORDER_TYPES.join("/")});
+  return errors;
+}
+
+const COL_MAP = {
+  "اسم العميل":"customer_name","اسم العميل*":"customer_name","customer_name":"customer_name",
+  "هاتف العميل":"customer_phone","هاتف العميل*":"customer_phone","customer_phone":"customer_phone",
+  "هاتف ثاني":"customer_phone2","customer_phone2":"customer_phone2",
+  "المحافظة":"governorate","المحافظة*":"governorate","governorate":"governorate",
+  "المدينة":"city","city":"city","الشارع":"street","street":"street",
+  "المبنى":"building","building":"building",
+  "مبلغ COD":"amount","مبلغ COD*":"amount","amount":"amount",
+  "رسوم الشحن":"delivery_fee","delivery_fee":"delivery_fee",
+  "رسوم الإرجاع":"return_fee","return_fee":"return_fee",
+  "نوع الخدمة":"service_type","service_type":"service_type",
+  "نوع الطلب":"order_type","order_type":"order_type",
+  "الوزن (كجم)":"weight","weight":"weight","باركود":"barcode","barcode":"barcode",
+  "ملاحظات":"notes","notes":"notes",
+};
+
+function normalizeImportRow(raw) {
+  const out = {};
+  Object.entries(raw).forEach(([k,v]) => {
+    const mapped = COL_MAP[k.trim()] || COL_MAP[k.trim().toLowerCase()];
+    if (mapped) out[mapped] = String(v).trim();
+  });
+  return out;
+}
+
+function generateImportTemplate() {
+  const headers = [["اسم العميل*","هاتف العميل*","هاتف ثاني","المحافظة*","المدينة","الشارع","المبنى",
+    "مبلغ COD*","رسوم الشحن","رسوم الإرجاع","نوع الخدمة","نوع الطلب","الوزن (كجم)","باركود","ملاحظات"]];
+  const sample  = [["محمد أحمد","01012345678","","القاهرة","مدينة نصر","شارع النصر","عمارة 5",
+    "500","60","30","door_to_door","standard","1.5","","شحنة تجريبية"]];
+  const notes   = [["* مطلوب | نوع الخدمة: door_to_door/drop_off/pickup | نوع الطلب: standard/express/scheduled"]];
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet([...headers,...sample,[],...notes]);
+  ws["!cols"] = headers[0].map((_,i)=>({wch:i<2?20:i<6?15:12}));
+  XLSX.utils.book_append_sheet(wb,ws,"شحنات");
+  XLSX.writeFile(wb,"نموذج_استيراد_النخبة.xlsx");
+}
+
+async function parseImportFile(file) {
+  return new Promise((resolve,reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const wb   = XLSX.read(new Uint8Array(e.target.result),{type:"array"});
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws,{defval:""});
+        resolve(rows);
+      } catch(err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error("فشل قراءة الملف"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+async function generateShipmentCode() {
+  const prefix = "ANE";
+  const ts     = Date.now().toString(36).toUpperCase();
+  const rand   = Math.random().toString(36).slice(2,5).toUpperCase();
+  return prefix + "-" + ts + rand;
+}
+
+function viewImport() {
+  const role    = AppState.user.primary_role||AppState.user.role;
+  const isAdmin = role==="admin";
+  const wiz     = AppState.importWizard;
+  const batches = AppState.importBatches;
+  const step    = wiz ? wiz.step : 0;
+
+  const STEPS = [
+    {n:1,label:"تحميل النموذج"},{n:2,label:"رفع الملف"},
+    {n:3,label:"التحقق"},{n:4,label:"المعاينة"},
+    {n:5,label:"الاستيراد"},{n:6,label:"التقرير"},
+  ];
+
+  const stepBar = `<div class="import-steps">
+    ${STEPS.map(s=>`
+      <div class="import-step ${step===s.n?"active":step>s.n?"done":""}">
+        <div class="import-step-num">${step>s.n?"✓":s.n}</div>
+        <div class="import-step-label">${s.label}</div>
+      </div>${s.n<6?'<div class="import-step-line"></div>':""}`).join("")}
+  </div>`;
+
+  // ── Landing / History (step 0) ──────────────────────────────
+  if (!wiz || step===0) {
+    const SB = {pending:"badge-gray",validating:"badge-warning",validated:"badge-brand",
+                importing:"badge-warning",done:"badge-success",failed:"badge-danger",cancelled:"badge-gray"};
+    const SL = {pending:"بانتظار",validating:"جاري التحقق",validated:"جاهز",
+                importing:"جاري الاستيراد",done:"مكتمل",failed:"فشل",cancelled:"ملغي"};
+    return `
+      <div class="card" style="margin-bottom:16px;">
+        <div class="card-header">
+          <h3 class="card-title">${icon("box")} استيراد شحنات بالجملة</h3>
+          <button class="btn btn-primary" onclick="App.startImportWizard()">${icon("plus",13)} استيراد جديد</button>
+        </div>
+        <div class="kpi-grid" style="margin-bottom:20px;">
+          ${kpi("إجمالي الدفعات",batches.length,"box","var(--brand)","var(--brand-light)")}
+          ${kpi("مكتملة",batches.filter(b=>b.status==="done").length,"chart","var(--success)","var(--success-bg)")}
+          ${kpi("فاشلة",batches.filter(b=>b.status==="failed").length,"refresh","var(--danger)","var(--danger-bg)")}
+          ${kpi("شحنات مستوردة",batches.reduce((a,b)=>a+(b.imported_rows||0),0),"truck","var(--info)","var(--info-bg)")}
+        </div>
+        ${!batches.length?`<div class="empty">
+          <div class="empty-icon">📦</div><h3>لا توجد دفعات استيراد</h3>
+          <p>ابدأ باستيراد شحناتك من ملف Excel أو CSV</p>
+          <button class="btn btn-primary" onclick="App.startImportWizard()">بدء الاستيراد</button>
+        </div>`:`
+        <div class="table-wrap"><table>
+          <thead><tr>
+            <th>رقم الدفعة</th>${isAdmin?"<th>التاجر</th>":""}
+            <th>الملف</th><th>الإجمالي</th><th>صالح</th>
+            <th>أخطاء</th><th>مستورد</th><th>الحالة</th><th>التاريخ</th><th>إجراءات</th>
+          </tr></thead>
+          <tbody>
+            ${batches.map(b=>`<tr>
+              <td class="td-mono" style="font-size:11px;">${b.id.slice(-8).toUpperCase()}</td>
+              ${isAdmin?`<td style="font-size:12px;">${esc(b.merchant_name||"—")}</td>`:""}
+              <td style="font-size:12px;">${esc(b.filename)}</td>
+              <td style="font-weight:600;">${b.total_rows}</td>
+              <td style="color:var(--success);font-weight:600;">${b.valid_rows}</td>
+              <td style="color:var(--danger);font-weight:600;">${b.invalid_rows}</td>
+              <td style="color:var(--brand);font-weight:600;">${b.imported_rows}</td>
+              <td><span class="badge ${SB[b.status]||"badge-gray"}">${SL[b.status]||b.status}</span></td>
+              <td style="font-size:11px;color:var(--gray-400);">${fmtDate(b.created_at)}</td>
+              <td><div class="td-actions">
+                ${b.status==="validated"?`<button class="btn btn-primary btn-sm" onclick="App.resumeImportBatch('${esc(b.id)}')">استيراد</button>`:""}
+                ${(b.failed_rows>0&&b.status==="done")?`
+                  <button class="btn btn-secondary btn-sm" onclick="App.retryFailedRows('${esc(b.id)}')">إعادة</button>
+                  <button class="btn btn-secondary btn-sm" onclick="App.downloadErrorReport('${esc(b.id)}')">↓ أخطاء</button>`:""}
+                ${["pending","validating","validated"].includes(b.status)&&can("import.cancel")?`
+                  <button class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="App.cancelImport('${esc(b.id)}')">إلغاء</button>`:""}
+              </div></td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>`}
+      </div>`;
+  }
+
+  // ── Step 1: Download template ──────────────────────────────
+  if (step===1) return `${stepBar}
+    <div class="card">
+      <h3 class="card-title" style="margin-bottom:20px;">${icon("box")} الخطوة 1: تحميل نموذج Excel</h3>
+      <div style="background:var(--brand-light);border-radius:var(--radius-lg);padding:24px;margin-bottom:20px;">
+        <div style="font-weight:700;color:var(--brand-dark);margin-bottom:12px;">📋 النموذج يحتوي على:</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">
+          ${["اسم العميل *","هاتف العميل *","هاتف ثاني","المحافظة *","المدينة","الشارع والمبنى",
+             "مبلغ COD *","رسوم الشحن","رسوم الإرجاع","نوع الخدمة","نوع الطلب","الوزن والباركود"]
+            .map(f=>`<div>✓ ${f}</div>`).join("")}
+        </div>
+      </div>
+      <div style="background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:var(--radius);padding:14px;margin-bottom:20px;font-size:13px;">
+        ⚠️ <b>ملاحظات:</b> الحقول المميزة بـ * مطلوبة · نوع الخدمة: door_to_door/drop_off/pickup ·
+        نوع الطلب: standard/express/scheduled · الهاتف 11 رقم يبدأ بـ 01 · احذف صف الملاحظات قبل الرفع
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;">
+        <button class="btn btn-primary" style="padding:12px 24px;" onclick="App.downloadImportTemplate()">⬇️ تحميل النموذج</button>
+        <button class="btn btn-secondary" style="padding:12px 24px;" onclick="App.importWizardNext()">التالي ←</button>
+        <button class="btn btn-secondary" onclick="App.cancelImportWizard()">إلغاء</button>
+      </div>
+    </div>`;
+
+  // ── Step 2: Upload ─────────────────────────────────────────
+  if (step===2) return `${stepBar}
+    <div class="card">
+      <h3 class="card-title" style="margin-bottom:20px;">${icon("box")} الخطوة 2: رفع الملف</h3>
+      ${isAdmin?`<div class="field" style="margin-bottom:16px;">
+        <label style="font-weight:600;display:block;margin-bottom:6px;">التاجر المستهدف *</label>
+        <select id="importMerchantSel" style="width:100%;padding:10px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+          <option value="">-- اختر التاجر --</option>
+          ${AppState.allMerchants.map(m=>`<option value="${esc(m.id)}" data-name="${esc(m.full_name)}"
+            ${wiz&&wiz.merchantId===m.id?"selected":""}>${esc(m.full_name)}</option>`).join("")}
+        </select>
+      </div>`:""}
+      <div class="import-dropzone" id="importDropzone"
+        onclick="$('importFileInput').click()"
+        ondragover="event.preventDefault();this.classList.add('dragover')"
+        ondragleave="this.classList.remove('dragover')"
+        ondrop="event.preventDefault();this.classList.remove('dragover');App.handleImportDrop(event)">
+        <div style="font-size:40px;margin-bottom:12px;">📂</div>
+        <div style="font-size:16px;font-weight:600;margin-bottom:6px;">اسحب الملف هنا أو انقر للاختيار</div>
+        <div style="font-size:12px;color:var(--gray-400);">يُقبل: .xlsx · .xls · .csv · الحد الأقصى 5MB</div>
+        <input type="file" id="importFileInput" accept=".xlsx,.xls,.csv" style="display:none"
+          onchange="App.handleImportFile(this.files[0])"/>
+      </div>
+      ${wiz&&wiz.file?`
+        <div style="background:var(--success-bg);border-radius:var(--radius);padding:14px;margin-top:16px;display:flex;align-items:center;gap:12px;">
+          <span style="font-size:20px;">✅</span>
+          <div><div style="font-weight:600;">${esc(wiz.file.name)}</div>
+            <div style="font-size:12px;color:var(--gray-500);">${(wiz.file.size/1024).toFixed(1)} KB</div></div>
+          <button class="btn btn-primary" style="margin-right:auto;" onclick="App.importWizardNext()">التالي: التحقق ←</button>
+        </div>`:""}
+      <div style="margin-top:16px;display:flex;gap:10px;">
+        <button class="btn btn-secondary" onclick="App.importWizardBack()">← العودة</button>
+        <button class="btn btn-secondary" onclick="App.cancelImportWizard()">إلغاء</button>
+      </div>
+    </div>`;
+
+  // ── Step 3: Validation results ─────────────────────────────
+  if (step===3) {
+    const rows    = wiz.validatedRows||[];
+    const valid   = rows.filter(r=>r.is_valid&&!r.is_duplicate);
+    const invalid = rows.filter(r=>!r.is_valid);
+    const dups    = rows.filter(r=>r.is_duplicate);
+    return `${stepBar}
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:16px;">${icon("chart")} الخطوة 3: نتائج التحقق</h3>
+        <div class="kpi-grid" style="margin-bottom:20px;">
+          ${kpi("إجمالي الصفوف",rows.length,"box","var(--brand)","var(--brand-light)")}
+          ${kpi("صالح",valid.length,"chart","var(--success)","var(--success-bg)")}
+          ${kpi("أخطاء",invalid.length,"refresh","var(--danger)","var(--danger-bg)")}
+          ${kpi("مكرر",dups.length,"log","var(--warning)","var(--warning-bg)")}
+        </div>
+        ${invalid.length?`
+          <div style="margin-bottom:16px;">
+            <div style="font-weight:600;color:var(--danger);margin-bottom:8px;">❌ صفوف بها أخطاء</div>
+            <div class="table-wrap"><table>
+              <thead><tr><th>الصف</th><th>اسم العميل</th><th>الهاتف</th><th>الأخطاء</th></tr></thead>
+              <tbody>
+                ${invalid.slice(0,50).map(r=>`<tr>
+                  <td class="td-mono">${r.row_number}</td>
+                  <td>${esc(r.customer_name||"—")}</td>
+                  <td>${esc(r.customer_phone||"—")}</td>
+                  <td style="color:var(--danger);font-size:12px;">
+                    ${(r.validation_errors||[]).map(e=>esc(e.field)+": "+esc(e.message)).join(" · ")}
+                  </td>
+                </tr>`).join("")}
+                ${invalid.length>50?`<tr><td colspan="4" style="text-align:center;color:var(--gray-400);">+ ${invalid.length-50} صف آخر</td></tr>`:""}
+              </tbody>
+            </table></div>
+          </div>`:""}
+        ${dups.length?`
+          <div style="background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:var(--radius);padding:12px;margin-bottom:16px;font-size:13px;">
+            ⚠️ <b>${dups.length}</b> صف مكرر (موجود في الشحنات أو في هذا الملف) — سيتم تخطيه
+          </div>`:""}
+        ${valid.length?`
+          <div style="background:var(--success-bg);border-radius:var(--radius);padding:14px;margin-bottom:16px;font-size:13px;">
+            ✅ يمكن استيراد <b>${valid.length}</b> شحنة
+          </div>`:`
+          <div style="background:var(--danger-bg);border-radius:var(--radius);padding:14px;margin-bottom:16px;font-size:13px;">
+            لا توجد صفوف صالحة — يرجى تصحيح الملف وإعادة الرفع
+          </div>`}
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          ${invalid.length?`<button class="btn btn-secondary" onclick="App.downloadErrorReport(null,true)">⬇️ تقرير الأخطاء</button>`:""}
+          ${valid.length?`<button class="btn btn-primary" onclick="App.importWizardNext()">التالي: المعاينة ←</button>`:""}
+          <button class="btn btn-secondary" onclick="App.importWizardBack()">← العودة</button>
+          <button class="btn btn-secondary" onclick="App.cancelImportWizard()">إلغاء</button>
+        </div>
+      </div>`;
+  }
+
+  // ── Step 4: Preview ────────────────────────────────────────
+  if (step===4) {
+    const rows = (wiz.validatedRows||[]).filter(r=>r.is_valid&&!r.is_duplicate);
+    return `${stepBar}
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:16px;">${icon("truck")} الخطوة 4: معاينة الشحنات</h3>
+        <div style="background:var(--info-bg,#eff6ff);border-radius:var(--radius);padding:14px;margin-bottom:16px;font-size:13px;">
+          سيتم استيراد <b>${rows.length}</b> شحنة. راجع البيانات قبل المتابعة.
+        </div>
+        <div style="margin-bottom:16px;">
+          <div style="font-weight:600;margin-bottom:10px;">خيارات الإنشاء التلقائي:</div>
+          <div style="display:flex;gap:20px;flex-wrap:wrap;">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
+              <input type="checkbox" ${wiz.autoRecipients?"checked":""} onchange="AppState.importWizard.autoRecipients=this.checked"/>
+              إضافة عملاء جدد تلقائياً
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">
+              <input type="checkbox" ${wiz.autoAddresses?"checked":""} onchange="AppState.importWizard.autoAddresses=this.checked"/>
+              حفظ عناوين جديدة تلقائياً
+            </label>
+          </div>
+        </div>
+        <div class="table-wrap" style="max-height:380px;overflow-y:auto;margin-bottom:16px;">
+          <table>
+            <thead><tr><th>#</th><th>العميل</th><th>الهاتف</th><th>المحافظة</th><th>COD</th><th>الخدمة</th><th>الوزن</th></tr></thead>
+            <tbody>
+              ${rows.slice(0,200).map(r=>`<tr>
+                <td class="td-mono" style="font-size:11px;">${r.row_number}</td>
+                <td>${esc(r.customer_name||"—")}</td>
+                <td class="td-phone">${esc(r.customer_phone||"—")}</td>
+                <td style="font-size:12px;">${esc(r.governorate||"—")}</td>
+                <td style="font-weight:600;">${money(Number(r.amount)||0)}</td>
+                <td style="font-size:11px;">${esc(r.service_type||"door_to_door")}</td>
+                <td style="font-size:12px;">${r.weight?r.weight+"كجم":"—"}</td>
+              </tr>`).join("")}
+              ${rows.length>200?`<tr><td colspan="7" style="text-align:center;color:var(--gray-400);">+ ${rows.length-200} شحنة أخرى</td></tr>`:""}
+            </tbody>
+          </table>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <button class="btn btn-primary" style="padding:12px 24px;" onclick="App.importWizardNext()">
+            🚀 بدء الاستيراد (${rows.length} شحنة)
+          </button>
+          <button class="btn btn-secondary" onclick="App.importWizardBack()">← العودة</button>
+          <button class="btn btn-secondary" onclick="App.cancelImportWizard()">إلغاء</button>
+        </div>
+      </div>`;
+  }
+
+  // ── Step 5: Importing (progress) ──────────────────────────
+  if (step===5) {
+    const prog = wiz.progress||{done:0,total:0,failed:0};
+    const pct  = prog.total>0 ? Math.round(prog.done/prog.total*100) : 0;
+    return `${stepBar}
+      <div class="card" style="text-align:center;padding:40px;">
+        <div style="font-size:40px;margin-bottom:16px;">🚀</div>
+        <h3 style="margin-bottom:20px;">جاري استيراد الشحنات...</h3>
+        <div style="background:var(--gray-100);border-radius:99px;height:12px;margin:0 auto 16px;max-width:400px;overflow:hidden;">
+          <div id="importProgressBar" style="background:var(--brand);height:100%;border-radius:99px;transition:width .3s;width:${pct}%;"></div>
+        </div>
+        <div id="importProgressText" style="font-size:14px;color:var(--gray-600);margin-bottom:8px;">
+          ${prog.done} / ${prog.total} شحنة
+        </div>
+        ${prog.failed>0?`<div style="color:var(--danger);font-size:13px;">${prog.failed} فشلت</div>`:""}
+        ${pct>=100?`<button class="btn btn-primary" style="margin-top:20px;" onclick="App.importWizardNext()">عرض التقرير ←</button>`:""}
+      </div>`;
+  }
+
+  // ── Step 6: Report ─────────────────────────────────────────
+  if (step===6) {
+    const prog = wiz.progress||{done:0,total:0,failed:0,skipped:0};
+    return `${stepBar}
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:20px;">📊 الخطوة 6: تقرير الاستيراد</h3>
+        <div class="kpi-grid" style="margin-bottom:20px;">
+          ${kpi("إجمالي الصفوف",prog.total,"box","var(--brand)","var(--brand-light)")}
+          ${kpi("تم الاستيراد",prog.done,"chart","var(--success)","var(--success-bg)")}
+          ${kpi("فشل",prog.failed,"refresh","var(--danger)","var(--danger-bg)")}
+          ${kpi("تخطي",prog.skipped,"log","var(--warning)","var(--warning-bg)")}
+        </div>
+        ${prog.done>0?`<div style="background:var(--success-bg);border-radius:var(--radius);padding:14px;margin-bottom:12px;">
+          ✅ تم استيراد <b>${prog.done}</b> شحنة بنجاح
+        </div>`:""}
+        ${prog.failed>0?`<div style="background:var(--danger-bg);border-radius:var(--radius);padding:14px;margin-bottom:12px;">
+          ❌ فشل <b>${prog.failed}</b> شحنة
+        </div>`:""}
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          ${prog.failed>0&&wiz.batch?`
+            <button class="btn btn-secondary" onclick="App.retryFailedRows('${esc(wiz.batch.id)}')">🔄 إعادة المحاولة</button>
+            <button class="btn btn-secondary" onclick="App.downloadErrorReport('${esc(wiz.batch.id)}')">⬇️ تقرير الأخطاء</button>`:""}
+          <button class="btn btn-primary" onclick="App.finishImport()">✅ إنهاء</button>
+        </div>
+      </div>`;
+  }
+
+  return `<div class="empty"><div class="empty-icon">📦</div><h3>جاري التحميل...</h3></div>`;
+}
+
 function viewAddresses() {
   const addrs = AppState.merchantAddresses;
   const uid   = AppState.user.id;
@@ -3345,6 +3732,385 @@ const App={
   // ── Phase 2C: Pricing ─────────────────────────────────────
   // ── Phase 2D: Branches & Warehouses ──────────────────────
   // ── Phase 3: driver self-service wallet ──────────────────
+  // ══════════════════════════════════════════════════════════════
+  // BULK IMPORT — App Methods
+  // ══════════════════════════════════════════════════════════════
+
+  async loadImportBatches() {
+    const role = AppState.user.primary_role||AppState.user.role;
+    const mid  = role==="merchant" ? AppState.user.id : null;
+    AppState.importBatches = await DB.loadImportBatches(mid);
+  },
+
+  async startImportWizard() {
+    await loadEgyptData();
+    AppState.importWizard = {
+      step:1, file:null, rawRows:[], validatedRows:[],
+      merchantId: (AppState.user.primary_role||AppState.user.role)==="merchant" ? AppState.user.id : "",
+      merchantName: (AppState.user.primary_role||AppState.user.role)==="merchant" ? AppState.user.name : "",
+      autoRecipients:false, autoAddresses:false,
+      progress:{done:0,total:0,failed:0,skipped:0}, batch:null,
+    };
+    rerenderContent();
+  },
+
+  cancelImportWizard() {
+    if (!confirm("إلغاء الاستيراد الحالي؟")) return;
+    AppState.importWizard = null;
+    rerenderContent();
+  },
+
+  downloadImportTemplate() {
+    generateImportTemplate();
+    DB.addAudit("DOWNLOAD_IMPORT_TEMPLATE","",
+      "By "+AppState.user.name,"import");
+  },
+
+  importWizardNext() {
+    if (!AppState.importWizard) return;
+    const wiz = AppState.importWizard;
+    // Step 2 → 3: trigger validation
+    if (wiz.step===2) { App.runImportValidation(); return; }
+    // Step 4 → 5: trigger actual import
+    if (wiz.step===4) { wiz.step=5; rerenderContent(); App.runBulkImport(); return; }
+    wiz.step++;
+    rerenderContent();
+  },
+
+  importWizardBack() {
+    if (!AppState.importWizard) return;
+    const wiz = AppState.importWizard;
+    if (wiz.step<=1) { App.cancelImportWizard(); return; }
+    wiz.step--;
+    // Going back to step 2 clears file so user re-picks
+    if (wiz.step===2) { wiz.file=null; wiz.rawRows=[]; wiz.validatedRows=[]; }
+    rerenderContent();
+  },
+
+  handleImportFile(file) {
+    if (!file) return;
+    if (file.size > 5*1024*1024) { toast("الملف كبير جداً (الحد 5MB)","error"); return; }
+    const wiz = AppState.importWizard;
+    if (!wiz) return;
+    // Admin must select merchant first
+    const isAdmin = (AppState.user.primary_role||AppState.user.role)==="admin";
+    if (isAdmin) {
+      const sel = $("importMerchantSel");
+      if (!sel||!sel.value) { toast("يرجى اختيار التاجر أولاً","warning"); return; }
+      wiz.merchantId   = sel.value;
+      wiz.merchantName = sel.options[sel.selectedIndex]?.dataset.name||"";
+    }
+    wiz.file = file;
+    rerenderContent();
+  },
+
+  handleImportDrop(event) {
+    const file = event.dataTransfer?.files?.[0];
+    if (file) App.handleImportFile(file);
+  },
+
+  async runImportValidation() {
+    const wiz = AppState.importWizard;
+    if (!wiz||!wiz.file) { toast("يرجى رفع ملف أولاً","warning"); return; }
+    if (!wiz.merchantId) { toast("يرجى اختيار التاجر أولاً","warning"); return; }
+    try {
+      toast("جاري التحقق من البيانات...","info");
+      // Parse file
+      const rawRows = await parseImportFile(wiz.file);
+      if (!rawRows.length) { toast("الملف فارغ أو تنسيقه غير صحيح","error"); return; }
+
+      // Load existing shipment phones to detect duplicates
+      const existingPhones = new Set(AppState.shipments.map(s=>s.customerPhone));
+
+      // Normalize + validate each row
+      const validated = rawRows.map((raw, idx) => {
+        const r   = normalizeImportRow(raw);
+        const errs = validateImportRow(r, idx+2, EGYPT_GOV);
+        const isDup = r.customer_phone&&existingPhones.has(r.customer_phone.replace(/s/g,""));
+        return {
+          row_number:        idx+2,
+          raw_data:          raw,
+          customer_name:     r.customer_name||"",
+          customer_phone:    (r.customer_phone||"").replace(/s/g,""),
+          customer_phone2:   (r.customer_phone2||"").replace(/s/g,"")||null,
+          governorate:       r.governorate||"",
+          city:              r.city||"",
+          street:            r.street||null,
+          building:          r.building||null,
+          amount:            r.amount!==""?Number(r.amount):null,
+          delivery_fee:      r.delivery_fee!==""?Number(r.delivery_fee):null,
+          return_fee:        r.return_fee!==""?Number(r.return_fee):0,
+          service_type:      r.service_type||"door_to_door",
+          order_type:        r.order_type||"standard",
+          weight:            r.weight!==""&&r.weight!==undefined?Number(r.weight):null,
+          barcode:           r.barcode||null,
+          notes:             r.notes||null,
+          is_valid:          errs.length===0,
+          is_duplicate:      isDup&&errs.length===0,
+          validation_errors: errs,
+          status:            "pending",
+        };
+      });
+
+      wiz.rawRows       = rawRows;
+      wiz.validatedRows = validated;
+      wiz.step          = 3;
+      rerenderContent();
+
+    } catch(err) {
+      toast("خطأ أثناء قراءة الملف: "+err.message,"error");
+    }
+  },
+
+  async runBulkImport() {
+    const wiz = AppState.importWizard;
+    if (!wiz) return;
+
+    const validRows = (wiz.validatedRows||[]).filter(r=>r.is_valid&&!r.is_duplicate);
+    if (!validRows.length) { toast("لا توجد صفوف صالحة","warning"); return; }
+
+    wiz.progress = { done:0, total:validRows.length, failed:0, skipped:0 };
+
+    try {
+      // Create batch record in DB
+      const batch = await DB.createImportBatch({
+        merchant_id:      wiz.merchantId,
+        merchant_name:    wiz.merchantName||"",
+        created_by:       AppState.user.id,
+        created_by_role:  AppState.user.primary_role||AppState.user.role,
+        filename:         wiz.file.name,
+        file_row_count:   wiz.rawRows.length,
+        total_rows:       (wiz.validatedRows||[]).length,
+        valid_rows:       validRows.length,
+        invalid_rows:     (wiz.validatedRows||[]).filter(r=>!r.is_valid).length,
+        duplicate_rows:   (wiz.validatedRows||[]).filter(r=>r.is_duplicate).length,
+        auto_create_recipients: wiz.autoRecipients||false,
+        auto_save_addresses:    wiz.autoAddresses||false,
+        status:           "importing",
+        started_at:       new Date().toISOString(),
+      });
+      wiz.batch = batch;
+
+      // Insert all rows into import_rows
+      const rowPayloads = (wiz.validatedRows||[]).map(r=>({
+        batch_id:          batch.id,
+        row_number:        r.row_number,
+        raw_data:          r.raw_data,
+        customer_name:     r.customer_name,
+        customer_phone:    r.customer_phone,
+        customer_phone2:   r.customer_phone2,
+        governorate:       r.governorate,
+        city:              r.city,
+        street:            r.street,
+        building:          r.building,
+        amount:            r.amount,
+        delivery_fee:      r.delivery_fee,
+        return_fee:        r.return_fee||0,
+        service_type:      r.service_type,
+        order_type:        r.order_type,
+        weight:            r.weight,
+        barcode:           r.barcode,
+        notes:             r.notes,
+        is_valid:          r.is_valid,
+        is_duplicate:      r.is_duplicate,
+        validation_errors: r.validation_errors||[],
+        status:            r.is_duplicate?"duplicate":r.is_valid?"pending":"failed",
+      }));
+      await DB.insertImportRows(rowPayloads);
+
+      // Import valid rows one by one (with progress updates)
+      const uid  = AppState.user.id;
+      const CHUNK = 10;
+      for (let i=0; i<validRows.length; i++) {
+        const r = validRows[i];
+        try {
+          const code = await generateShipmentCode();
+          await DB.createShipment({
+            shipment_code:  code,
+            merchant_id:    wiz.merchantId,
+            merchant_name:  wiz.merchantName||"",
+            merchant_phone: "",
+            customer_name:  r.customer_name,
+            customer_phone: r.customer_phone,
+            customer_phone2:r.customer_phone2||null,
+            governorate:    r.governorate,
+            city:           r.city||"",
+            street:         r.street||null,
+            building:       r.building||null,
+            floor:          null,
+            apartment:      null,
+            amount:         r.amount||0,
+            delivery_fee:   r.delivery_fee||0,
+            return_fee:     r.return_fee||0,
+            service_type:   r.service_type||"door_to_door",
+            order_type:     r.order_type||"standard",
+            weight:         r.weight||null,
+            barcode:        r.barcode||null,
+            notes:          r.notes||null,
+            status:         "submitted",
+            created_by:     uid,
+          });
+
+          // Auto-create recipient if enabled
+          if (wiz.autoRecipients && r.customer_name && r.customer_phone) {
+            db.from("merchant_recipients").insert([{
+              merchant_id: wiz.merchantId,
+              name:        r.customer_name,
+              phone:       r.customer_phone,
+              phone2:      r.customer_phone2||null,
+              governorate: r.governorate||"",
+              city:        r.city||"",
+              street:      r.street||null,
+            }]).then(()=>{}).catch(()=>{});
+          }
+
+          // Auto-save address if enabled and has enough info
+          if (wiz.autoAddresses && r.governorate && r.street) {
+            db.from("merchant_addresses").insert([{
+              merchant_id:  wiz.merchantId,
+              label:        r.customer_name+" - "+r.governorate,
+              type:         "other",
+              governorate:  r.governorate,
+              city:         r.city||"",
+              street:       r.street||null,
+              building:     r.building||null,
+            }]).then(()=>{}).catch(()=>{});
+          }
+
+          // Update import row status
+          await DB.updateImportRow(rowPayloads[i+wiz.progress.done-wiz.progress.done]?.id||"",
+            {status:"imported", shipment_code:code});
+
+          wiz.progress.done++;
+        } catch(rowErr) {
+          wiz.progress.failed++;
+          console.warn("Import row failed:",rowErr.message);
+        }
+
+        // Update progress bar every 10 rows
+        if (i%CHUNK===0||i===validRows.length-1) {
+          const bar  = $("importProgressBar");
+          const txt  = $("importProgressText");
+          const p    = wiz.progress;
+          const pct  = Math.round(p.done/p.total*100);
+          if (bar) bar.style.width = pct+"%";
+          if (txt) txt.textContent = p.done+" / "+p.total+" شحنة";
+          await new Promise(r=>setTimeout(r,0)); // yield to UI
+        }
+      }
+
+      // Finalize batch
+      await DB.updateImportBatch(batch.id, {
+        status:        wiz.progress.failed===validRows.length?"failed":"done",
+        imported_rows: wiz.progress.done,
+        failed_rows:   wiz.progress.failed,
+        skipped_rows:  (wiz.validatedRows||[]).filter(r=>r.is_duplicate).length,
+        completed_at:  new Date().toISOString(),
+      });
+
+      await DB.addAudit("BULK_IMPORT",batch.id,
+        "Merchant: "+wiz.merchantName+" | Total: "+wiz.progress.total+
+        " | Imported: "+wiz.progress.done+" | Failed: "+wiz.progress.failed+
+        " | By: "+AppState.user.name,"import");
+
+      wiz.step = 6;
+      rerenderContent();
+
+    } catch(err) {
+      toast("خطأ أثناء الاستيراد: "+err.message,"error");
+      if (wiz.batch) {
+        await DB.updateImportBatch(wiz.batch.id,{status:"failed"}).catch(()=>{});
+      }
+    }
+  },
+
+  async finishImport() {
+    AppState.importWizard = null;
+    await App.loadImportBatches();
+    // Reload shipments to show new ones
+    AppState.shipments = await DB.loadShipments();
+    rerenderContent();
+    toast("✅ تم إنهاء الاستيراد بنجاح");
+  },
+
+  async cancelImport(batchId) {
+    if (!confirm("إلغاء دفعة الاستيراد هذه؟")) return;
+    await DB.updateImportBatch(batchId, {
+      status:"cancelled",
+      cancelled_at:new Date().toISOString(),
+      cancelled_by:AppState.user.id,
+    });
+    await DB.addAudit("CANCEL_IMPORT",batchId,
+      "By "+AppState.user.name,"import");
+    await App.loadImportBatches();
+    rerenderContent();
+    toast("تم إلغاء الدفعة","info");
+  },
+
+  async retryFailedRows(batchId) {
+    const rows = await DB.loadImportRows(batchId,"failed");
+    if (!rows.length) { toast("لا توجد صفوف فاشلة","info"); return; }
+    const batch = AppState.importBatches.find(b=>b.id===batchId);
+    if (!batch) return;
+
+    // Re-open wizard at step 4 with failed rows as validated rows
+    AppState.importWizard = {
+      step:4,
+      file:{name:batch.filename, size:0},
+      rawRows:[], validatedRows: rows.map(r=>({
+        ...r,
+        is_valid:true, is_duplicate:false, validation_errors:[],
+      })),
+      merchantId:   batch.merchant_id,
+      merchantName: batch.merchant_name,
+      autoRecipients:batch.auto_create_recipients||false,
+      autoAddresses: batch.auto_save_addresses||false,
+      progress:{done:0,total:rows.length,failed:0,skipped:0},
+      batch: null,
+    };
+    rerenderContent();
+    toast("يمكنك الآن إعادة استيراد الصفوف الفاشلة","info");
+  },
+
+  async resumeImportBatch(batchId) {
+    const batch = AppState.importBatches.find(b=>b.id===batchId);
+    if (!batch) return;
+    const rows = await DB.loadImportRows(batchId,"pending");
+    AppState.importWizard = {
+      step:4,
+      file:{name:batch.filename,size:0},
+      rawRows:[], validatedRows:rows.map(r=>({...r,is_valid:true,is_duplicate:false})),
+      merchantId:batch.merchant_id, merchantName:batch.merchant_name,
+      autoRecipients:false, autoAddresses:false,
+      progress:{done:0,total:rows.length,failed:0,skipped:0}, batch,
+    };
+    rerenderContent();
+  },
+
+  async downloadErrorReport(batchId, fromWizard) {
+    let errorRows = [];
+    if (fromWizard && AppState.importWizard) {
+      errorRows = (AppState.importWizard.validatedRows||[]).filter(r=>!r.is_valid);
+    } else if (batchId) {
+      const rows = await DB.loadImportRows(batchId);
+      errorRows = rows.filter(r=>r.status==="failed"||!r.is_valid);
+    }
+    if (!errorRows.length) { toast("لا توجد أخطاء لتحميلها","info"); return; }
+    const data = errorRows.map(r=>({
+      "الصف":           r.row_number,
+      "اسم العميل":     r.customer_name||"",
+      "الهاتف":         r.customer_phone||"",
+      "المحافظة":       r.governorate||"",
+      "المبلغ":         r.amount||"",
+      "الأخطاء":        (r.validation_errors||[]).map(e=>e.field+": "+e.message).join(" | "),
+    }));
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb,ws,"أخطاء الاستيراد");
+    XLSX.writeFile(wb,"تقرير_أخطاء_الاستيراد.xlsx");
+    toast("✅ تم تحميل تقرير الأخطاء");
+  },
+
   async loadMyWallet() {
     const uid = AppState.user.id;
     const [bal, txns] = await Promise.all([

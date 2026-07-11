@@ -1085,3 +1085,81 @@ body {
     max-width: 100%;
     overflow-x: hidden;
 }
+/* ══════════════════════════════════════════════════════════════
+   BULK IMPORT WIZARD
+   ══════════════════════════════════════════════════════════════ */
+
+/* Step bar */
+.import-steps {
+  display: flex;
+  align-items: center;
+  margin-bottom: 24px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+.import-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.import-step-num {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--gray-200);
+  color: var(--gray-500);
+  font-weight: 700;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .2s, color .2s;
+}
+.import-step.active .import-step-num {
+  background: var(--brand);
+  color: #fff;
+}
+.import-step.done .import-step-num {
+  background: var(--success);
+  color: #fff;
+}
+.import-step-label {
+  font-size: 11px;
+  color: var(--gray-500);
+  white-space: nowrap;
+  font-weight: 500;
+}
+.import-step.active .import-step-label { color: var(--brand); font-weight: 700; }
+.import-step.done  .import-step-label { color: var(--success); }
+.import-step-line {
+  flex: 1;
+  height: 2px;
+  background: var(--gray-200);
+  min-width: 20px;
+  margin: 0 4px;
+  margin-bottom: 18px;
+}
+
+/* File drop zone */
+.import-dropzone {
+  border: 2.5px dashed var(--gray-300);
+  border-radius: var(--radius-lg);
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .2s, background .2s;
+  background: var(--gray-50);
+}
+.import-dropzone:hover,
+.import-dropzone.dragover {
+  border-color: var(--brand);
+  background: var(--brand-light);
+}
+
+@media (max-width: 768px) {
+  .import-step-label { display: none; }
+  .import-step-line  { min-width: 12px; }
+  .import-dropzone   { padding: 28px 16px; }
+}
