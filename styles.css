@@ -1163,3 +1163,44 @@ body {
   .import-step-line  { min-width: 12px; }
   .import-dropzone   { padding: 28px 16px; }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   OTP DELIVERY VERIFICATION
+   ══════════════════════════════════════════════════════════════ */
+
+.otp-verified-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid var(--success-border, #bbf7d0);
+  border-radius: var(--radius);
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.otp-send-btn,
+.otp-verify-btn {
+  border-color: var(--info, #3b82f6) !important;
+  color: var(--info, #3b82f6) !important;
+}
+
+.otp-verify-btn {
+  border-color: var(--success) !important;
+  color: var(--success) !important;
+}
+
+.btn-full {
+  width: 100%;
+}
+
+.btn-ghost {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 6px;
+  text-align: center;
+  width: 100%;
+}

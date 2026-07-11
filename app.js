@@ -1688,6 +1688,16 @@ function viewTasks() {
             <a class="btn btn-secondary btn-sm" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(s.address)}" target="_blank">🗺 ملاحة</a>
             ${can("upload_pod")?`<label class="btn btn-secondary btn-sm" style="cursor:pointer;">📷 إثبات
               <input type="file" id="pod-${esc(s.id)}" accept="image/*" style="display:none" onchange="App.uploadPOD('${esc(s.id)}','pod-${esc(s.id)}')"/></label>`:""}
+            ${s.status==="out_for_delivery"?`
+              ${s.otpVerified
+                ? `<div class="otp-verified-badge">✅ تم التحقق من الهوية</div>`
+                : `<button class="btn btn-secondary btn-sm otp-send-btn" onclick="App.sendDeliveryOTP('${esc(s.id)}','${esc(s.customerPhone)}')">
+                    📱 إرسال كود تحقق
+                  </button>
+                  <button class="btn btn-secondary btn-sm otp-verify-btn" onclick="App.openVerifyOTP('${esc(s.id)}')">
+                    🔐 تأكيد بالكود
+                  </button>`}
+            `:""}
             ${can("change_status")?`
               <button class="btn btn-primary btn-sm" onclick="App.updateStatus('${esc(s.id)}','delivered')">✅ تم التسليم</button>
               <button class="btn btn-sm" style="background:var(--danger-bg);color:var(--danger);border:1px solid var(--danger-border);"
@@ -5706,6 +5716,139 @@ const App={
       await DB.addAudit("UPLOAD_POD",id,`By ${AppState.user.name}`);
       rerenderContent();toast("✅ تم رفع إثبات التسليم");
     }catch(err){toast("فشل الرفع: "+err.message,"error");}
+  },
+
+  // ── Phase 3: OTP Delivery Verification ───────────────────────
+  async sendDeliveryOTP(shipmentCode, customerPhone) {
+    const btn = document.querySelector(`[onclick*="sendDeliveryOTP('${shipmentCode}'"]`);
+    if (btn) { btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`; }
+    try {
+      if (!customerPhone) throw new Error("لا يوجد رقم هاتف للعميل");
+      const otp = await DB.generateAndSendOTP(shipmentCode, customerPhone);
+      if (!otp) throw new Error("فشل توليد الكود");
+      await DB.addTimeline(shipmentCode,
+        `تم إرسال كود التحقق إلى ${customerPhone}`,
+        AppState.user.name,
+        AppState.user.primary_role||AppState.user.role,
+        "otp_sent");
+      await DB.addAudit("OTP_SENT", shipmentCode,
+        `OTP sent to ${customerPhone} by ${AppState.user.name}`, "shipment");
+      // In production: customer receives SMS. In dev: show code to courier.
+      toast(`✅ تم إرسال الكود — للاختبار: ${otp}`, "success");
+    } catch(err) {
+      toast("فشل الإرسال: " + err.message, "error");
+    } finally {
+      if (btn) { btn.disabled=false; btn.innerHTML="📱 إرسال كود تحقق"; }
+    }
+  },
+
+  openVerifyOTP(shipmentCode) {
+    const s = AppState.shipments.find(x => x.id === shipmentCode);
+    if (!s) return;
+    Modals.open(`<div class="modal" style="max-width:360px;">
+      <div class="modal-header">
+        <h3>🔐 تأكيد استلام الشحنة</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div style="text-align:center;margin-bottom:20px;">
+          <div style="font-size:14px;color:var(--gray-600);margin-bottom:6px;">الشحنة</div>
+          <div style="font-size:16px;font-weight:700;font-family:monospace;">${esc(shipmentCode)}</div>
+          <div style="font-size:13px;color:var(--gray-500);margin-top:4px;">${esc(s.customerName)}</div>
+        </div>
+        <div class="field">
+          <label style="font-weight:600;display:block;margin-bottom:8px;text-align:center;">
+            اطلب من العميل الكود الذي وصله على هاتفه
+          </label>
+          <input id="otpInput" type="text" inputmode="numeric" maxlength="6"
+            placeholder="× × × × × ×"
+            style="text-align:center;letter-spacing:12px;font-size:28px;font-weight:700;
+              font-family:monospace;padding:16px;border-radius:var(--radius);
+              border:2px solid var(--gray-300);width:100%;box-sizing:border-box;"
+            oninput="this.value=this.value.replace(/[^0-9]/g,'').slice(0,6);
+              if(this.value.length===6) $('confirmOtpBtn').focus();"
+          />
+        </div>
+        <div id="otpError" style="display:none;color:var(--danger);font-size:13px;
+          text-align:center;margin-top:8px;font-weight:600;"></div>
+        <div id="otpAttempts" style="font-size:11px;color:var(--gray-400);text-align:center;margin-top:6px;"></div>
+      </div>
+      <div class="modal-footer" style="flex-direction:column;gap:10px;">
+        <button id="confirmOtpBtn" class="btn btn-primary btn-full"
+          onclick="App.confirmOTP('${esc(shipmentCode)}')">
+          تأكيد الكود
+        </button>
+        <button class="btn btn-secondary btn-full"
+          onclick="App.sendDeliveryOTP('${esc(shipmentCode)}','${esc(s.customerPhone)}');$('otpInput').value='';$('otpError').style.display='none';">
+          إعادة إرسال الكود
+        </button>
+        <button class="btn-ghost" onclick="Modals.close()" style="font-size:13px;color:var(--gray-500);">
+          تسليم بدون كود
+        </button>
+      </div>
+    </div>`);
+    setTimeout(()=>$("otpInput")?.focus(), 100);
+  },
+
+  async confirmOTP(shipmentCode) {
+    const entered = $("otpInput")?.value?.trim();
+    const errEl   = $("otpError");
+    const attEl   = $("otpAttempts");
+    const btn     = $("confirmOtpBtn");
+
+    if (!entered || entered.length !== 6) {
+      errEl.style.display="block";
+      errEl.textContent="يرجى إدخال الكود المكون من 6 أرقام";
+      return;
+    }
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> جاري التحقق...`;
+    errEl.style.display="none";
+
+    try {
+      const isValid = await DB.verifyOTP(shipmentCode, entered);
+
+      if (isValid) {
+        // Update local state immediately
+        const s = AppState.shipments.find(x=>x.id===shipmentCode);
+        if (s) s.otpVerified = true;
+
+        await DB.addTimeline(shipmentCode,
+          "تم التحقق من هوية العميل بالكود",
+          AppState.user.name,
+          AppState.user.primary_role||AppState.user.role,
+          "otp_verified");
+        await DB.addAudit("OTP_VERIFIED", shipmentCode,
+          `OTP verified by courier ${AppState.user.name}`, "shipment");
+
+        Modals.close();
+        rerenderContent();
+        toast("✅ تم التحقق من هوية العميل — يمكنك الآن تسليم الشحنة", "success");
+      } else {
+        // Track failed attempts
+        const prev = parseInt(attEl.dataset.attempts||"0") + 1;
+        attEl.dataset.attempts = prev;
+        errEl.style.display="block";
+        errEl.textContent = "❌ الكود غير صحيح";
+        attEl.textContent = `محاولة ${prev} من 3`;
+        $("otpInput").value="";
+        $("otpInput").focus();
+
+        if (prev >= 3) {
+          btn.disabled=true;
+          errEl.textContent="تم تجاوز الحد الأقصى للمحاولات. أعد إرسال الكود.";
+          attEl.textContent="";
+        } else {
+          btn.disabled=false;
+          btn.textContent="تأكيد الكود";
+        }
+      }
+    } catch(err) {
+      errEl.style.display="block";
+      errEl.textContent="خطأ: " + err.message;
+      btn.disabled=false;
+      btn.textContent="تأكيد الكود";
+    }
   },
 
   async rescheduleShipment(id) {
