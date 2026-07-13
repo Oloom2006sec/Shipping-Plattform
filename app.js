@@ -214,6 +214,8 @@ const AppState = {
   myWalletBalance:0, myWalletTxns:[],
   // Bulk import wizard
   importBatches:[], importWizard:null, _importDataLoaded:false,
+  // Phase 9 reports
+  reportsTab:"overview", reportRange:"month", reportCourier:"", reportMerchant:"",
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -753,6 +755,16 @@ const DB = {
     const{error:upErr}=await db.storage.from("pod-images").upload(path,file,{upsert:true});
     if(upErr)throw upErr;
     const{data}=db.storage.from("pod-images").getPublicUrl(path);
+    return data.publicUrl;
+  },
+
+  async uploadSignature(shipmentCode, blob) {
+    const path = `sig_${shipmentCode}_${Date.now()}.png`;
+    const { error } = await db.storage.from("pod-images").upload(path, blob, {
+      upsert: true, contentType: "image/png"
+    });
+    if (error) throw error;
+    const { data } = db.storage.from("pod-images").getPublicUrl(path);
     return data.publicUrl;
   }
 };
@@ -1687,8 +1699,11 @@ function viewTasks() {
             <a class="btn btn-secondary btn-sm" href="tel:${esc(s.customerPhone)}">📞 اتصال</a>
             <a class="btn btn-secondary btn-sm" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(s.address)}" target="_blank">🗺 ملاحة</a>
             ${can("upload_pod")?`<label class="btn btn-secondary btn-sm" style="cursor:pointer;">📷 إثبات
-              <input type="file" id="pod-${esc(s.id)}" accept="image/*" style="display:none" onchange="App.uploadPOD('${esc(s.id)}','pod-${esc(s.id)}')"/></label>`:""}
-            ${s.status==="out_for_delivery"?`
+              <input type="file" id="pod-${esc(s.id)}" accept="image/*" style="display:none" onchange="App.uploadPOD('${esc(s.id)}','pod-${esc(s.id)}')"/></label>
+              ${s.signatureUrl
+                ? `<span class="otp-verified-badge">✍️ تم التوقيع</span>`
+                : `<button class="btn btn-secondary btn-sm" onclick="App.openSignatureCapture('${esc(s.id)}')">✍️ توقيع العميل</button>`}
+            `:""}            ${s.status==="out_for_delivery"?`
               ${s.otpVerified
                 ? `<div class="otp-verified-badge">✅ تم التحقق من الهوية</div>`
                 : `<button class="btn btn-secondary btn-sm otp-send-btn" onclick="App.sendDeliveryOTP('${esc(s.id)}','${esc(s.customerPhone)}')">
@@ -1741,8 +1756,12 @@ function viewTrack() {
         <div class="detail-field"><div class="df-label">العنوان</div><div class="df-value">${esc(s.governorate?`${s.governorate} / ${s.city}`:s.address)}</div></div>
         <div class="detail-field"><div class="df-label">موعد التسليم</div><div class="df-value">${esc(s.eta)||"قيد التجهيز"}</div></div>
       </div>
-      ${s.podUrl?`<div style="margin-top:12px;"><div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:8px;">إثبات التسليم</div>
-        <img src="${esc(s.podUrl)}" style="width:150px;border-radius:var(--radius);border:2px solid var(--gray-200);"/></div>`:""}
+      ${s.podUrl||s.signatureUrl?`<div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;">
+        ${s.podUrl?`<div><div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:6px;">📷 إثبات التسليم</div>
+          <img src="${esc(s.podUrl)}" style="width:150px;border-radius:var(--radius);border:2px solid var(--gray-200);"/></div>`:""}
+        ${s.signatureUrl?`<div><div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:6px;">✍️ توقيع العميل</div>
+          <img src="${esc(s.signatureUrl)}" style="width:150px;border-radius:var(--radius);border:2px solid var(--gray-200);background:#fff;"/></div>`:""}
+      </div>`:""}
       <div class="timeline" id="tlBox-${esc(s.id)}" style="margin-top:20px;">
         <h4>${icon("log",13)} سجل الأحداث</h4>
         <div class="page-loader"><span class="spinner"></span></div>
@@ -1860,45 +1879,356 @@ function viewMyWallet() {
 }
 
 // ── REPORTS VIEW ──────────────────────────────────────────
-function viewReports() {
-  const list=visible(),total=list.length||1;
-  return `
-    <div class="kpi-grid">
-      ${Object.entries(STATUS_MAP).filter(([k])=>!["cancelled","suspended","rescheduled","hub","warehouse","received","created"].includes(k)).map(([k,v])=>
-        kpi(v.label, list.filter(s=>s.status===k).length, "box", v.color||"var(--brand)", "var(--brand-light)", k)
-      ).join("")}
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:20px;">
-      ${Object.entries(SERVICE_MAP).map(([k,v])=>`
-        <div class="card" style="padding:14px;cursor:pointer;" onclick="App.setServiceFilter('${k}');AppState.view='shipments';rerenderContent();">
-          <div style="font-size:22px;margin-bottom:6px;">${v.icon}</div>
-          <div style="font-size:12px;color:var(--gray-500);font-weight:600;">${v.label}</div>
-          <div style="font-size:22px;font-weight:800;">${list.filter(s=>s.serviceType===k).length}</div>
-        </div>`).join("")}
-      ${Object.entries(ORDER_TYPE_MAP).map(([k,v])=>`
-        <div class="card" style="padding:14px;cursor:pointer;" onclick="App.setOrderFilter('${k}');AppState.view='shipments';rerenderContent();">
-          <div style="font-size:22px;margin-bottom:6px;">${v.icon}</div>
-          <div style="font-size:12px;color:var(--gray-500);font-weight:600;">${v.label}</div>
-          <div style="font-size:22px;font-weight:800;">${list.filter(s=>s.orderType===k).length}</div>
-        </div>`).join("")}
-    </div>
-    <div class="card">
-      <h3 class="card-title" style="margin-bottom:16px;">${icon("chart")} مؤشرات الأداء</h3>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;">
-        ${[["إجمالي الشحنات",list.length],["نسبة التسليم",pct(list.filter(s=>s.status==="delivered").length,total)+"%"],
-           ["نسبة المرتجع",pct(list.filter(s=>s.status==="returned").length,total)+"%"],
-           ["إجمالي المبالغ",money(list.reduce((a,s)=>a+(s.amount||0),0))],
-           ["إجمالي الرسوم",money(list.reduce((a,s)=>a+(s.deliveryFee||0),0))],
-           ["صافي المستحق",money(list.filter(s=>s.status==="delivered").reduce((a,s)=>a+(s.amount-s.deliveryFee),0))]
-          ].map(([l,v])=>`<div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius);padding:14px;">
-            <div style="font-size:10px;font-weight:700;color:var(--gray-400);text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;">${l}</div>
-            <div style="font-size:20px;font-weight:800;">${v}</div>
-          </div>`).join("")}
-      </div>
-    </div>`;
+// ─────────────────────────────────────────────────────────────
+// PHASE 9 — REPORTING & ANALYTICS HELPERS
+// ─────────────────────────────────────────────────────────────
+function getReportRange(range) {
+  const now=new Date(), end=new Date(now), start=new Date(now);
+  end.setHours(23,59,59,999);
+  if      (range==="today")   { start.setHours(0,0,0,0); }
+  else if (range==="week")    { start.setDate(now.getDate()-6); start.setHours(0,0,0,0); }
+  else if (range==="month")   { start.setDate(1); start.setHours(0,0,0,0); }
+  else if (range==="quarter") { start.setMonth(now.getMonth()-2,1); start.setHours(0,0,0,0); }
+  else if (range==="year")    { start.setMonth(0,1); start.setHours(0,0,0,0); }
+  return {start,end};
 }
 
-// ── USERS VIEW ────────────────────────────────────────────
+function filterByRange(list,range,field) {
+  const {start,end}=getReportRange(range);
+  return list.filter(s=>{ const d=new Date(s[field]||s.createdAt||0); return d>=start&&d<=end; });
+}
+
+function buildDailyChart(list,range) {
+  const days=range==="today"?1:range==="week"?7:range==="month"?30:range==="quarter"?90:365;
+  const buckets={};
+  for (let i=days-1;i>=0;i--) {
+    const d=new Date(); d.setDate(d.getDate()-i);
+    const key=d.toISOString().split("T")[0];
+    buckets[key]={delivered:0,returned:0,created:0};
+  }
+  list.forEach(s=>{
+    const ck=(s.createdAt||"").split("T")[0];
+    if(buckets[ck]) buckets[ck].created++;
+    if(s.status==="delivered"){const dk=(s.deliveredAt||s.createdAt||"").split("T")[0];if(buckets[dk])buckets[dk].delivered++;}
+    if(s.status==="returned") {const rk=(s.returnedAt||s.createdAt||"").split("T")[0]; if(buckets[rk])buckets[rk].returned++;}
+  });
+  return Object.entries(buckets).map(([date,v])=>({date,...v}));
+}
+
+function renderBarChart(data,valueKey,color,labelFn) {
+  const max=Math.max(...data.map(d=>d[valueKey]),1);
+  const show=data.length<=14?data:data.filter((_,i)=>i%Math.ceil(data.length/14)===0||i===data.length-1);
+  return `<div style="display:flex;align-items:flex-end;gap:3px;height:90px;padding:0 4px;">
+    ${show.map(d=>{
+      const h=Math.max(Math.round((d[valueKey]/max)*72),2);
+      return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;min-width:0;">
+        <div style="font-size:9px;color:var(--gray-500);">${d[valueKey]||""}</div>
+        <div style="width:100%;background:${color};border-radius:2px 2px 0 0;height:${h}px;" title="${labelFn(d)}"></div>
+        <div style="font-size:9px;color:var(--gray-400);white-space:nowrap;overflow:hidden;max-width:28px;">${(d.date||"").slice(5)}</div>
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+// ─────────────────────────────────────────────────────────────
+// MAIN VIEW FUNCTION
+// ─────────────────────────────────────────────────────────────
+function viewReports() {
+  const role      = AppState.user.primary_role||AppState.user.role;
+  const isAdmin   = role==="admin";
+  const tab       = AppState.reportsTab||"overview";
+  const range     = AppState.reportRange||"month";
+  const allShips  = AppState.shipments;
+  const list      = filterByRange(allShips,range,"createdAt");
+  const delivered = list.filter(s=>s.status==="delivered");
+  const returned  = list.filter(s=>s.status==="returned");
+  const pending   = list.filter(s=>!["delivered","returned","cancelled"].includes(s.status));
+  const total     = list.length||1;
+  const cod       = delivered.reduce((a,s)=>a+(s.amount||0),0);
+  const fees      = delivered.reduce((a,s)=>a+(s.deliveryFee||0),0);
+  const retFees   = returned.reduce((a,s)=>a+(s.returnFee||0),0);
+  const revenue   = fees+retFees;
+
+  const RANGE_OPTS=[{v:"today",l:"اليوم"},{v:"week",l:"7 أيام"},{v:"month",l:"هذا الشهر"},{v:"quarter",l:"3 أشهر"},{v:"year",l:"هذا العام"}];
+  const TABS=[
+    {id:"overview",label:"نظرة عامة"},{id:"trends",label:"اتجاهات"},
+    {id:"couriers",label:"المناديب"},
+    ...(isAdmin?[{id:"merchants",label:"التجار"}]:[]),
+    {id:"financial",label:"مالي"},
+  ];
+
+  const rangeBar=`<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;align-items:center;">
+    <span style="font-size:13px;font-weight:600;color:var(--gray-600);">الفترة:</span>
+    ${RANGE_OPTS.map(o=>`<button class="filter-btn ${range===o.v?"active":""}" onclick="App.setReportRange('${o.v}')">${o.l}</button>`).join("")}
+    <div style="margin-right:auto;display:flex;gap:6px;">
+      ${can("export_excel")?`<button class="btn btn-secondary btn-sm" onclick="App.exportReportExcel()">📊 Excel</button>`:""}
+      ${can("export_excel")?`<button class="btn btn-secondary btn-sm" onclick="App.exportReportPDF()">📄 PDF</button>`:""}
+    </div>
+  </div>`;
+
+  const tabBar=`<div style="display:flex;gap:0;overflow-x:auto;border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+    ${TABS.map(t=>`<button onclick="App.setReportsTab('${t.id}')"
+      style="padding:10px 18px;border:none;background:none;font-size:13px;font-weight:500;white-space:nowrap;cursor:pointer;
+        border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+        color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">${t.label}</button>`).join("")}
+  </div>`;
+
+  let content="";
+
+  // ── OVERVIEW ──────────────────────────────────────────────
+  if (tab==="overview") {
+    const delivRate=Math.round(delivered.length/total*100);
+    const retRate  =Math.round(returned.length/total*100);
+    content=`
+      <div class="kpi-grid" style="margin-bottom:20px;">
+        ${kpi("إجمالي الشحنات",list.length,"box","var(--brand)","var(--brand-light)")}
+        ${kpi("تم التسليم",delivered.length,"chart","var(--success)","var(--success-bg)")}
+        ${kpi("مرتجع",returned.length,"refresh","var(--danger)","var(--danger-bg)")}
+        ${kpi("قيد التنفيذ",pending.length,"truck","var(--warning)","var(--warning-bg)")}
+        ${kpi("إجمالي COD",money(cod),"wallet","var(--success)","var(--success-bg)")}
+        ${kpi("صافي الإيرادات",money(revenue),"chart","var(--brand)","var(--brand-light)")}
+      </div>
+      <div class="grid-2col" style="gap:16px;margin-bottom:16px;">
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:16px;">${icon("chart")} معدلات الأداء</h3>
+          ${[["معدل التسليم",delivRate+"%","var(--success)",delivRate],["معدل الإرجاع",retRate+"%","var(--danger)",retRate]]
+            .map(([l,v,c,p])=>`<div style="margin-bottom:14px;">
+              <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+                <span style="font-size:13px;">${l}</span><span style="font-weight:700;color:${c};">${v}</span>
+              </div>
+              <div style="background:var(--gray-100);border-radius:99px;height:8px;overflow:hidden;">
+                <div style="background:${c};height:100%;border-radius:99px;width:${Math.min(p,100)}%;transition:width .4s;"></div>
+              </div>
+            </div>`).join("")}
+          <div style="padding-top:12px;border-top:1px solid var(--gray-100);">
+            ${[
+              ["متوسط COD",money(delivered.length?Math.round(cod/delivered.length):0)],
+              ["متوسط الرسوم",money(delivered.length?Math.round(fees/delivered.length):0)],
+              ["صافي الإيرادات",money(revenue)],
+              ["صافي COD للتجار",money(cod-fees-retFees)],
+            ].map(([l,v])=>`<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--gray-50);">
+              <span style="font-size:12px;color:var(--gray-600);">${l}</span>
+              <span style="font-weight:600;">${v}</span>
+            </div>`).join("")}
+          </div>
+        </div>
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:16px;">${icon("box")} توزيع الحالات</h3>
+          ${Object.entries(STATUS_MAP)
+            .filter(([k])=>["submitted","out_for_delivery","delivered","returned","cancelled","rescheduled","suspended"].includes(k))
+            .map(([k,v])=>{ const cnt=list.filter(s=>s.status===k).length; const p=Math.round(cnt/total*100);
+              return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+                <span class="badge ${v.badge||"badge-gray"}" style="width:90px;text-align:center;font-size:10px;">${v.label}</span>
+                <div style="flex:1;background:var(--gray-100);border-radius:99px;height:6px;overflow:hidden;">
+                  <div style="background:var(--brand);height:100%;border-radius:99px;width:${p}%;"></div>
+                </div>
+                <span style="font-size:12px;font-weight:600;min-width:24px;">${cnt}</span>
+                <span style="font-size:11px;color:var(--gray-400);min-width:30px;">${p}%</span>
+              </div>`;}).join("")}
+        </div>
+      </div>
+      <div class="grid-2col" style="gap:16px;">
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:12px;">${icon("truck")} توزيع الخدمات</h3>
+          ${Object.entries(SERVICE_MAP).map(([k,v])=>{ const cnt=list.filter(s=>s.serviceType===k).length;
+            return `<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--gray-100);">
+              <span style="font-size:13px;">${v.icon} ${v.label}</span>
+              <span style="font-weight:700;">${cnt} <span style="font-size:11px;color:var(--gray-400);">${Math.round(cnt/total*100)}%</span></span>
+            </div>`;}).join("")}
+        </div>
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:12px;">${icon("map")} أعلى المحافظات</h3>
+          ${Object.entries(list.reduce((a,s)=>{a[s.governorate||"غير محدد"]=(a[s.governorate||"غير محدد"]||0)+1;return a;},{}))
+            .sort((a,b)=>b[1]-a[1]).slice(0,8)
+            .map(([g,c])=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--gray-100);">
+              <span style="font-size:13px;">${esc(g)}</span>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <div style="background:var(--gray-200);border-radius:99px;height:5px;width:50px;overflow:hidden;">
+                  <div style="background:var(--brand);height:100%;width:${Math.round(c/total*100)}%;"></div>
+                </div>
+                <span style="font-weight:600;font-size:12px;">${c}</span>
+              </div>
+            </div>`).join("")}
+        </div>
+      </div>`;
+  }
+
+  // ── TRENDS ────────────────────────────────────────────────
+  else if (tab==="trends") {
+    const chartData=buildDailyChart(list,range);
+    content=`
+      <div class="card" style="margin-bottom:16px;">
+        <h3 class="card-title" style="margin-bottom:12px;">${icon("chart")} شحنات يومية — ${RANGE_OPTS.find(o=>o.v===range)?.l||range}</h3>
+        ${renderBarChart(chartData,"created","var(--brand)",d=>d.date+": "+d.created+" شحنة")}
+      </div>
+      <div class="grid-2col" style="gap:16px;margin-bottom:16px;">
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:12px;">${icon("chart")} تسليمات يومية</h3>
+          ${renderBarChart(chartData,"delivered","var(--success)",d=>d.date+": "+d.delivered)}
+        </div>
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:12px;">${icon("refresh")} مرتجعات يومية</h3>
+          ${renderBarChart(chartData,"returned","var(--danger)",d=>d.date+": "+d.returned)}
+        </div>
+      </div>
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:16px;">${icon("box")} إحصائيات الفترة</h3>
+        <div class="kpi-grid">
+          ${kpi("أعلى يوم إنشاء",Math.max(...chartData.map(d=>d.created),0),"box","var(--brand)","var(--brand-light)")}
+          ${kpi("أعلى يوم تسليم",Math.max(...chartData.map(d=>d.delivered),0),"chart","var(--success)","var(--success-bg)")}
+          ${kpi("متوسط يومي للإنشاء",Math.round(list.length/Math.max(chartData.length,1)),"truck","var(--info)","var(--info-bg)")}
+          ${kpi("متوسط يومي للتسليم",Math.round(delivered.length/Math.max(chartData.length,1)),"chart","var(--success)","var(--success-bg)")}
+        </div>
+      </div>`;
+  }
+
+  // ── COURIERS ──────────────────────────────────────────────
+  else if (tab==="couriers") {
+    const cm={};
+    list.forEach(s=>{
+      if(!s.courierId)return;
+      const k=s.courierId;
+      if(!cm[k])cm[k]={name:s.courierName||"—",total:0,delivered:0,returned:0,cod:0,fees:0};
+      cm[k].total++;
+      if(s.status==="delivered"){cm[k].delivered++;cm[k].cod+=s.amount||0;cm[k].fees+=s.deliveryFee||0;}
+      if(s.status==="returned") cm[k].returned++;
+    });
+    const couriers=Object.entries(cm)
+      .map(([id,v])=>({id,...v,rate:v.total?Math.round(v.delivered/v.total*100):0}))
+      .sort((a,b)=>b.delivered-a.delivered);
+    content=`
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("truck")} أداء المناديب</h3>
+          ${can("export_excel")?`<button class="btn btn-secondary btn-sm" onclick="App.exportCourierReport()">📊 تصدير</button>`:""}
+        </div>
+        ${!couriers.length?`<div class="empty"><div class="empty-icon">🚚</div><h3>لا بيانات للفترة المحددة</h3></div>`:`
+        <div class="table-wrap"><table>
+          <thead><tr><th>#</th><th>المندوب</th><th>إجمالي</th><th>تسليم</th><th>إرجاع</th><th>معدل التسليم</th><th>COD</th><th>الرسوم</th></tr></thead>
+          <tbody>
+            ${couriers.map((c,i)=>`<tr>
+              <td style="font-weight:700;color:var(--gray-400);">${i+1}</td>
+              <td><div style="display:flex;align-items:center;gap:8px;">
+                <div style="width:28px;height:28px;border-radius:50%;background:var(--brand-light);color:var(--brand-dark);
+                  display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">${initials(c.name)}</div>
+                <b>${esc(c.name)}</b></div></td>
+              <td style="font-weight:600;">${c.total}</td>
+              <td style="color:var(--success);font-weight:600;">${c.delivered}</td>
+              <td style="color:var(--danger);font-weight:600;">${c.returned}</td>
+              <td>
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <div style="background:var(--gray-100);border-radius:99px;height:6px;width:50px;overflow:hidden;">
+                    <div style="background:${c.rate>=80?"var(--success)":c.rate>=60?"var(--warning)":"var(--danger)"};height:100%;border-radius:99px;width:${c.rate}%;"></div>
+                  </div>
+                  <span style="font-size:12px;font-weight:700;color:${c.rate>=80?"var(--success)":c.rate>=60?"var(--warning)":"var(--danger)"};">${c.rate}%</span>
+                </div>
+              </td>
+              <td style="font-weight:600;">${money(c.cod)}</td>
+              <td style="color:var(--brand);font-weight:600;">${money(c.fees)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>`}
+      </div>`;
+  }
+
+  // ── MERCHANTS (admin only) ────────────────────────────────
+  else if (tab==="merchants"&&isAdmin) {
+    const mm={};
+    list.forEach(s=>{
+      if(!s.merchantId)return;
+      const k=s.merchantId;
+      if(!mm[k])mm[k]={name:s.merchantName||"—",total:0,delivered:0,returned:0,cod:0,fees:0,retFees:0};
+      mm[k].total++;
+      if(s.status==="delivered"){mm[k].delivered++;mm[k].cod+=s.amount||0;mm[k].fees+=s.deliveryFee||0;}
+      if(s.status==="returned") {mm[k].returned++;mm[k].retFees+=s.returnFee||0;}
+    });
+    const merchants=Object.entries(mm)
+      .map(([id,v])=>({id,...v,rate:v.total?Math.round(v.delivered/v.total*100):0,net:v.cod-v.fees-v.retFees}))
+      .sort((a,b)=>b.total-a.total);
+    content=`
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("users")} أداء التجار</h3>
+          ${can("export_excel")?`<button class="btn btn-secondary btn-sm" onclick="App.exportMerchantReport()">📊 تصدير</button>`:""}
+        </div>
+        ${!merchants.length?`<div class="empty"><div class="empty-icon">🏢</div><h3>لا بيانات للفترة المحددة</h3></div>`:`
+        <div class="table-wrap"><table>
+          <thead><tr><th>#</th><th>التاجر</th><th>إجمالي</th><th>تسليم</th><th>إرجاع</th><th>معدل</th><th>COD</th><th>الرسوم</th><th>صافي</th></tr></thead>
+          <tbody>
+            ${merchants.map((m,i)=>`<tr>
+              <td style="font-weight:700;color:var(--gray-400);">${i+1}</td>
+              <td><div style="display:flex;align-items:center;gap:8px;">
+                <div style="width:28px;height:28px;border-radius:50%;background:var(--success-bg);color:var(--success);
+                  display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;">${initials(m.name)}</div>
+                <b>${esc(m.name)}</b></div></td>
+              <td style="font-weight:600;">${m.total}</td>
+              <td style="color:var(--success);font-weight:600;">${m.delivered}</td>
+              <td style="color:var(--danger);font-weight:600;">${m.returned}</td>
+              <td>
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <div style="background:var(--gray-100);border-radius:99px;height:6px;width:50px;overflow:hidden;">
+                    <div style="background:${m.rate>=80?"var(--success)":m.rate>=60?"var(--warning)":"var(--danger)"};height:100%;border-radius:99px;width:${m.rate}%;"></div>
+                  </div>
+                  <span style="font-size:12px;font-weight:700;">${m.rate}%</span>
+                </div>
+              </td>
+              <td style="font-weight:600;">${money(m.cod)}</td>
+              <td style="font-size:12px;color:var(--danger);">${money(m.fees+m.retFees)}</td>
+              <td style="font-weight:700;color:${m.net>=0?"var(--success)":"var(--danger)"};">${money(m.net)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>`}
+      </div>`;
+  }
+
+  // ── FINANCIAL ─────────────────────────────────────────────
+  else if (tab==="financial") {
+    content=`
+      <div class="kpi-grid" style="margin-bottom:16px;">
+        ${kpi("إجمالي COD",money(cod),"wallet","var(--success)","var(--success-bg)")}
+        ${kpi("رسوم الشحن",money(fees),"chart","var(--brand)","var(--brand-light)")}
+        ${kpi("رسوم الإرجاع",money(retFees),"refresh","var(--danger)","var(--danger-bg)")}
+        ${kpi("صافي الإيرادات",money(revenue),"wallet","var(--info)","var(--info-bg)")}
+        ${kpi("صافي COD للتجار",money(cod-fees-retFees),"chart","var(--brand)","var(--brand-light)")}
+        ${kpi("متوسط COD",money(delivered.length?Math.round(cod/delivered.length):0),"box","var(--warning)","var(--warning-bg)")}
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <h3 class="card-title" style="margin-bottom:16px;">${icon("chart")} ملخص مالي مفصل</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>البند</th><th>القيمة</th><th>الملاحظة</th></tr></thead>
+          <tbody>
+            ${[
+              ["إجمالي COD المحصل",money(cod),"من العملاء للشحنات المسلمة"],
+              ["رسوم الشحن المستحقة",money(fees),"تُخصم من COD للتاجر"],
+              ["رسوم الإرجاع",money(retFees),"للشحنات المرتجعة"],
+              ["إجمالي إيرادات الشركة",money(revenue),"رسوم الشحن + رسوم الإرجاع"],
+              ["صافي COD للتجار",money(cod-fees-retFees),"المبلغ الواجب تسويته"],
+              ["معدل الاسترداد",Math.round(retFees/(revenue||1)*100)+"%","رسوم الإرجاع من إجمالي الرسوم"],
+            ].map(([l,v,n])=>`<tr>
+              <td style="font-weight:600;">${l}</td>
+              <td style="font-weight:700;font-size:15px;">${v}</td>
+              <td style="font-size:12px;color:var(--gray-500);">${n}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>
+      </div>
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:16px;">${icon("chart")} أعلى المحافظات بالإيرادات</h3>
+        ${Object.entries(delivered.reduce((a,s)=>{const g=s.governorate||"غير محدد";if(!a[g])a[g]={cod:0,count:0};a[g].cod+=s.amount||0;a[g].count++;return a;},{}))
+          .sort((a,b)=>b[1].cod-a[1].cod).slice(0,10)
+          .map(([g,v],i)=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--gray-100);">
+            <span style="font-weight:700;color:var(--gray-400);min-width:20px;">${i+1}</span>
+            <span style="font-size:13px;flex:1;">${esc(g)}</span>
+            <span style="font-size:12px;color:var(--gray-500);">${v.count} شحنة</span>
+            <span style="font-weight:700;color:var(--success);">${money(v.cod)}</span>
+          </div>`).join("")}
+      </div>`;
+  }
+
+  return `<div id="reportsRoot">${rangeBar}${tabBar}${content}</div>`;
+}
+
+// ── USERS VIEW
 function viewUsers() {
   if(!can("manage_users")) return `<div class="empty"><h3>غير مصرح</h3></div>`;
   const f=(AppState.userFilter||"").toLowerCase();
@@ -4658,6 +4988,178 @@ const App={
   setOrderFilter(f)  { AppState.orderFilter   = f; rerenderContent(); },
 
   // ── Phase 2B: Finance ────────────────────────────────────
+  // ── Phase 9: Reports & Analytics ─────────────────────────────
+  setReportsTab(tab) {
+    AppState.reportsTab = tab;
+    rerenderContent();
+  },
+
+  setReportRange(range) {
+    AppState.reportRange = range;
+    rerenderContent();
+  },
+
+  exportReportExcel() {
+    const range   = AppState.reportRange||"month";
+    const list    = filterByRange(AppState.shipments, range, "createdAt");
+    const RANGE_LABEL = {today:"اليوم",week:"7_أيام",month:"هذا_الشهر",quarter:"3_أشهر",year:"هذا_العام"};
+
+    const data = list.map(s=>({
+      "كود الشحنة":       s.id,
+      "اسم العميل":       s.customerName,
+      "الهاتف":           s.customerPhone,
+      "المحافظة":         s.governorate,
+      "الحالة":           STATUS_MAP[s.status]?.label||s.status,
+      "نوع الخدمة":       SERVICE_MAP[s.serviceType]?.label||s.serviceType||"—",
+      "نوع الطلب":        ORDER_TYPE_MAP[s.orderType]?.label||s.orderType||"—",
+      "مبلغ COD":         s.amount||0,
+      "رسوم الشحن":       s.deliveryFee||0,
+      "رسوم الإرجاع":    s.returnFee||0,
+      "الوزن (كجم)":     s.weight||"",
+      "التاجر":           s.merchantName||"—",
+      "المندوب":          s.courierName||"—",
+      "تاريخ الإنشاء":   fmtDate(s.createdAt),
+    }));
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb, ws, "التقرير");
+    XLSX.writeFile(wb, `تقرير_النخبة_${RANGE_LABEL[range]||range}.xlsx`);
+    DB.addAudit("EXPORT_REPORT","",`Range:${range} Rows:${data.length} By:${AppState.user.name}`,"export");
+    toast(`✅ تم تصدير ${data.length} شحنة`);
+  },
+
+  exportReportPDF() {
+    const range   = AppState.reportRange||"month";
+    const list    = filterByRange(AppState.shipments, range, "createdAt");
+    const delivered = list.filter(s=>s.status==="delivered");
+    const returned  = list.filter(s=>s.status==="returned");
+    const cod       = delivered.reduce((a,s)=>a+(s.amount||0),0);
+    const fees      = delivered.reduce((a,s)=>a+(s.deliveryFee||0),0);
+    const retFees   = returned.reduce((a,s)=>a+(s.returnFee||0),0);
+    const RANGE_LABEL = {today:"اليوم",week:"آخر 7 أيام",month:"هذا الشهر",quarter:"آخر 3 أشهر",year:"هذا العام"};
+
+    // Generate PDF using jsPDF
+    if (typeof jsPDF === "undefined" && typeof window.jsPDF === "undefined") {
+      toast("مكتبة PDF غير محملة — يرجى تصدير Excel بدلاً","warning");
+      return;
+    }
+    const jsPDFLib = window.jsPDF || jsPDF;
+    const doc = new jsPDFLib({ orientation:"portrait", unit:"mm", format:"a4" });
+
+    // RTL header
+    doc.setFont("helvetica","bold");
+    doc.setFontSize(18);
+    doc.text("Al-Nukhba Express", 105, 20, {align:"center"});
+    doc.setFontSize(12);
+    doc.setFont("helvetica","normal");
+    doc.text("Shipment Report — "+( RANGE_LABEL[range]||range), 105, 28, {align:"center"});
+    doc.text("Generated: "+new Date().toLocaleDateString("en"), 105, 34, {align:"center"});
+
+    // Summary table
+    doc.setFontSize(10);
+    let y = 45;
+    const rows = [
+      ["Total Shipments", list.length],
+      ["Delivered", delivered.length],
+      ["Returned", returned.length],
+      ["Pending", list.length-delivered.length-returned.length],
+      ["Delivery Rate", Math.round(delivered.length/(list.length||1)*100)+"%"],
+      ["Return Rate",   Math.round(returned.length/(list.length||1)*100)+"%"],
+      ["Total COD Collected", money(cod)+" EGP"],
+      ["Delivery Fees Revenue", money(fees)+" EGP"],
+      ["Return Fees Revenue", money(retFees)+" EGP"],
+      ["Net Revenue", money(fees+retFees)+" EGP"],
+      ["Net COD Payable to Merchants", money(cod-fees-retFees)+" EGP"],
+    ];
+
+    rows.forEach(([label, value])=>{
+      doc.setFont("helvetica","bold"); doc.text(label+":", 20, y);
+      doc.setFont("helvetica","normal"); doc.text(String(value), 100, y);
+      y+=7;
+    });
+
+    // Courier breakdown
+    y += 5;
+    doc.setFont("helvetica","bold"); doc.setFontSize(11);
+    doc.text("Courier Performance", 20, y); y+=6;
+    doc.setFontSize(9); doc.setFont("helvetica","normal");
+    const cm={};
+    list.forEach(s=>{
+      if(!s.courierId) return;
+      if(!cm[s.courierId])cm[s.courierId]={name:s.courierName||"—",total:0,delivered:0};
+      cm[s.courierId].total++;
+      if(s.status==="delivered") cm[s.courierId].delivered++;
+    });
+    Object.values(cm).sort((a,b)=>b.delivered-a.delivered).forEach(c=>{
+      doc.text(`${c.name}: ${c.delivered}/${c.total} (${Math.round(c.delivered/c.total*100)}%)`, 25, y);
+      y+=5; if(y>270){doc.addPage();y=20;}
+    });
+
+    doc.save(`report_${range}_${Date.now()}.pdf`);
+    DB.addAudit("EXPORT_REPORT_PDF","",`Range:${range} By:${AppState.user.name}`,"export");
+    toast("✅ تم تصدير التقرير PDF");
+  },
+
+  exportCourierReport() {
+    const range = AppState.reportRange||"month";
+    const list  = filterByRange(AppState.shipments, range, "createdAt");
+    const cm={};
+    list.forEach(s=>{
+      if(!s.courierId)return;
+      const k=s.courierId;
+      if(!cm[k])cm[k]={name:s.courierName||"—",total:0,delivered:0,returned:0,cod:0,fees:0};
+      cm[k].total++;
+      if(s.status==="delivered"){cm[k].delivered++;cm[k].cod+=s.amount||0;cm[k].fees+=s.deliveryFee||0;}
+      if(s.status==="returned") cm[k].returned++;
+    });
+    const data = Object.values(cm).sort((a,b)=>b.delivered-a.delivered).map((c,i)=>({
+      "#":                i+1,
+      "المندوب":          c.name,
+      "إجمالي":           c.total,
+      "تسليم":            c.delivered,
+      "إرجاع":            c.returned,
+      "معدل التسليم":     Math.round(c.delivered/(c.total||1)*100)+"%",
+      "COD محصل":         c.cod,
+      "رسوم مكتسبة":      c.fees,
+    }));
+    const wb=XLSX.utils.book_new();
+    const ws=XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb,ws,"أداء المناديب");
+    XLSX.writeFile(wb,`تقرير_المناديب_${range}.xlsx`);
+    toast(`✅ تم تصدير تقرير ${data.length} مندوب`);
+  },
+
+  exportMerchantReport() {
+    const range = AppState.reportRange||"month";
+    const list  = filterByRange(AppState.shipments, range, "createdAt");
+    const mm={};
+    list.forEach(s=>{
+      if(!s.merchantId)return;
+      const k=s.merchantId;
+      if(!mm[k])mm[k]={name:s.merchantName||"—",total:0,delivered:0,returned:0,cod:0,fees:0,retFees:0};
+      mm[k].total++;
+      if(s.status==="delivered"){mm[k].delivered++;mm[k].cod+=s.amount||0;mm[k].fees+=s.deliveryFee||0;}
+      if(s.status==="returned") {mm[k].returned++;mm[k].retFees+=s.returnFee||0;}
+    });
+    const data = Object.values(mm).sort((a,b)=>b.total-a.total).map((m,i)=>({
+      "#":             i+1,
+      "التاجر":        m.name,
+      "إجمالي":        m.total,
+      "تسليم":         m.delivered,
+      "إرجاع":         m.returned,
+      "معدل التسليم":  Math.round(m.delivered/(m.total||1)*100)+"%",
+      "COD":           m.cod,
+      "الرسوم":        m.fees+m.retFees,
+      "صافي للتاجر":   m.cod-m.fees-m.retFees,
+    }));
+    const wb=XLSX.utils.book_new();
+    const ws=XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb,ws,"أداء التجار");
+    XLSX.writeFile(wb,`تقرير_التجار_${range}.xlsx`);
+    toast(`✅ تم تصدير تقرير ${data.length} تاجر`);
+  },
+
   setFinanceTab(tab) {
     AppState.financeTab = tab;
     rerenderContent();
@@ -5716,6 +6218,152 @@ const App={
       await DB.addAudit("UPLOAD_POD",id,`By ${AppState.user.name}`);
       rerenderContent();toast("✅ تم رفع إثبات التسليم");
     }catch(err){toast("فشل الرفع: "+err.message,"error");}
+  },
+
+  // ── Phase 3: Signature Capture ──────────────────────────────
+  openSignatureCapture(shipmentCode) {
+    const s = AppState.shipments.find(x => x.id === shipmentCode);
+    if (!s) return;
+    Modals.open(`<div class="modal" style="max-width:480px;">
+      <div class="modal-header">
+        <h3>✍️ توقيع العميل</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body" style="padding-bottom:8px;">
+        <div style="font-size:13px;color:var(--gray-600);margin-bottom:10px;text-align:center;">
+          ${esc(s.customerName)} · ${esc(s.id)}
+        </div>
+        <div style="position:relative;border:2px solid var(--gray-300);border-radius:var(--radius);
+          background:#fff;touch-action:none;cursor:crosshair;">
+          <canvas id="sigCanvas" width="436" height="200"
+            style="display:block;width:100%;height:200px;border-radius:var(--radius);">
+          </canvas>
+          <div id="sigPlaceholder" style="position:absolute;inset:0;display:flex;align-items:center;
+            justify-content:center;color:var(--gray-300);font-size:13px;pointer-events:none;">
+            وقّع هنا بإصبعك أو الماوس
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="App._clearSignatureCanvas()">مسح</button>
+          <span style="font-size:11px;color:var(--gray-400);">ارسم التوقيع داخل الإطار</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="saveSigBtn" class="btn btn-primary" onclick="App.saveSignature('${esc(shipmentCode)}')">
+          💾 حفظ التوقيع
+        </button>
+      </div>
+    </div>`);
+
+    // Wire up canvas drawing after modal renders
+    setTimeout(() => App._initSignatureCanvas(), 50);
+  },
+
+  _initSignatureCanvas() {
+    const canvas = document.getElementById("sigCanvas");
+    if (!canvas) return;
+    const ctx    = canvas.getContext("2d");
+    let drawing  = false;
+    ctx.strokeStyle = "#1a1a2e";
+    ctx.lineWidth   = 2.5;
+    ctx.lineCap     = "round";
+    ctx.lineJoin    = "round";
+
+    function getPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width  / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const src = e.touches ? e.touches[0] : e;
+      return {
+        x: (src.clientX - rect.left) * scaleX,
+        y: (src.clientY - rect.top)  * scaleY,
+      };
+    }
+    function start(e) {
+      e.preventDefault();
+      drawing = true;
+      const p = getPos(e);
+      ctx.beginPath(); ctx.moveTo(p.x, p.y);
+      const ph = document.getElementById("sigPlaceholder");
+      if (ph) ph.style.display = "none";
+    }
+    function draw(e) {
+      if (!drawing) return;
+      e.preventDefault();
+      const p = getPos(e);
+      ctx.lineTo(p.x, p.y); ctx.stroke();
+    }
+    function stop(e) { e.preventDefault(); drawing = false; }
+
+    canvas.addEventListener("mousedown",  start);
+    canvas.addEventListener("mousemove",  draw);
+    canvas.addEventListener("mouseup",    stop);
+    canvas.addEventListener("mouseleave", stop);
+    canvas.addEventListener("touchstart", start, { passive: false });
+    canvas.addEventListener("touchmove",  draw,  { passive: false });
+    canvas.addEventListener("touchend",   stop,  { passive: false });
+  },
+
+  _clearSignatureCanvas() {
+    const canvas = document.getElementById("sigCanvas");
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const ph = document.getElementById("sigPlaceholder");
+    if (ph) ph.style.display = "flex";
+  },
+
+  async saveSignature(shipmentCode) {
+    const canvas = document.getElementById("sigCanvas");
+    if (!canvas) return;
+
+    // Check canvas is not blank
+    const ctx  = canvas.getContext("2d");
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const hasContent = data.some((v, i) => i % 4 !== 3 && v !== 0);
+    if (!hasContent) {
+      toast("يرجى رسم التوقيع أولاً", "warning");
+      return;
+    }
+
+    const btn = document.getElementById("saveSigBtn");
+    if (btn) { btn.disabled = true; btn.innerHTML = `<span class="spinner"></span> جاري الحفظ...`; }
+
+    try {
+      // Convert canvas to blob
+      const blob = await new Promise(resolve =>
+        canvas.toBlob(resolve, "image/png", 0.9)
+      );
+
+      const url = await DB.uploadSignature(shipmentCode, blob);
+
+      await DB.updateShipment(shipmentCode, {
+        signature_url: url,
+        pod_uploaded_at:  new Date().toISOString(),
+        pod_uploaded_by:  AppState.user?.id || null,
+      });
+
+      // Update local state
+      const s = AppState.shipments.find(x => x.id === shipmentCode);
+      if (s) s.signatureUrl = url;
+
+      await DB.addTimeline(shipmentCode,
+        "تم أخذ توقيع العميل",
+        AppState.user.name,
+        AppState.user.primary_role || AppState.user.role,
+        "signature_captured");
+
+      await DB.addAudit("SIGNATURE_CAPTURED", shipmentCode,
+        `Signature captured by ${AppState.user.name}`, "shipment");
+
+      Modals.close();
+      rerenderContent();
+      toast("✅ تم حفظ التوقيع بنجاح");
+    } catch(err) {
+      toast("فشل حفظ التوقيع: " + err.message, "error");
+      if (btn) { btn.disabled = false; btn.textContent = "💾 حفظ التوقيع"; }
+    }
   },
 
   // ── Phase 3: OTP Delivery Verification ───────────────────────
