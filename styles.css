@@ -1204,3 +1204,49 @@ body {
   text-align: center;
   width: 100%;
 }
+
+/* ══════════════════════════════════════════════════════════════
+   SIGNATURE CAPTURE CANVAS
+   ══════════════════════════════════════════════════════════════ */
+
+#sigCanvas {
+  touch-action: none;
+  cursor: crosshair;
+  display: block;
+  border-radius: var(--radius);
+}
+
+/* Prevent page scroll while signing on mobile */
+.modal-body:has(#sigCanvas) {
+  overflow: hidden;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   PHASE 4 — LIVE OPERATIONS DASHBOARD
+   ══════════════════════════════════════════════════════════════ */
+
+/* Realtime status indicator in topbar */
+.rt-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 99px;
+  background: var(--gray-100);
+  border: 1px solid var(--gray-200);
+  font-size: 11px;
+  color: var(--gray-500);
+  white-space: nowrap;
+}
+
+/* Live ops grid — 3 cols on desktop, stack on mobile */
+@media (max-width: 1024px) {
+  .liveops-grid {
+    grid-template-columns: 1fr 1fr !important;
+  }
+}
+
+@media (max-width: 768px) {
+  .rt-status span:last-child { display: none; }
+  .rt-status .badge          { display: none; }
+}
