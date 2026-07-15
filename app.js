@@ -8,6 +8,56 @@ const SUPABASE_KEY = "sb_publishable_-0wKJXXI18TuHK7pe-dKYw_HWyjH79u";
 const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ── CONFIG ────────────────────────────────────────────────
+
+// ══════════════════════════════════════════════════════════════
+// SMS PROVIDER CONFIGURATION
+// Set SMS_PROVIDER to one of: "twilio" | "vonage" | "http_gateway" | "stub"
+// Fill in the credentials for your chosen provider.
+// Only DB.sendSMS() reads this block — no other code changes needed.
+// ══════════════════════════════════════════════════════════════
+const SMS_CONFIG = {
+  // ── Active provider ──────────────────────────────────────
+  // Change this to "twilio", "vonage", or "http_gateway" when ready.
+  provider: "stub",
+
+  // ── Twilio ───────────────────────────────────────────────
+  // Sign up at https://twilio.com — free trial available
+  twilio: {
+    accountSid:  "ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",  // Settings > Account SID
+    authToken:   "your_auth_token_here",                // Settings > Auth Token
+    fromNumber:  "+1234567890",                         // Your Twilio phone number
+    // API endpoint (do not change)
+    endpoint: (sid) => `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+  },
+
+  // ── Vonage (Nexmo) ───────────────────────────────────────
+  // Sign up at https://dashboard.nexmo.com
+  vonage: {
+    apiKey:     "xxxxxxxx",           // API Settings > API key
+    apiSecret:  "xxxxxxxxxxxxxxxx",   // API Settings > API secret
+    fromName:   "AlNukhba",          // Sender name (max 11 chars, Arabic not supported)
+    endpoint:   "https://rest.nexmo.com/sms/json",
+  },
+
+  // ── Generic HTTP Gateway ─────────────────────────────────
+  // For local Egyptian providers: ConnectMisr, Unifonic, Myfa7el, etc.
+  // Check your provider's API docs and fill in the fields below.
+  http_gateway: {
+    endpoint:   "https://api.yourprovider.com/send",   // Provider API URL
+    method:     "POST",                                 // POST or GET
+    // Request body fields — map to your provider's parameter names:
+    params: {
+      username:  "your_username",
+      password:  "your_password",
+      from:      "AlNukhba",       // Sender ID registered with provider
+      // "to" and "text" are injected automatically from the call
+    },
+    // Response: provider returns success if this field is truthy
+    successField: "status",        // e.g. "status", "result", "code"
+    successValue: "success",       // e.g. "success", "0", "OK", 200
+  },
+};
+
 const STATUS_MAP = {
   draft:            { label:"مسودة",             badge:"badge-gray",    step:0  },
   submitted:        { label:"تم الإرسال",        badge:"badge-info",    step:1  },
@@ -50,7 +100,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","branches","reports","users","merchants","import","audit","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","branches","liveops","reports","users","merchants","import","audit","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["track","accounts"] }
@@ -60,7 +110,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  liveops:"العمليات المباشرة",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -216,6 +266,8 @@ const AppState = {
   importBatches:[], importWizard:null, _importDataLoaded:false,
   // Phase 9 reports
   reportsTab:"overview", reportRange:"month", reportCourier:"", reportMerchant:"",
+  // Phase 4 live ops
+  liveActivityFeed:[], rtConnected:false, rtEventCount:0,
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -449,14 +501,97 @@ const DB = {
   },
 
   // ── Phase 3: OTP delivery verification ───────────────────
-  // SMS abstraction layer — swap the body of this ONE function
-  // to wire in Twilio/Vonage/local gateway. Currently logs to
-  // console + stores in DB so admin can see codes for testing.
+  // ── SMS abstraction layer ─────────────────────────────────
+  // Reads SMS_CONFIG.provider — swap provider there, no code changes here.
+  // All providers normalise the phone number to E.164 (+20xxxxxxxxxx for Egypt).
   async sendSMS(phone, message) {
-    console.log(`[SMS to ${phone}]: ${message}`);
-    // TODO: replace with real provider call, e.g.:
-    // await fetch('https://api.twilio.com/...', {...})
-    return { success: true, provider: "console-log-stub" };
+    // Normalise Egyptian phone number to E.164 format
+    const normalised = phone.replace(/\s+/g,"").replace(/^0/,"+20").replace(/^(\+?20)/,"+20");
+
+    const cfg = SMS_CONFIG;
+
+    // ── Stub (dev/test mode) ──────────────────────────────
+    if (!cfg.provider || cfg.provider === "stub") {
+      console.log(`[SMS STUB → ${normalised}]: ${message}`);
+      return { success: true, provider: "stub", to: normalised };
+    }
+
+    // ── Twilio ────────────────────────────────────────────
+    if (cfg.provider === "twilio") {
+      const t   = cfg.twilio;
+      const creds = btoa(`${t.accountSid}:${t.authToken}`);
+      const body  = new URLSearchParams({
+        To:   normalised,
+        From: t.fromNumber,
+        Body: message,
+      });
+      const res = await fetch(t.endpoint(t.accountSid), {
+        method:  "POST",
+        headers: {
+          "Authorization": `Basic ${creds}`,
+          "Content-Type":  "application/x-www-form-urlencoded",
+        },
+        body: body.toString(),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        console.error("Twilio SMS error:", data);
+        throw new Error(data.message || "Twilio send failed");
+      }
+      console.log(`[SMS via Twilio → ${normalised}] SID: ${data.sid}`);
+      return { success: true, provider: "twilio", sid: data.sid, to: normalised };
+    }
+
+    // ── Vonage ────────────────────────────────────────────
+    if (cfg.provider === "vonage") {
+      const v = cfg.vonage;
+      const res = await fetch(v.endpoint, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_key:    v.apiKey,
+          api_secret: v.apiSecret,
+          from:       v.fromName,
+          to:         normalised.replace("+",""),  // Vonage uses without +
+          text:       message,
+        }),
+      });
+      const data = await res.json();
+      const msg  = data.messages?.[0];
+      if (!msg || msg.status !== "0") {
+        console.error("Vonage SMS error:", msg);
+        throw new Error(msg?.["error-text"] || "Vonage send failed");
+      }
+      console.log(`[SMS via Vonage → ${normalised}] MsgID: ${msg["message-id"]}`);
+      return { success: true, provider: "vonage", messageId: msg["message-id"], to: normalised };
+    }
+
+    // ── Generic HTTP Gateway (ConnectMisr / Unifonic / etc.) ──
+    if (cfg.provider === "http_gateway") {
+      const g = cfg.http_gateway;
+      const payload = {
+        ...g.params,
+        to:   normalised,
+        text: message,
+      };
+      const res = await fetch(g.endpoint, {
+        method:  g.method || "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify(payload),
+      });
+      const data = await res.json();
+      const isOk = g.successField
+        ? String(data[g.successField]) === String(g.successValue)
+        : res.ok;
+      if (!isOk) {
+        console.error("HTTP Gateway SMS error:", data);
+        throw new Error(JSON.stringify(data));
+      }
+      console.log(`[SMS via HTTP Gateway → ${normalised}]`);
+      return { success: true, provider: "http_gateway", to: normalised };
+    }
+
+    throw new Error(`Unknown SMS provider: "${cfg.provider}"`);
   },
 
   async generateAndSendOTP(shipmentCode, customerPhone) {
@@ -855,18 +990,62 @@ function visible() {
 
 // ── REALTIME ──────────────────────────────────────────────
 function startRealtime() {
-  if(AppState.realtimeChannel)return;
-  AppState.realtimeChannel=db.channel("rt_v6")
-    .on("postgres_changes",{event:"INSERT",schema:"public",table:"shipments"},p=>{
-      const s=mapRow(p.new);AppState.shipments.unshift(s);
+  if(AppState.realtimeChannel) return;
+
+  AppState.realtimeChannel = db.channel("rt_v6")
+    // Shipments — new shipment created
+    .on("postgres_changes",{event:"INSERT",schema:"public",table:"shipments"}, p=>{
+      const s = mapRow(p.new);
+      AppState.shipments.unshift(s);
+      AppState.liveActivityFeed.unshift({
+        type:"new_shipment", icon:"📦", time:new Date().toISOString(),
+        text:`شحنة جديدة: ${s.id} — ${s.customerName}`,
+        badge:"badge-brand",
+      });
+      if(AppState.liveActivityFeed.length>50) AppState.liveActivityFeed.pop();
+      AppState.rtEventCount++;
       DB.addNotification(`شحنة جديدة: ${s.id} — ${s.customerName}`,"admin");
-      if((AppState.user?.primary_role||AppState.user?.role)==="admin")rerenderContent();
+      if((AppState.user?.primary_role||AppState.user?.role)==="admin") rerenderContent();
     })
-    .on("postgres_changes",{event:"UPDATE",schema:"public",table:"shipments"},p=>{
-      const idx=AppState.shipments.findIndex(s=>s.id===p.new.shipment_code);
-      if(idx>=0){AppState.shipments[idx]={...AppState.shipments[idx],...mapRow(p.new)};rerenderContent();}
+    // Shipments — status updated
+    .on("postgres_changes",{event:"UPDATE",schema:"public",table:"shipments"}, p=>{
+      const idx = AppState.shipments.findIndex(s=>s.id===p.new.shipment_code);
+      const updated = mapRow(p.new);
+      if(idx>=0) AppState.shipments[idx]={...AppState.shipments[idx],...updated};
+      // Only log status-change events to the feed (not every field update)
+      const oldStatus = idx>=0 ? AppState.shipments[idx].status : null;
+      if(p.new.status && p.new.status!==p.old?.status) {
+        const statusLabel = STATUS_MAP[p.new.status]?.label||p.new.status;
+        AppState.liveActivityFeed.unshift({
+          type:"status_change", icon:"🔄", time:new Date().toISOString(),
+          text:`${p.new.shipment_code}: ${statusLabel}`,
+          badge:STATUS_MAP[p.new.status]?.badge||"badge-gray",
+        });
+        if(AppState.liveActivityFeed.length>50) AppState.liveActivityFeed.pop();
+        AppState.rtEventCount++;
+      }
+      if((AppState.user?.primary_role||AppState.user?.role)==="admin") rerenderContent();
     })
-    .subscribe();
+    // Notifications — new notification for admin
+    .on("postgres_changes",{event:"INSERT",schema:"public",table:"notifications"}, p=>{
+      if(p.new.recipient_role==="admin"||p.new.recipient_id===AppState.user?.id) {
+        AppState.notifications.unshift({
+          id:p.new.id, message:p.new.message, type:p.new.type||"info",
+          isRead:false, createdAt:p.new.created_at,
+        });
+        AppState.rtEventCount++;
+        rerenderContent();
+      }
+    })
+    .subscribe(status=>{
+      AppState.rtConnected = status==="SUBSCRIBED";
+      // Update connection indicator without full re-render
+      const dot = document.getElementById("rtStatusDot");
+      if(dot) {
+        dot.style.background = AppState.rtConnected ? "var(--success)" : "var(--danger)";
+        dot.title = AppState.rtConnected ? "متصل — تحديثات فورية نشطة" : "غير متصل";
+      }
+    });
 }
 
 // ── SESSION ───────────────────────────────────────────────
@@ -1242,6 +1421,14 @@ function renderAdminShell(navKeys,unread) {
           <div class="topbar-title"><div class="eyebrow">Admin</div><h2>أهلاً، ${esc(u.name?.split(" ")[0]||"Admin")}</h2></div>
         </div>
         <div class="topbar-actions">
+          <div class="rt-status" title="${AppState.rtConnected?"متصل — تحديثات فورية نشطة":"غير متصل"}">
+            <span id="rtStatusDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;
+              background:${AppState.rtConnected?"var(--success)":"var(--danger)"};
+              box-shadow:0 0 0 2px ${AppState.rtConnected?"rgba(34,197,94,.25)":"rgba(239,68,68,.25)"};
+              transition:background .3s;"></span>
+            <span style="font-size:11px;color:var(--gray-500);">${AppState.rtConnected?"مباشر":"غير متصل"}</span>
+            ${AppState.rtEventCount>0?`<span class="badge badge-brand" style="font-size:10px;padding:1px 6px;">${AppState.rtEventCount}</span>`:""}
+          </div>
           <div class="notif-btn-wrap">
             <button class="btn-icon" id="toggleNotif">${icon("bell")}${unread>0?`<span class="notif-count">${unread}</span>`:""}</button>
             ${renderNotifPanel()}
@@ -1307,6 +1494,7 @@ function renderView() {
     case"products":   return viewProducts();
     case"pickup":     return viewPickupRequests();
     case"import":     return viewImport();
+    case"liveops":    return viewLiveOps();
     default:          return viewOverview();
   }
 }
@@ -1473,6 +1661,12 @@ function viewOverview() {
   }
 
   return `
+    ${SMS_CONFIG.provider==="stub"?`
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:var(--radius);
+      background:var(--warning-bg);border:1px solid var(--warning-border);margin-bottom:16px;font-size:13px;">
+      📱 <span>مزود SMS في وضع الاختبار — الرسائل لا تُرسل فعلياً.</span>
+      <button class="btn btn-secondary btn-sm" style="margin-right:auto;" onclick="App.openSmsSettings()">إعداد مزود SMS</button>
+    </div>`:""}
     <div class="kpi-grid">
       ${kpi("إجمالي الشحنات",total,"box","var(--brand)","var(--brand-light)","all")}
       ${kpi("تنتظر الاستلام",pending,"qr","var(--warning)","var(--warning-bg)","created")}
@@ -3530,6 +3724,171 @@ function viewAdminMerchants() {
 // BULK IMPORT — 6-STEP WIZARD + VALIDATION ENGINE
 // ══════════════════════════════════════════════════════════════
 
+// ══════════════════════════════════════════════════════════════
+// PHASE 4 — LIVE OPERATIONS DASHBOARD
+// ══════════════════════════════════════════════════════════════
+function viewLiveOps() {
+  const ships   = AppState.shipments;
+  const couriers= AppState.users.filter(u=>(u.role||u.primary_role)==="courier"&&!u.is_suspended&&!u.suspended);
+  const feed    = AppState.liveActivityFeed;
+
+  // Live shipment counts by status
+  const outForDelivery = ships.filter(s=>s.status==="out_for_delivery");
+  const atWarehouse    = ships.filter(s=>s.status==="at_warehouse");
+  const atBranch       = ships.filter(s=>s.status==="at_branch");
+  const inTransit      = ships.filter(s=>s.status==="in_transit");
+  const pickedUp       = ships.filter(s=>s.status==="picked_up");
+  const pickupPending  = ships.filter(s=>s.status==="pickup_requested");
+  const suspended      = ships.filter(s=>s.status==="suspended");
+  const rescheduled    = ships.filter(s=>s.status==="rescheduled");
+
+  // Today's stats
+  const todayStr   = new Date().toDateString();
+  const todayShips = ships.filter(s=>s.createdAt&&new Date(s.createdAt).toDateString()===todayStr);
+  const todayDel   = ships.filter(s=>s.status==="delivered"&&s.deliveredAt&&new Date(s.deliveredAt).toDateString()===todayStr);
+  const todayRet   = ships.filter(s=>s.status==="returned"&&new Date(s.createdAt||0).toDateString()===todayStr);
+
+  // Couriers currently active (have shipments out_for_delivery)
+  const activeCourierIds = new Set(outForDelivery.map(s=>s.courierId).filter(Boolean));
+  const activeCouriers   = couriers.filter(c=>activeCourierIds.has(c.id));
+  const idleCouriers     = couriers.filter(c=>!activeCourierIds.has(c.id));
+
+  return `<div>
+    <!-- Connection status banner -->
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:var(--radius);
+      background:${AppState.rtConnected?"var(--success-bg)":"var(--warning-bg)"};
+      border:1px solid ${AppState.rtConnected?"var(--success-border,#bbf7d0)":"var(--warning-border)"};
+      margin-bottom:20px;font-size:13px;">
+      <span style="width:10px;height:10px;border-radius:50%;flex-shrink:0;
+        background:${AppState.rtConnected?"var(--success)":"var(--warning)"};
+        box-shadow:0 0 0 3px ${AppState.rtConnected?"rgba(34,197,94,.2)":"rgba(234,179,8,.2)"};"></span>
+      <span style="font-weight:600;">${AppState.rtConnected?"🟢 متصل — التحديثات الفورية نشطة":"🟡 جاري الاتصال..."}</span>
+      <span style="color:var(--gray-500);margin-right:auto;">${AppState.rtEventCount} حدث منذ آخر تحديث</span>
+      <button class="btn btn-secondary btn-sm" onclick="App.resetRtCounter()">إعادة ضبط العداد</button>
+    </div>
+
+    <!-- Today KPIs -->
+    <div class="kpi-grid" style="margin-bottom:20px;">
+      ${kpi("شحنات اليوم",todayShips.length,"box","var(--brand)","var(--brand-light)")}
+      ${kpi("تسليمات اليوم",todayDel.length,"chart","var(--success)","var(--success-bg)")}
+      ${kpi("مرتجعات اليوم",todayRet.length,"refresh","var(--danger)","var(--danger-bg)")}
+      ${kpi("خارج للتسليم الآن",outForDelivery.length,"truck","var(--purple,#7c3aed)","var(--purple-bg,#ede9fe)")}
+      ${kpi("مناديب نشطون",activeCouriers.length,"users","var(--success)","var(--success-bg)")}
+      ${kpi("تحتاج مراجعة",suspended.length+rescheduled.length,"log","var(--warning)","var(--warning-bg)")}
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr 340px;gap:16px;">
+
+      <!-- Live pipeline -->
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:14px;">${icon("truck")} خط سير الشحنات (الآن)</h3>
+        ${[
+          ["طلب استلام",pickupPending.length,"badge-warning","pickup_requested"],
+          ["تم الاستلام",pickedUp.length,"badge-brand","picked_up"],
+          ["في التنقل",inTransit.length,"badge-brand","in_transit"],
+          ["في المستودع",atWarehouse.length,"badge-brand","at_warehouse"],
+          ["في الفرع",atBranch.length,"badge-brand","at_branch"],
+          ["خارج للتسليم",outForDelivery.length,"badge-success","out_for_delivery"],
+          ["موقوف",suspended.length,"badge-danger","suspended"],
+          ["إعادة جدولة",rescheduled.length,"badge-warning","rescheduled"],
+        ].map(([label,count,badge,status])=>`
+          <div style="display:flex;align-items:center;justify-content:space-between;
+            padding:9px 12px;border-radius:var(--radius);margin-bottom:6px;cursor:pointer;
+            background:${count>0?"var(--gray-50)":"transparent"};
+            border:1px solid ${count>0?"var(--gray-200)":"transparent"};"
+            onclick="App.setFilter('${status}');AppState.view='shipments';rerenderContent();">
+            <span style="font-size:13px;">${label}</span>
+            <div style="display:flex;align-items:center;gap:8px;">
+              ${count>0?`<div style="background:var(--gray-200);border-radius:99px;height:5px;width:80px;overflow:hidden;">
+                <div style="background:var(--brand);height:100%;border-radius:99px;
+                  width:${Math.min(Math.round(count/(ships.length||1)*100*3),100)}%;"></div>
+              </div>`:""}
+              <span class="badge ${count>0?badge:"badge-gray"}">${count}</span>
+            </div>
+          </div>`).join("")}
+      </div>
+
+      <!-- Courier status board -->
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:14px;">${icon("users")} لوحة المناديب</h3>
+        ${!couriers.length?`<div class="empty"><div class="empty-icon">🚚</div><h3>لا يوجد مناديب</h3></div>`:`
+          <div style="margin-bottom:10px;">
+            <div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:6px;">
+              نشط (${activeCouriers.length})
+            </div>
+            ${activeCouriers.length?activeCouriers.map(c=>{
+              const myShips = outForDelivery.filter(s=>s.courierId===c.id);
+              return `<div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:var(--radius);
+                background:var(--success-bg);border:1px solid var(--success-border,#bbf7d0);margin-bottom:6px;">
+                <div style="width:32px;height:32px;border-radius:50%;background:var(--success);color:#fff;
+                  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">
+                  ${initials(c.name)}</div>
+                <div style="flex:1;min-width:0;">
+                  <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(c.name)}</div>
+                  <div style="font-size:11px;color:var(--gray-500);">${myShips.length} شحنة نشطة</div>
+                </div>
+                <span class="badge badge-success">${myShips.length}</span>
+              </div>`;
+            }).join(""):`<div style="font-size:12px;color:var(--gray-400);padding:8px;">لا يوجد مناديب نشطون الآن</div>`}
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:6px;">
+              متاح (${idleCouriers.length})
+            </div>
+            ${idleCouriers.slice(0,5).map(c=>`
+              <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:var(--radius);
+                background:var(--gray-50);border:1px solid var(--gray-200);margin-bottom:6px;">
+                <div style="width:32px;height:32px;border-radius:50%;background:var(--gray-300);color:#fff;
+                  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">
+                  ${initials(c.name)}</div>
+                <div style="flex:1;min-width:0;">
+                  <div style="font-weight:600;font-size:13px;">${esc(c.name)}</div>
+                  <div style="font-size:11px;color:var(--gray-400);">متاح للتعيين</div>
+                </div>
+                <span class="badge badge-gray">متاح</span>
+              </div>`).join("")}
+            ${idleCouriers.length>5?`<div style="font-size:12px;color:var(--gray-400);text-align:center;padding:4px;">+ ${idleCouriers.length-5} آخرين</div>`:""}
+          </div>`}
+      </div>
+
+      <!-- Live activity feed -->
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px;">
+          <h3 class="card-title">${icon("log")} النشاط المباشر</h3>
+          <button class="btn-icon" onclick="App.clearActivityFeed()" title="مسح السجل"
+            style="font-size:12px;color:var(--gray-400);">✕</button>
+        </div>
+        <div style="max-height:420px;overflow-y:auto;">
+          ${!feed.length?`
+            <div style="text-align:center;padding:32px 16px;color:var(--gray-400);">
+              <div style="font-size:24px;margin-bottom:8px;">📡</div>
+              <div style="font-size:13px;">في انتظار الأحداث المباشرة...</div>
+              <div style="font-size:11px;margin-top:4px;">ستظهر الشحنات والتغييرات هنا تلقائياً</div>
+            </div>`
+          : feed.map(f=>`
+            <div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--gray-100);">
+              <span style="font-size:16px;flex-shrink:0;">${f.icon}</span>
+              <div style="flex:1;min-width:0;">
+                <div style="font-size:12px;line-height:1.4;">${esc(f.text)}</div>
+                <div style="font-size:10px;color:var(--gray-400);margin-top:2px;">${fmtTime(f.time)}</div>
+              </div>
+              <span class="badge ${f.badge||"badge-gray"}" style="font-size:10px;flex-shrink:0;align-self:flex-start;"></span>
+            </div>`).join("")}
+        </div>
+      </div>
+    </div>
+
+    <!-- Needs attention section -->
+    ${(suspended.length+rescheduled.length)>0?`
+    <div class="card" style="margin-top:16px;border-right:4px solid var(--warning);">
+      <h3 class="card-title" style="margin-bottom:14px;">⚠️ تحتاج مراجعة</h3>
+      <div class="table-wrap">
+        ${shipTable([...suspended,...rescheduled].slice(0,10))}
+      </div>
+    </div>`:""}
+  </div>`;
+}
+
 const IMPORT_REQUIRED      = ["customer_name","customer_phone","governorate","amount"];
 const IMPORT_SERVICE_TYPES = ["door_to_door","drop_off","pickup"];
 const IMPORT_ORDER_TYPES   = ["express","standard","scheduled"];
@@ -4989,6 +5348,156 @@ const App={
 
   // ── Phase 2B: Finance ────────────────────────────────────
   // ── Phase 9: Reports & Analytics ─────────────────────────────
+  // ── SMS Provider ─────────────────────────────────────────────
+  openSmsSettings() {
+    const cfg      = SMS_CONFIG;
+    const provider = cfg.provider || "stub";
+    const PROVIDERS = [
+      {v:"stub",         l:"🔧 وضع الاختبار (console.log فقط)"},
+      {v:"twilio",       l:"📱 Twilio"},
+      {v:"vonage",       l:"📱 Vonage (Nexmo)"},
+      {v:"http_gateway", l:"📱 HTTP Gateway (ConnectMisr / Unifonic / أخرى)"},
+    ];
+
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header">
+        <h3>📱 إعدادات مزود SMS</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label style="font-weight:600;display:block;margin-bottom:8px;">المزود النشط</label>
+          <select id="smsProviderSel" style="width:100%;padding:10px;border-radius:var(--radius);border:1.5px solid var(--gray-300);"
+            onchange="App._toggleSmsProviderFields(this.value)">
+            ${PROVIDERS.map(p=>`<option value="${p.v}" ${provider===p.v?"selected":""}>${p.l}</option>`).join("")}
+          </select>
+        </div>
+
+        <div id="smsTwilioFields" style="display:${provider==="twilio"?"block":"none"}">
+          <div style="background:var(--info-bg,#eff6ff);border-radius:var(--radius);padding:12px;margin-bottom:12px;font-size:12px;">
+            احصل على Account SID و Auth Token من <a href="https://console.twilio.com" target="_blank" style="color:var(--brand);">console.twilio.com</a>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>Account SID</label><input id="smsTwilioSid" placeholder="ACxxxxxxx" value="${cfg.twilio?.accountSid||""}"/></div>
+            <div class="field"><label>Auth Token</label><input id="smsTwilioToken" type="password" placeholder="••••••••" value="${cfg.twilio?.authToken||""}"/></div>
+          </div>
+          <div class="field"><label>رقم Twilio (E.164)</label><input id="smsTwilioFrom" placeholder="+1234567890" value="${cfg.twilio?.fromNumber||""}"/></div>
+        </div>
+
+        <div id="smsVonageFields" style="display:${provider==="vonage"?"block":"none"}">
+          <div style="background:var(--info-bg,#eff6ff);border-radius:var(--radius);padding:12px;margin-bottom:12px;font-size:12px;">
+            احصل على API Key و Secret من <a href="https://dashboard.nexmo.com" target="_blank" style="color:var(--brand);">dashboard.nexmo.com</a>
+          </div>
+          <div class="form-row">
+            <div class="field"><label>API Key</label><input id="smsVonageKey" placeholder="xxxxxxxx" value="${cfg.vonage?.apiKey||""}"/></div>
+            <div class="field"><label>API Secret</label><input id="smsVonageSecret" type="password" placeholder="••••••••" value="${cfg.vonage?.apiSecret||""}"/></div>
+          </div>
+          <div class="field"><label>اسم المرسل (max 11 حرف)</label><input id="smsVonageFrom" placeholder="AlNukhba" maxlength="11" value="${cfg.vonage?.fromName||"AlNukhba"}"/></div>
+        </div>
+
+        <div id="smsGatewayFields" style="display:${provider==="http_gateway"?"block":"none"}">
+          <div class="field"><label>رابط API الخاص بالمزود</label><input id="smsGwEndpoint" placeholder="https://api.yourprovider.com/send" value="${cfg.http_gateway?.endpoint||""}"/></div>
+          <div class="form-row">
+            <div class="field"><label>اسم المستخدم</label><input id="smsGwUser" value="${cfg.http_gateway?.params?.username||""}"/></div>
+            <div class="field"><label>كلمة المرور</label><input id="smsGwPass" type="password" value="${cfg.http_gateway?.params?.password||""}"/></div>
+          </div>
+          <div class="field"><label>Sender ID</label><input id="smsGwFrom" placeholder="AlNukhba" value="${cfg.http_gateway?.params?.from||"AlNukhba"}"/></div>
+        </div>
+
+        <div style="border-top:1px solid var(--gray-200);padding-top:16px;margin-top:16px;">
+          <div class="field">
+            <label style="font-weight:600;">اختبار الإرسال</label>
+            <div style="display:flex;gap:8px;margin-top:6px;">
+              <input id="smsTestPhone" placeholder="01012345678" style="flex:1;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);"/>
+              <button class="btn btn-secondary" onclick="App.testSMS()">📤 إرسال اختباري</button>
+            </div>
+          </div>
+          <div id="smsTestResult" style="display:none;margin-top:8px;padding:10px;border-radius:var(--radius);font-size:13px;"></div>
+        </div>
+
+        <div style="background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:var(--radius);padding:12px;margin-top:12px;font-size:12px;">
+          ⚠️ <b>ملاحظة أمنية:</b> يتم حفظ الإعدادات في ذاكرة المتصفح فقط (لا يتم تخزينها في Supabase).
+          للاستخدام الدائم، ضع الإعدادات في <code>SMS_CONFIG</code> في أول ملف <code>app.js</code>.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إغلاق</button>
+        <button class="btn btn-primary" onclick="App.saveSmsSettings()">💾 تطبيق الإعدادات</button>
+      </div>
+    </div>`);
+  },
+
+  _toggleSmsProviderFields(provider) {
+    ["smsTwilioFields","smsVonageFields","smsGatewayFields"]
+      .forEach(id=>{ const el=$(id); if(el) el.style.display="none"; });
+    const map = {twilio:"smsTwilioFields",vonage:"smsVonageFields",http_gateway:"smsGatewayFields"};
+    if (map[provider]) { const el=$(map[provider]); if(el) el.style.display="block"; }
+  },
+
+  saveSmsSettings() {
+    const provider = $("smsProviderSel")?.value || "stub";
+    SMS_CONFIG.provider = provider;
+
+    if (provider === "twilio") {
+      SMS_CONFIG.twilio.accountSid  = $("smsTwilioSid")?.value  || SMS_CONFIG.twilio.accountSid;
+      SMS_CONFIG.twilio.authToken   = $("smsTwilioToken")?.value || SMS_CONFIG.twilio.authToken;
+      SMS_CONFIG.twilio.fromNumber  = $("smsTwilioFrom")?.value  || SMS_CONFIG.twilio.fromNumber;
+    }
+    if (provider === "vonage") {
+      SMS_CONFIG.vonage.apiKey    = $("smsVonageKey")?.value    || SMS_CONFIG.vonage.apiKey;
+      SMS_CONFIG.vonage.apiSecret = $("smsVonageSecret")?.value || SMS_CONFIG.vonage.apiSecret;
+      SMS_CONFIG.vonage.fromName  = $("smsVonageFrom")?.value   || SMS_CONFIG.vonage.fromName;
+    }
+    if (provider === "http_gateway") {
+      SMS_CONFIG.http_gateway.endpoint        = $("smsGwEndpoint")?.value || SMS_CONFIG.http_gateway.endpoint;
+      SMS_CONFIG.http_gateway.params.username = $("smsGwUser")?.value     || SMS_CONFIG.http_gateway.params.username;
+      SMS_CONFIG.http_gateway.params.password = $("smsGwPass")?.value     || SMS_CONFIG.http_gateway.params.password;
+      SMS_CONFIG.http_gateway.params.from     = $("smsGwFrom")?.value     || SMS_CONFIG.http_gateway.params.from;
+    }
+
+    const PROVIDER_LABEL = {stub:"وضع الاختبار",twilio:"Twilio",vonage:"Vonage",http_gateway:"HTTP Gateway"};
+    toast(`✅ تم تطبيق إعدادات SMS — المزود: ${PROVIDER_LABEL[provider]||provider}`);
+    Modals.close();
+    DB.addAudit("SMS_PROVIDER_CHANGED","",`Provider set to: ${provider} by ${AppState.user.name}`,"setting");
+  },
+
+  async testSMS() {
+    const phone    = $("smsTestPhone")?.value?.trim();
+    const resultEl = $("smsTestResult");
+    if (!phone) { toast("أدخل رقم هاتف للاختبار","warning"); return; }
+
+    if (resultEl) {
+      resultEl.style.display = "block";
+      resultEl.style.background = "var(--gray-100)";
+      resultEl.textContent = "⏳ جاري الإرسال...";
+    }
+
+    try {
+      const result = await DB.sendSMS(phone, "النخبة للشحن السريع: هذه رسالة اختبار. SMS يعمل بنجاح ✅");
+      if (resultEl) {
+        resultEl.style.background = "var(--success-bg)";
+        resultEl.innerHTML = `✅ تم الإرسال بنجاح عبر <b>${result.provider}</b> إلى ${result.to}`;
+      }
+      await DB.addAudit("SMS_TEST","",`Test SMS sent to ${phone} via ${result.provider} by ${AppState.user.name}`,"setting");
+    } catch(err) {
+      if (resultEl) {
+        resultEl.style.background = "var(--danger-bg)";
+        resultEl.innerHTML = `❌ فشل الإرسال: ${esc(err.message)}`;
+      }
+    }
+  },
+
+  // ── Phase 4: Live Operations ──────────────────────────────────
+  resetRtCounter() {
+    AppState.rtEventCount = 0;
+    rerenderContent();
+  },
+
+  clearActivityFeed() {
+    AppState.liveActivityFeed = [];
+    rerenderContent();
+  },
+
   setReportsTab(tab) {
     AppState.reportsTab = tab;
     rerenderContent();
