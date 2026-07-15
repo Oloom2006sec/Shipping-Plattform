@@ -1549,6 +1549,21 @@ function bindContentEvents() {
   }
 }
 
+// ── Global onclick safety net ──────────────────────────────
+// Catches App.xxx() calls where xxx doesn't exist on the App object.
+// In inline onclick="App.foo()" the browser evaluates App.foo as a
+// property access — if it's undefined, the call throws TypeError
+// silently. This handler surfaces those errors as dev-mode warnings.
+if (typeof window !== "undefined") {
+  window.addEventListener("error", e => {
+    if (e.message && e.message.includes("is not a function") &&
+        e.message.includes("App.")) {
+      console.error("[AL-NUKHBA] Missing App method:", e.message, e.filename, e.lineno);
+      toast("خطأ تطبيق: " + e.message.split("is not a function")[0].trim(), "error");
+    }
+  });
+}
+
 function render() {
   const params=new URLSearchParams(window.location.search);
   const trackId=params.get("track");

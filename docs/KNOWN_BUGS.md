@@ -108,3 +108,58 @@ The flag is set to `true` *before* the async call starts, so even a slow or fail
 ## How to use this document
 
 Before fixing any bug report, check this file first — if the symptom matches an entry here, the root cause and fix pattern are already known; verify the fix is still in place (it may have regressed again) rather than re-diagnosing from scratch. After fixing any new bug, add an entry here in the same format, even if it appears unrelated to the watch list above.
+
+---
+
+## Fixed in Regression Sprint #2 (Priority 1 & 2)
+
+### 🟢 #9 — Shipment creation fails with NOT NULL constraint on merchant_name
+**Symptom:** Admin and merchant shipment creation fails with: `null value in column "merchant_name" violates not-null constraint`
+**Root cause:** `createShipment()` sent `merchant_name: null` for admin-created shipments. The column is defined as `NOT NULL DEFAULT ''` — an explicit `null` overrides the default and violates the constraint.
+**Fix:** Changed to `merchant_name: isMerchant ? (user.name||"") : ""` and same for `merchant_phone`.
+**Fixed:** Regression Sprint #2
+**Prevention rule:** `merchant_name` and `merchant_phone` are `NOT NULL DEFAULT ''`. Always send `""` not `null` for non-merchant creators. See DATABASE_SCHEMA.md.
+
+### 🟢 #10 — Pricing Calculator governorates empty
+**Symptom:** The pricing simulator tab shows an empty governorate dropdown.
+**Root cause:** `viewPricing()` is a synchronous function that calls `Object.keys(EGYPT_GOV)` directly. `EGYPT_GOV` starts empty and is only populated after `await loadEgyptData()`. No code was calling `loadEgyptData()` before the simulator tab rendered.
+**Fix:** Added a guard in `postRender()`: when `view==="pricing"` and `pricingTab==="simulator"` and `EGYPT_GOV` is still empty, call `loadEgyptData().then(()=>rerenderContent())`.
+**Fixed:** Regression Sprint #2
+**Prevention rule:** Any synchronous view that reads `Object.keys(EGYPT_GOV)` needs a `postRender()` trigger or a separate `setPricingTab()` await — not just the modal functions.
+
+### 🟢 #11 — Preview As broken on desktop (sidebar/layout not updated)
+**Symptom:** On desktop, switching role via Preview As only refreshed the content area — the sidebar nav, tab labels, and permissions stayed as admin.
+**Root cause:** `roleSwitcher` handler called `renderDashboard()` which rebuilds `#app` but does not re-run the full page boot sequence. On mobile this appeared to work because the sidebar was hidden; on desktop the stale sidebar was visible.
+**Fix:** Changed to call `render()` which triggers the full page rebuild including sidebar nav recalculation from the new `ROLE_MAP[role].nav`.
+**Fixed:** Regression Sprint #2
+**Prevention rule:** Any action that changes `AppState.user.primary_role` must call `render()`, not `renderDashboard()` or `rerenderContent()`.
+
+### 🟢 #12 — Logout button hidden on mobile
+**Symptom:** The sidebar on mobile was taller than the viewport and could not be scrolled to reach the logout button in `.sb-footer`.
+**Root cause:** The mobile sidebar CSS override set `width` and `max-width` but did not enforce `height:100vh` or `overflow-y:auto`. The sidebar grew beyond the viewport with no scroll mechanism.
+**Fix:** Added `height:100vh; overflow-y:auto; display:flex; flex-direction:column;` to the mobile `.sidebar` rule so it fills the viewport and scrolls internally.
+**Fixed:** Regression Sprint #2
+
+### 🟢 #13 — Admin Dashboard not responsive on mobile
+**Symptom:** Only the main dashboard/overview page had content overflowing the viewport width on mobile. Other views were fine.
+**Root cause:** The `.page` and `.card` containers lacked `max-width:100%; overflow-x:hidden; box-sizing:border-box` in the mobile breakpoint. Cards and content expanded beyond the viewport.
+**Fix:** Added explicit `max-width`, `overflow-x:hidden`, and `box-sizing:border-box` to both `.page` and `.card` in the `@media (max-width:768px)` block.
+**Fixed:** Regression Sprint #2
+
+### 🟢 #14 — Shipment table: Merchant and Weight columns swapped
+**Symptom:** Merchant column displayed weight values (e.g. "0.3 كجم"), Weight column displayed merchant names.
+**Root cause:** When Phase 1 added the Weight column between Amount and Merchant, the two `<td>` data cells were inserted in reversed order relative to the `<thead>` headers. Headers read: المبلغ → **الوزن** → **التاجر** → المندوب. Data cells read: amount → **merchantName** → **weight** → courierName — exact swap of positions 8 and 9.
+**Fix:** Swapped the two `<td>` cells so weight renders under الوزن and merchantName renders under التاجر.
+**Fixed:** UI regression fix session
+**Verified:** Full 11-column header-to-data audit run — all columns confirmed correct.
+**Prevention rule:** After adding or reordering columns in a table, always count `<th>` positions against `<td>` positions and run a mapping audit before deploying.
+
+### ℹ️ OTP SMS — stub only (not a bug, by design — Decision-009)
+`DB.sendSMS()` currently logs to console and does not send real SMS. The OTP code is shown in the courier's toast notification during testing. Replace the function body with a real provider (Twilio, Vonage, ConnectMisr) when ready. No other code changes needed.
+
+### 🟢 #15 — Silent no-op when App.* method is undefined (mitigation added)
+**Symptom:** Clicking a button with `onclick="App.foo()"` where `App.foo` doesn't exist produces no visible error — the UI appears frozen or unresponsive.
+**Root cause:** Inline `onclick` attributes evaluate the expression in the global scope. If `App.foo` is undefined, calling `App.foo()` throws a `TypeError: App.foo is not a function` which the browser swallows silently — no toast, no console warning visible to non-devs.
+**Fix:** Added a global `window.addEventListener("error")` handler that catches TypeErrors mentioning `App.` and both logs them to the console with file/line context AND shows an error toast to the user. This does not prevent the error but makes it visible for debugging.
+**Status:** 🟢 Mitigated — not fully prevented. The real prevention is the grep check documented in CODING_CONVENTIONS.md: before deploying any button with `onclick="App.xxx(...)"`, confirm `App.xxx` is defined in the file.
+**Fixed:** Tech debt sprint
