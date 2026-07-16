@@ -1000,7 +1000,7 @@ function startRealtime() {
       AppState.liveActivityFeed.unshift({
         type:"new_shipment", icon:"📦", time:new Date().toISOString(),
         text:`شحنة جديدة: ${s.id} — ${s.customerName}`,
-        badge:"badge-brand",
+        badge:"badge-brand", statusLabel:"جديد",
       });
       if(AppState.liveActivityFeed.length>50) AppState.liveActivityFeed.pop();
       AppState.rtEventCount++;
@@ -1018,8 +1018,9 @@ function startRealtime() {
         const statusLabel = STATUS_MAP[p.new.status]?.label||p.new.status;
         AppState.liveActivityFeed.unshift({
           type:"status_change", icon:"🔄", time:new Date().toISOString(),
-          text:`${p.new.shipment_code}: ${statusLabel}`,
+          text:`${p.new.shipment_code}: تحديث الحالة`,
           badge:STATUS_MAP[p.new.status]?.badge||"badge-gray",
+          statusLabel,
         });
         if(AppState.liveActivityFeed.length>50) AppState.liveActivityFeed.pop();
         AppState.rtEventCount++;
@@ -1604,6 +1605,9 @@ function postRender() {
   if(AppState.view==="import" && !AppState._importDataLoaded){
     AppState._importDataLoaded = true;
     App.loadImportBatches();
+  }
+  if(AppState.view==="liveops"){
+    App.refreshLiveOpsData();
   }
 }
 
@@ -3743,11 +3747,13 @@ function viewAdminMerchants() {
 // PHASE 4 — LIVE OPERATIONS DASHBOARD
 // ══════════════════════════════════════════════════════════════
 function viewLiveOps() {
-  const ships   = AppState.shipments;
-  const couriers= AppState.users.filter(u=>(u.role||u.primary_role)==="courier"&&!u.is_suspended&&!u.suspended);
-  const feed    = AppState.liveActivityFeed;
+  const ships = AppState.shipments;
+  // Use AppState.couriers (raw shape: id, full_name, phone, primary_role)
+  // NOT AppState.users — couriers list is purpose-built and always populated
+  const allCouriers = AppState.couriers || [];
+  const feed  = AppState.liveActivityFeed;
 
-  // Live shipment counts by status
+  // ── Shipment pipeline counts ──────────────────────────────
   const outForDelivery = ships.filter(s=>s.status==="out_for_delivery");
   const atWarehouse    = ships.filter(s=>s.status==="at_warehouse");
   const atBranch       = ships.filter(s=>s.status==="at_branch");
@@ -3756,20 +3762,38 @@ function viewLiveOps() {
   const pickupPending  = ships.filter(s=>s.status==="pickup_requested");
   const suspended      = ships.filter(s=>s.status==="suspended");
   const rescheduled    = ships.filter(s=>s.status==="rescheduled");
+  const submitted      = ships.filter(s=>s.status==="submitted"||s.status==="draft");
 
-  // Today's stats
+  // ── Today's stats ─────────────────────────────────────────
   const todayStr   = new Date().toDateString();
   const todayShips = ships.filter(s=>s.createdAt&&new Date(s.createdAt).toDateString()===todayStr);
   const todayDel   = ships.filter(s=>s.status==="delivered"&&s.deliveredAt&&new Date(s.deliveredAt).toDateString()===todayStr);
-  const todayRet   = ships.filter(s=>s.status==="returned"&&new Date(s.createdAt||0).toDateString()===todayStr);
+  const todayRet   = ships.filter(s=>s.status==="returned"&&s.returnedAt&&new Date(s.returnedAt).toDateString()===todayStr);
 
-  // Couriers currently active (have shipments out_for_delivery)
-  const activeCourierIds = new Set(outForDelivery.map(s=>s.courierId).filter(Boolean));
-  const activeCouriers   = couriers.filter(c=>activeCourierIds.has(c.id));
-  const idleCouriers     = couriers.filter(c=>!activeCourierIds.has(c.id));
+  // ── Courier workload ───────────────────────────────────────
+  // Build a map of courierId → their assigned shipments
+  const courierWorkload = {};
+  ships.forEach(s=>{
+    if(!s.courierId) return;
+    if(!courierWorkload[s.courierId]) courierWorkload[s.courierId]={
+      assigned:0, outForDelivery:0, pickedUp:0, inTransit:0
+    };
+    const active=["picked_up","in_transit","at_branch","at_warehouse","out_for_delivery"];
+    if(active.includes(s.status)) courierWorkload[s.courierId].assigned++;
+    if(s.status==="out_for_delivery") courierWorkload[s.courierId].outForDelivery++;
+    if(s.status==="picked_up")        courierWorkload[s.courierId].pickedUp++;
+    if(s.status==="in_transit")       courierWorkload[s.courierId].inTransit++;
+  });
+
+  const activeCourierIds = new Set(
+    Object.entries(courierWorkload).filter(([,w])=>w.assigned>0).map(([id])=>id)
+  );
+  const activeCouriers = allCouriers.filter(c=>activeCourierIds.has(c.id));
+  const idleCouriers   = allCouriers.filter(c=>!activeCourierIds.has(c.id));
+  const needsAttention = [...suspended,...rescheduled];
 
   return `<div>
-    <!-- Connection status banner -->
+    <!-- Connection + refresh header -->
     <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:var(--radius);
       background:${AppState.rtConnected?"var(--success-bg)":"var(--warning-bg)"};
       border:1px solid ${AppState.rtConnected?"var(--success-border,#bbf7d0)":"var(--warning-border)"};
@@ -3778,8 +3802,11 @@ function viewLiveOps() {
         background:${AppState.rtConnected?"var(--success)":"var(--warning)"};
         box-shadow:0 0 0 3px ${AppState.rtConnected?"rgba(34,197,94,.2)":"rgba(234,179,8,.2)"};"></span>
       <span style="font-weight:600;">${AppState.rtConnected?"🟢 متصل — التحديثات الفورية نشطة":"🟡 جاري الاتصال..."}</span>
-      <span style="color:var(--gray-500);margin-right:auto;">${AppState.rtEventCount} حدث منذ آخر تحديث</span>
-      <button class="btn btn-secondary btn-sm" onclick="App.resetRtCounter()">إعادة ضبط العداد</button>
+      <span style="color:var(--gray-500);">${AppState.rtEventCount} حدث منذ آخر تحديث</span>
+      <div style="margin-right:auto;display:flex;gap:6px;">
+        <button class="btn btn-secondary btn-sm" onclick="App.refreshLiveOpsData(true)">🔄 تحديث</button>
+        <button class="btn btn-secondary btn-sm" onclick="App.resetRtCounter()">إعادة ضبط العداد</button>
+      </div>
     </div>
 
     <!-- Today KPIs -->
@@ -3789,118 +3816,156 @@ function viewLiveOps() {
       ${kpi("مرتجعات اليوم",todayRet.length,"refresh","var(--danger)","var(--danger-bg)")}
       ${kpi("خارج للتسليم الآن",outForDelivery.length,"truck","var(--purple,#7c3aed)","var(--purple-bg,#ede9fe)")}
       ${kpi("مناديب نشطون",activeCouriers.length,"users","var(--success)","var(--success-bg)")}
-      ${kpi("تحتاج مراجعة",suspended.length+rescheduled.length,"log","var(--warning)","var(--warning-bg)")}
+      ${kpi("تحتاج مراجعة",needsAttention.length,"log","var(--warning)","var(--warning-bg)")}
     </div>
 
-    <div style="display:grid;grid-template-columns:1fr 1fr 340px;gap:16px;">
+    <!-- Main 3-column grid -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 340px;gap:16px;align-items:start;">
 
-      <!-- Live pipeline -->
+      <!-- Shipment Pipeline -->
       <div class="card">
-        <h3 class="card-title" style="margin-bottom:14px;">${icon("truck")} خط سير الشحنات (الآن)</h3>
+        <div class="card-header" style="margin-bottom:12px;">
+          <h3 class="card-title">${icon("truck")} خط سير الشحنات</h3>
+          <span style="font-size:12px;color:var(--gray-400);">${ships.length} إجمالي</span>
+        </div>
         ${[
-          ["طلب استلام",pickupPending.length,"badge-warning","pickup_requested"],
-          ["تم الاستلام",pickedUp.length,"badge-brand","picked_up"],
-          ["في التنقل",inTransit.length,"badge-brand","in_transit"],
-          ["في المستودع",atWarehouse.length,"badge-brand","at_warehouse"],
-          ["في الفرع",atBranch.length,"badge-brand","at_branch"],
-          ["خارج للتسليم",outForDelivery.length,"badge-success","out_for_delivery"],
-          ["موقوف",suspended.length,"badge-danger","suspended"],
-          ["إعادة جدولة",rescheduled.length,"badge-warning","rescheduled"],
-        ].map(([label,count,badge,status])=>`
-          <div style="display:flex;align-items:center;justify-content:space-between;
-            padding:9px 12px;border-radius:var(--radius);margin-bottom:6px;cursor:pointer;
-            background:${count>0?"var(--gray-50)":"transparent"};
-            border:1px solid ${count>0?"var(--gray-200)":"transparent"};"
-            onclick="App.setFilter('${status}');AppState.view='shipments';rerenderContent();">
-            <span style="font-size:13px;">${label}</span>
-            <div style="display:flex;align-items:center;gap:8px;">
-              ${count>0?`<div style="background:var(--gray-200);border-radius:99px;height:5px;width:80px;overflow:hidden;">
-                <div style="background:var(--brand);height:100%;border-radius:99px;
-                  width:${Math.min(Math.round(count/(ships.length||1)*100*3),100)}%;"></div>
-              </div>`:""}
-              <span class="badge ${count>0?badge:"badge-gray"}">${count}</span>
-            </div>
+          {label:"طلب استلام",     count:pickupPending.length,  badge:"badge-warning", status:"pickup_requested", icon:"📬"},
+          {label:"جديد / مسودة",   count:submitted.length,      badge:"badge-gray",    status:"submitted",         icon:"🆕"},
+          {label:"تم الاستلام",    count:pickedUp.length,       badge:"badge-brand",   status:"picked_up",         icon:"📦"},
+          {label:"في التنقل",      count:inTransit.length,      badge:"badge-brand",   status:"in_transit",        icon:"🚚"},
+          {label:"في المستودع",    count:atWarehouse.length,    badge:"badge-brand",   status:"at_warehouse",      icon:"🏭"},
+          {label:"في الفرع",       count:atBranch.length,       badge:"badge-brand",   status:"at_branch",         icon:"🏪"},
+          {label:"خارج للتسليم",   count:outForDelivery.length, badge:"badge-success", status:"out_for_delivery",  icon:"🛵"},
+          {label:"موقوف",          count:suspended.length,      badge:"badge-danger",  status:"suspended",         icon:"⏸️"},
+          {label:"إعادة جدولة",   count:rescheduled.length,    badge:"badge-warning", status:"rescheduled",       icon:"🔄"},
+        ].map(({label,count,badge,status,icon:ic})=>`
+          <div onclick="App.setFilter('${status}');AppState.view='shipments';rerenderContent();"
+            style="display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:var(--radius);
+              margin-bottom:5px;cursor:pointer;transition:background .15s;
+              background:${count>0?"var(--gray-50)":"transparent"};
+              border:1px solid ${count>0?"var(--gray-200)":"transparent"};"
+            onmouseover="this.style.background='var(--gray-100)'"
+            onmouseout="this.style.background='${count>0?"var(--gray-50)":"transparent"}'">
+            <span style="font-size:15px;width:22px;text-align:center;">${ic}</span>
+            <span style="font-size:13px;flex:1;">${label}</span>
+            ${count>0?`<div style="background:var(--gray-200);border-radius:99px;height:5px;width:60px;overflow:hidden;">
+              <div style="background:var(--brand);height:100%;border-radius:99px;
+                width:${Math.min(Math.round(count/(ships.length||1)*100*2),100)}%;"></div>
+            </div>`:""}
+            <span class="badge ${count>0?badge:"badge-gray"}" style="min-width:28px;text-align:center;">${count}</span>
           </div>`).join("")}
       </div>
 
-      <!-- Courier status board -->
+      <!-- Courier Board -->
       <div class="card">
-        <h3 class="card-title" style="margin-bottom:14px;">${icon("users")} لوحة المناديب</h3>
-        ${!couriers.length?`<div class="empty"><div class="empty-icon">🚚</div><h3>لا يوجد مناديب</h3></div>`:`
-          <div style="margin-bottom:10px;">
-            <div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:6px;">
-              نشط (${activeCouriers.length})
+        <div class="card-header" style="margin-bottom:12px;">
+          <h3 class="card-title">${icon("users")} لوحة المناديب</h3>
+          <span style="font-size:12px;color:var(--gray-400);">${allCouriers.length} مندوب</span>
+        </div>
+        ${!allCouriers.length?`
+          <div class="empty">
+            <div class="empty-icon">🚚</div>
+            <h3>لا يوجد مناديب</h3>
+            <p>أضف مناديب من صفحة المستخدمين</p>
+          </div>`:`
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--success);
+              text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">
+              🟢 نشط (${activeCouriers.length})
             </div>
             ${activeCouriers.length?activeCouriers.map(c=>{
-              const myShips = outForDelivery.filter(s=>s.courierId===c.id);
-              return `<div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:var(--radius);
-                background:var(--success-bg);border:1px solid var(--success-border,#bbf7d0);margin-bottom:6px;">
-                <div style="width:32px;height:32px;border-radius:50%;background:var(--success);color:#fff;
-                  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">
-                  ${initials(c.name)}</div>
-                <div style="flex:1;min-width:0;">
-                  <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(c.name)}</div>
-                  <div style="font-size:11px;color:var(--gray-500);">${myShips.length} شحنة نشطة</div>
+              const w = courierWorkload[c.id]||{assigned:0,outForDelivery:0};
+              return `<div style="padding:10px;border-radius:var(--radius);
+                background:var(--success-bg);border:1px solid var(--success-border,#bbf7d0);
+                margin-bottom:8px;">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+                  <div style="width:32px;height:32px;border-radius:50%;background:var(--success);
+                    color:#fff;display:flex;align-items:center;justify-content:center;
+                    font-size:12px;font-weight:700;flex-shrink:0;">${initials(c.full_name||c.name||"—")}</div>
+                  <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:13px;white-space:nowrap;
+                      overflow:hidden;text-overflow:ellipsis;">${esc(c.full_name||c.name||"—")}</div>
+                    ${c.phone?`<div style="font-size:11px;color:var(--gray-500);">${esc(c.phone)}</div>`:""}
+                  </div>
                 </div>
-                <span class="badge badge-success">${myShips.length}</span>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                  <span class="badge badge-success" title="إجمالي مهام نشطة">📦 ${w.assigned} مهمة</span>
+                  ${w.outForDelivery?`<span class="badge badge-brand" title="خارج للتسليم">🛵 ${w.outForDelivery} للتسليم</span>`:""}
+                  ${w.pickedUp?`<span class="badge badge-gray" title="تم استلامها">📥 ${w.pickedUp} استلام</span>`:""}
+                </div>
               </div>`;
-            }).join(""):`<div style="font-size:12px;color:var(--gray-400);padding:8px;">لا يوجد مناديب نشطون الآن</div>`}
-          </div>
-          <div>
-            <div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:6px;">
-              متاح (${idleCouriers.length})
+            }).join(""):
+            `<div style="font-size:12px;color:var(--gray-400);padding:10px;
+              background:var(--gray-50);border-radius:var(--radius);margin-bottom:10px;text-align:center;">
+              لا يوجد مناديب نشطون الآن
+            </div>`}
+
+            <div style="font-size:11px;font-weight:700;color:var(--gray-400);
+              text-transform:uppercase;letter-spacing:.5px;margin:12px 0 8px;">
+              ⚪ متاح (${idleCouriers.length})
             </div>
-            ${idleCouriers.slice(0,5).map(c=>`
-              <div style="display:flex;align-items:center;gap:10px;padding:8px;border-radius:var(--radius);
-                background:var(--gray-50);border:1px solid var(--gray-200);margin-bottom:6px;">
-                <div style="width:32px;height:32px;border-radius:50%;background:var(--gray-300);color:#fff;
-                  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;">
-                  ${initials(c.name)}</div>
+            ${idleCouriers.length?idleCouriers.slice(0,6).map(c=>`
+              <div style="display:flex;align-items:center;gap:10px;padding:8px;
+                border-radius:var(--radius);background:var(--gray-50);
+                border:1px solid var(--gray-200);margin-bottom:6px;">
+                <div style="width:28px;height:28px;border-radius:50%;background:var(--gray-200);
+                  color:var(--gray-500);display:flex;align-items:center;justify-content:center;
+                  font-size:11px;font-weight:700;flex-shrink:0;">${initials(c.full_name||"—")}</div>
                 <div style="flex:1;min-width:0;">
-                  <div style="font-weight:600;font-size:13px;">${esc(c.name)}</div>
+                  <div style="font-size:13px;font-weight:500;">${esc(c.full_name||"—")}</div>
                   <div style="font-size:11px;color:var(--gray-400);">متاح للتعيين</div>
                 </div>
                 <span class="badge badge-gray">متاح</span>
-              </div>`).join("")}
-            ${idleCouriers.length>5?`<div style="font-size:12px;color:var(--gray-400);text-align:center;padding:4px;">+ ${idleCouriers.length-5} آخرين</div>`:""}
+              </div>`).join(""):""}
+            ${idleCouriers.length>6?`<div style="font-size:12px;color:var(--gray-400);text-align:center;padding:4px;">
+              + ${idleCouriers.length-6} مندوبين آخرين</div>`:""}
           </div>`}
       </div>
 
       <!-- Live activity feed -->
-      <div class="card">
+      <div class="card" style="height:fit-content;">
         <div class="card-header" style="margin-bottom:12px;">
           <h3 class="card-title">${icon("log")} النشاط المباشر</h3>
-          <button class="btn-icon" onclick="App.clearActivityFeed()" title="مسح السجل"
-            style="font-size:12px;color:var(--gray-400);">✕</button>
+          <div style="display:flex;align-items:center;gap:6px;">
+            ${feed.length?`<span class="badge badge-brand">${feed.length}</span>`:""}
+            <button class="btn-icon" onclick="App.clearActivityFeed()"
+              title="مسح السجل" style="font-size:12px;color:var(--gray-400);">✕</button>
+          </div>
         </div>
-        <div style="max-height:420px;overflow-y:auto;">
+        <div style="max-height:480px;overflow-y:auto;">
           ${!feed.length?`
             <div style="text-align:center;padding:32px 16px;color:var(--gray-400);">
-              <div style="font-size:24px;margin-bottom:8px;">📡</div>
-              <div style="font-size:13px;">في انتظار الأحداث المباشرة...</div>
-              <div style="font-size:11px;margin-top:4px;">ستظهر الشحنات والتغييرات هنا تلقائياً</div>
+              <div style="font-size:28px;margin-bottom:10px;">📡</div>
+              <div style="font-size:13px;font-weight:600;margin-bottom:4px;">لا توجد أحداث بعد</div>
+              <div style="font-size:11px;">تظهر هنا التحديثات الفورية عند وقوعها</div>
+              <div style="font-size:11px;margin-top:4px;color:var(--gray-300);">أي تغيير في حالة شحنة سيظهر تلقائياً</div>
             </div>`
           : feed.map(f=>`
-            <div style="display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--gray-100);">
-              <span style="font-size:16px;flex-shrink:0;">${f.icon}</span>
+            <div style="display:flex;gap:8px;padding:8px 0;border-bottom:1px solid var(--gray-100);
+              align-items:flex-start;">
+              <span style="font-size:16px;flex-shrink:0;line-height:1.2;">${f.icon}</span>
               <div style="flex:1;min-width:0;">
-                <div style="font-size:12px;line-height:1.4;">${esc(f.text)}</div>
+                <div style="font-size:12px;line-height:1.4;word-break:break-word;">${esc(f.text)}</div>
                 <div style="font-size:10px;color:var(--gray-400);margin-top:2px;">${fmtTime(f.time)}</div>
               </div>
-              <span class="badge ${f.badge||"badge-gray"}" style="font-size:10px;flex-shrink:0;align-self:flex-start;"></span>
+              <span class="badge ${f.badge||"badge-gray"}"
+                style="font-size:10px;flex-shrink:0;max-width:70px;overflow:hidden;text-overflow:ellipsis;
+                  white-space:nowrap;">${f.statusLabel||""}</span>
             </div>`).join("")}
         </div>
       </div>
     </div>
 
     <!-- Needs attention section -->
-    ${(suspended.length+rescheduled.length)>0?`
-    <div class="card" style="margin-top:16px;border-right:4px solid var(--warning);">
-      <h3 class="card-title" style="margin-bottom:14px;">⚠️ تحتاج مراجعة</h3>
-      <div class="table-wrap">
-        ${shipTable([...suspended,...rescheduled].slice(0,10))}
-      </div>
-    </div>`:""}
+    ${needsAttention.length?`
+      <div class="card" style="margin-top:16px;border-right:4px solid var(--warning);">
+        <div class="card-header" style="margin-bottom:12px;">
+          <h3 class="card-title">⚠️ تحتاج مراجعة (${needsAttention.length})</h3>
+        </div>
+        <div class="table-wrap">
+          ${shipTable(needsAttention.slice(0,15))}
+        </div>
+      </div>`:""}
   </div>`;
 }
 
@@ -5503,6 +5568,46 @@ const App={
   },
 
   // ── Phase 4: Live Operations ──────────────────────────────────
+  // ── Phase 4: Live Operations ──────────────────────────────────
+  async refreshLiveOpsData(showToast) {
+    try {
+      // Refresh shipments to ensure pipeline counts are current
+      AppState.shipments = await DB.loadShipments();
+      AppState.couriers  = await DB.loadCouriers();
+
+      // Pre-populate feed from recent timeline events if feed is empty
+      if (AppState.liveActivityFeed.length === 0) {
+        const { data } = await db.from("shipment_timeline")
+          .select("shipment_code,event,event_type,actor_name,actor_role,created_at")
+          .order("created_at",{ascending:false})
+          .limit(30);
+
+        if (data && data.length) {
+          const STATUS_ICON = {
+            delivered:"✅", returned:"↩️", out_for_delivery:"🛵",
+            picked_up:"📦", created:"🆕", otp_verified:"🔐",
+            signature_captured:"✍️", otp_sent:"📱",
+            status_change:"🔄", cancelled:"❌", suspended:"⏸️",
+          };
+          AppState.liveActivityFeed = data.map(e=>({
+            type:   e.event_type||"status_change",
+            icon:   STATUS_ICON[e.event_type]||STATUS_ICON[e.event]||"📋",
+            time:   e.created_at,
+            text:   `${e.shipment_code}: ${e.event}${e.actor_name?" — "+e.actor_name:""}`,
+            badge:  "badge-gray",
+            statusLabel: "",
+          }));
+        }
+      }
+
+      if (showToast) toast("✅ تم تحديث البيانات");
+      rerenderContent();
+    } catch(err) {
+      console.warn("refreshLiveOpsData:", err.message);
+      if (showToast) toast("فشل التحديث: "+err.message, "error");
+    }
+  },
+
   resetRtCounter() {
     AppState.rtEventCount = 0;
     rerenderContent();

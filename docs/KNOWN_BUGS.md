@@ -163,3 +163,25 @@ Before fixing any bug report, check this file first — if the symptom matches a
 **Fix:** Added a global `window.addEventListener("error")` handler that catches TypeErrors mentioning `App.` and both logs them to the console with file/line context AND shows an error toast to the user. This does not prevent the error but makes it visible for debugging.
 **Status:** 🟢 Mitigated — not fully prevented. The real prevention is the grep check documented in CODING_CONVENTIONS.md: before deploying any button with `onclick="App.xxx(...)"`, confirm `App.xxx` is defined in the file.
 **Fixed:** Tech debt sprint
+
+---
+
+## Fixed in Live Ops Stabilization Sprint
+
+### 🟢 #16 — Shipment Pipeline shows all zeros
+**Symptom:** Live Ops pipeline shows 0 for every status even when shipments exist in other views.
+**Root cause:** Two-part issue. First: `postRender()` had no hook for the `liveops` view, so `AppState.shipments` was never refreshed when navigating to it — stale login-time snapshot may have had all shipments delivered. Second: `submitted` shipments used `status==="submitted"` but the pipeline had no row for `draft` status (same semantic group). Both caused zero-count display even with real data.
+**Fix:** Added `postRender()` hook that calls `App.refreshLiveOpsData()` on every `liveops` view render. Added `draft` to the `submitted` row filter. Added manual "🔄 تحديث" button for force-refresh.
+**Fixed:** Live Ops Stabilization Sprint
+
+### 🟢 #17 — Courier Board shows no data
+**Symptom:** Courier Board always shows zero active/idle couriers regardless of actual state.
+**Root cause:** `viewLiveOps` filtered `AppState.users` by `u.role==="courier"` but `AppState.users` is a mapped array with shape `{id, name, role, is_suspended}` from `loadUsers()`. The courier board needed workload data (shipments per courier, outForDelivery count) which requires joining against `AppState.shipments`. The old code had no such join — it only checked `outForDelivery.map(s=>s.courierId)` against the users array. `AppState.couriers` (from `loadCouriers()`, shape `{id, full_name, phone, primary_role}`) is the correct source and is always populated for admins. Additionally, `refreshLiveOpsData()` now reloads `AppState.couriers` fresh on every liveops visit.
+**Fix:** Rewrote courier board to use `AppState.couriers` directly. Built a `courierWorkload` map per `courierId` from all active shipments. Active = courier has at least one shipment in `picked_up/in_transit/at_warehouse/at_branch/out_for_delivery`. Each active courier card now shows total assigned, out-for-delivery count, and picked-up count.
+**Fixed:** Live Ops Stabilization Sprint
+
+### 🟢 #18 — Live Activity Feed always empty
+**Symptom:** Activity feed shows "في انتظار الأحداث..." always — even with hundreds of shipments.
+**Root cause:** `AppState.liveActivityFeed` starts as `[]` and is only populated by future Realtime events (INSERT/UPDATE on `shipments` after login). Historical activity is never loaded. A user who logs in and immediately opens Live Ops sees an empty feed even if thousands of status changes happened today.
+**Fix:** `App.refreshLiveOpsData()` (called by `postRender()` whenever `view==="liveops"`) now loads the 30 most recent `shipment_timeline` events from DB and maps them to the feed format — but **only if the feed is currently empty** (to avoid overwriting accumulated live events). Each event gets an appropriate icon from a `STATUS_ICON` map. The feed also now shows a `statusLabel` badge derived from `STATUS_MAP` on RT events.
+**Fixed:** Live Ops Stabilization Sprint
