@@ -267,7 +267,7 @@ const AppState = {
   // Phase 9 reports
   reportsTab:"overview", reportRange:"month", reportCourier:"", reportMerchant:"",
   // Phase 4 live ops
-  liveActivityFeed:[], rtConnected:false, rtEventCount:0,
+  liveActivityFeed:[], rtStatus:"CONNECTING", rtEventCount:0,
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -989,6 +989,16 @@ function visible() {
 }
 
 // ── REALTIME ──────────────────────────────────────────────
+function rtStatusConfig(status) {
+  switch(status) {
+    case "SUBSCRIBED":    return {color:"var(--success)", textColor:"var(--success)", label:"🟢 متصل"};
+    case "TIMED_OUT":     return {color:"var(--warning)", textColor:"var(--warning)", label:"🟡 انتهت المهلة"};
+    case "CLOSED":        return {color:"var(--danger)",  textColor:"var(--danger)",  label:"🔴 مغلق"};
+    case "CHANNEL_ERROR": return {color:"var(--danger)",  textColor:"var(--danger)",  label:"🔴 خطأ في القناة"};
+    default:              return {color:"var(--warning)", textColor:"var(--gray-400)", label:"🟡 جاري الاتصال..."};
+  }
+}
+
 function startRealtime() {
   if(AppState.realtimeChannel) return;
 
@@ -1039,13 +1049,12 @@ function startRealtime() {
       }
     })
     .subscribe(status=>{
-      AppState.rtConnected = status==="SUBSCRIBED";
-      // Update connection indicator without full re-render
-      const dot = document.getElementById("rtStatusDot");
-      if(dot) {
-        dot.style.background = AppState.rtConnected ? "var(--success)" : "var(--danger)";
-        dot.title = AppState.rtConnected ? "متصل — تحديثات فورية نشطة" : "غير متصل";
-      }
+      AppState.rtStatus = status; // SUBSCRIBED|TIMED_OUT|CLOSED|CHANNEL_ERROR
+      const dot  = document.getElementById("rtStatusDot");
+      const text = document.getElementById("rtStatusText");
+      const cfg  = rtStatusConfig(status);
+      if(dot)  { dot.style.background = cfg.color; dot.title = cfg.label; }
+      if(text) { text.textContent = cfg.label; text.style.color = cfg.textColor; }
     });
 }
 
@@ -1422,12 +1431,11 @@ function renderAdminShell(navKeys,unread) {
           <div class="topbar-title"><div class="eyebrow">Admin</div><h2>أهلاً، ${esc(u.name?.split(" ")[0]||"Admin")}</h2></div>
         </div>
         <div class="topbar-actions">
-          <div class="rt-status" title="${AppState.rtConnected?"متصل — تحديثات فورية نشطة":"غير متصل"}">
+          <div class="rt-status" title="${rtStatusConfig(AppState.rtStatus).label}">
             <span id="rtStatusDot" style="display:inline-block;width:8px;height:8px;border-radius:50%;
-              background:${AppState.rtConnected?"var(--success)":"var(--danger)"};
-              box-shadow:0 0 0 2px ${AppState.rtConnected?"rgba(34,197,94,.25)":"rgba(239,68,68,.25)"};
-              transition:background .3s;"></span>
-            <span style="font-size:11px;color:var(--gray-500);">${AppState.rtConnected?"مباشر":"غير متصل"}</span>
+              background:${rtStatusConfig(AppState.rtStatus).color};
+              box-shadow:0 0 0 2px rgba(0,0,0,.1);transition:background .3s;"></span>
+            <span id="rtStatusText" style="font-size:11px;color:${rtStatusConfig(AppState.rtStatus).textColor};">${rtStatusConfig(AppState.rtStatus).label}</span>
             ${AppState.rtEventCount>0?`<span class="badge badge-brand" style="font-size:10px;padding:1px 6px;">${AppState.rtEventCount}</span>`:""}
           </div>
           <div class="notif-btn-wrap">
@@ -3795,13 +3803,13 @@ function viewLiveOps() {
   return `<div>
     <!-- Connection + refresh header -->
     <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:var(--radius);
-      background:${AppState.rtConnected?"var(--success-bg)":"var(--warning-bg)"};
-      border:1px solid ${AppState.rtConnected?"var(--success-border,#bbf7d0)":"var(--warning-border)"};
+      background:${rtStatusConfig(AppState.rtStatus).color==="var(--success)"?"var(--success-bg)":rtStatusConfig(AppState.rtStatus).color==="var(--danger)"?"var(--danger-bg)":"var(--warning-bg)"};
+      border:1px solid ${rtStatusConfig(AppState.rtStatus).color==="var(--success)"?"var(--success-border,#bbf7d0)":rtStatusConfig(AppState.rtStatus).color==="var(--danger)"?"var(--danger-border)":"var(--warning-border)"};
       margin-bottom:20px;font-size:13px;">
       <span style="width:10px;height:10px;border-radius:50%;flex-shrink:0;
-        background:${AppState.rtConnected?"var(--success)":"var(--warning)"};
-        box-shadow:0 0 0 3px ${AppState.rtConnected?"rgba(34,197,94,.2)":"rgba(234,179,8,.2)"};"></span>
-      <span style="font-weight:600;">${AppState.rtConnected?"🟢 متصل — التحديثات الفورية نشطة":"🟡 جاري الاتصال..."}</span>
+        background:${rtStatusConfig(AppState.rtStatus).color};
+        box-shadow:0 0 0 3px rgba(0,0,0,.1);"></span>
+      <span style="font-weight:600;color:${rtStatusConfig(AppState.rtStatus).textColor};">${rtStatusConfig(AppState.rtStatus).label}</span>
       <span style="color:var(--gray-500);">${AppState.rtEventCount} حدث منذ آخر تحديث</span>
       <div style="margin-right:auto;display:flex;gap:6px;">
         <button class="btn btn-secondary btn-sm" onclick="App.refreshLiveOpsData(true)">🔄 تحديث</button>
@@ -3815,7 +3823,8 @@ function viewLiveOps() {
       ${kpi("تسليمات اليوم",todayDel.length,"chart","var(--success)","var(--success-bg)")}
       ${kpi("مرتجعات اليوم",todayRet.length,"refresh","var(--danger)","var(--danger-bg)")}
       ${kpi("خارج للتسليم الآن",outForDelivery.length,"truck","var(--purple,#7c3aed)","var(--purple-bg,#ede9fe)")}
-      ${kpi("مناديب نشطون",activeCouriers.length,"users","var(--success)","var(--success-bg)")}
+      ${kpi("مناديب مشغولون",activeCouriers.length,"users","var(--success)","var(--success-bg)")}
+      ${kpi("متاحون للتعيين",idleCouriers.length,"users","var(--info)","var(--info-bg)")}
       ${kpi("تحتاج مراجعة",needsAttention.length,"log","var(--warning)","var(--warning-bg)")}
     </div>
 
@@ -3868,57 +3877,42 @@ function viewLiveOps() {
             <h3>لا يوجد مناديب</h3>
             <p>أضف مناديب من صفحة المستخدمين</p>
           </div>`:`
-          <div>
-            <div style="font-size:11px;font-weight:700;color:var(--success);
-              text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px;">
-              🟢 نشط (${activeCouriers.length})
-            </div>
-            ${activeCouriers.length?activeCouriers.map(c=>{
-              const w = courierWorkload[c.id]||{assigned:0,outForDelivery:0};
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;">
+            <span class="badge badge-gray">الكل: ${allCouriers.length}</span>
+            <span class="badge badge-success">مشغول: ${activeCouriers.length}</span>
+            <span class="badge badge-gray" style="color:var(--gray-500);">متاح: ${idleCouriers.length}</span>
+          </div>
+          <div style="max-height:420px;overflow-y:auto;">
+            ${allCouriers.map(c=>{
+              const w = courierWorkload[c.id] || {assigned:0,outForDelivery:0,pickedUp:0,inTransit:0};
+              const isBusy = w.assigned > 0;
               return `<div style="padding:10px;border-radius:var(--radius);
-                background:var(--success-bg);border:1px solid var(--success-border,#bbf7d0);
+                background:${isBusy?"var(--success-bg)":"var(--gray-50)"};
+                border:1px solid ${isBusy?"var(--success-border,#bbf7d0)":"var(--gray-200)"};
                 margin-bottom:8px;">
-                <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-                  <div style="width:32px;height:32px;border-radius:50%;background:var(--success);
-                    color:#fff;display:flex;align-items:center;justify-content:center;
-                    font-size:12px;font-weight:700;flex-shrink:0;">${initials(c.full_name||c.name||"—")}</div>
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:${isBusy?6:0}px;">
+                  <div style="width:32px;height:32px;border-radius:50%;flex-shrink:0;
+                    background:${isBusy?"var(--success)":"var(--gray-300)"};color:#fff;
+                    display:flex;align-items:center;justify-content:center;
+                    font-size:12px;font-weight:700;">${initials(c.full_name||"—")}</div>
                   <div style="flex:1;min-width:0;">
                     <div style="font-weight:600;font-size:13px;white-space:nowrap;
-                      overflow:hidden;text-overflow:ellipsis;">${esc(c.full_name||c.name||"—")}</div>
-                    ${c.phone?`<div style="font-size:11px;color:var(--gray-500);">${esc(c.phone)}</div>`:""}
+                      overflow:hidden;text-overflow:ellipsis;">${esc(c.full_name||"—")}</div>
+                    <div style="font-size:11px;color:var(--gray-500);">${isBusy?"مشغول — لديه شحنات نشطة":"متاح للتعيين"}</div>
                   </div>
+                  <span class="badge ${isBusy?"badge-success":"badge-gray"}">${isBusy?"مشغول":"متاح"}</span>
                 </div>
-                <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                  <span class="badge badge-success" title="إجمالي مهام نشطة">📦 ${w.assigned} مهمة</span>
-                  ${w.outForDelivery?`<span class="badge badge-brand" title="خارج للتسليم">🛵 ${w.outForDelivery} للتسليم</span>`:""}
-                  ${w.pickedUp?`<span class="badge badge-gray" title="تم استلامها">📥 ${w.pickedUp} استلام</span>`:""}
-                </div>
+                ${isBusy?`<div style="display:flex;gap:5px;flex-wrap:wrap;padding-top:6px;border-top:1px solid rgba(0,0,0,.06);">
+                  <span class="badge badge-gray" style="font-size:10px;" title="إجمالي المهام النشطة">📦 ${w.assigned} مهمة</span>
+                  ${w.outForDelivery?`<span class="badge badge-success" style="font-size:10px;" title="خارج للتسليم">🛵 ${w.outForDelivery} للتسليم</span>`:""}
+                  ${w.pickedUp?`<span class="badge badge-brand" style="font-size:10px;" title="تم استلامها">📥 ${w.pickedUp} استلام</span>`:""}
+                  ${w.inTransit?`<span class="badge badge-brand" style="font-size:10px;" title="في التنقل">🚚 ${w.inTransit} تنقل</span>`:""}
+                </div>`:""}
               </div>`;
-            }).join(""):
-            `<div style="font-size:12px;color:var(--gray-400);padding:10px;
-              background:var(--gray-50);border-radius:var(--radius);margin-bottom:10px;text-align:center;">
-              لا يوجد مناديب نشطون الآن
-            </div>`}
-
-            <div style="font-size:11px;font-weight:700;color:var(--gray-400);
-              text-transform:uppercase;letter-spacing:.5px;margin:12px 0 8px;">
-              ⚪ متاح (${idleCouriers.length})
-            </div>
-            ${idleCouriers.length?idleCouriers.slice(0,6).map(c=>`
-              <div style="display:flex;align-items:center;gap:10px;padding:8px;
-                border-radius:var(--radius);background:var(--gray-50);
-                border:1px solid var(--gray-200);margin-bottom:6px;">
-                <div style="width:28px;height:28px;border-radius:50%;background:var(--gray-200);
-                  color:var(--gray-500);display:flex;align-items:center;justify-content:center;
-                  font-size:11px;font-weight:700;flex-shrink:0;">${initials(c.full_name||"—")}</div>
-                <div style="flex:1;min-width:0;">
-                  <div style="font-size:13px;font-weight:500;">${esc(c.full_name||"—")}</div>
-                  <div style="font-size:11px;color:var(--gray-400);">متاح للتعيين</div>
-                </div>
-                <span class="badge badge-gray">متاح</span>
-              </div>`).join(""):""}
-            ${idleCouriers.length>6?`<div style="font-size:12px;color:var(--gray-400);text-align:center;padding:4px;">
-              + ${idleCouriers.length-6} مندوبين آخرين</div>`:""}
+            }).join("")}
+          </div>
+          <div style="font-size:11px;color:var(--gray-400);text-align:center;padding:8px 0;border-top:1px solid var(--gray-100);margin-top:8px;">
+            الحالة بناءً على الشحنات المخصصة حالياً · لا تعكس الوجود الفعلي للمندوب
           </div>`}
       </div>
 
