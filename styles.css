@@ -1250,3 +1250,83 @@ body {
   .rt-status span:last-child { display: none; }
   .rt-status .badge          { display: none; }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   ENHANCED TRACKING PAGE
+   ══════════════════════════════════════════════════════════════ */
+
+/* Progress stepper scrollable on mobile */
+.prog-track {
+  display: flex;
+  align-items: flex-start;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  gap: 0;
+}
+
+.prog-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 60px;
+}
+
+.prog-circle {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--gray-200);
+  color: var(--gray-500);
+  border: 2px solid var(--gray-200);
+  transition: background .2s, border-color .2s;
+}
+
+.prog-circle.done {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+.prog-circle.curr {
+  background: #fff;
+  border-color: var(--brand);
+  color: var(--brand);
+  box-shadow: 0 0 0 3px rgba(99,102,241,.15);
+}
+
+.prog-line {
+  flex: 1;
+  height: 2px;
+  background: var(--gray-200);
+  margin-top: 14px;
+  transition: background .2s;
+  min-width: 16px;
+}
+
+.prog-line.done {
+  background: var(--brand);
+}
+
+.prog-step span {
+  font-size: 10px;
+  color: var(--gray-400);
+  text-align: center;
+  max-width: 60px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 768px) {
+  .prog-step { min-width: 48px; }
+  .prog-step span { font-size: 9px; max-width: 48px; }
+  .prog-circle { width: 24px; height: 24px; font-size: 9px; }
+  .prog-line { margin-top: 11px; }
+}

@@ -1947,49 +1947,232 @@ function viewTasks() {
 
 // ── TRACK VIEW ────────────────────────────────────────────
 function viewTrack() {
-  const s=AppState.shipments.find(x=>x.id===AppState.selectedShipment);
-  if(!s) return `<div class="empty" style="padding:80px 20px;">
-    <div class="empty-icon">📦</div>
-    <h3>${AppState.selectedShipment?"الشحنة غير موجودة":"تتبع شحنتك"}</h3>
-    <p>${AppState.selectedShipment?"تأكد من رقم الشحنة":"أدخل رقم الشحنة الذي أرسله لك التاجر"}</p>
-    <button class="btn btn-primary" onclick="App.manualTrack()" style="margin-top:8px;">🔍 تتبع شحنة</button>
-  </div>`;
-  const meta=STATUS_MAP[s.status]||{label:s.status,badge:"badge-gray"};
-  const steps=STATUS_STEPS;const curIdx=steps.indexOf(s.status);
+  const s = AppState.shipments.find(x=>x.id===AppState.selectedShipment);
+
+  // ── Empty / search state ───────────────────────────────────
+  if (!s) return `
+    <div style="max-width:540px;margin:60px auto;padding:0 16px;text-align:center;">
+      <div style="font-size:56px;margin-bottom:16px;">📦</div>
+      <h2 style="margin-bottom:8px;font-size:22px;">
+        ${AppState.selectedShipment?"الشحنة غير موجودة":"تتبع شحنتك"}
+      </h2>
+      <p style="color:var(--gray-500);margin-bottom:28px;font-size:14px;">
+        ${AppState.selectedShipment
+          ?"تأكد من رقم الشحنة أو تواصل مع التاجر"
+          :"أدخل رقم الشحنة الذي أرسله لك التاجر أو المرسل"}
+      </p>
+      <div style="display:flex;gap:8px;max-width:400px;margin:0 auto;">
+        <input id="trackCodeInput" type="text" placeholder="ANE-XXXXXXX"
+          style="flex:1;padding:12px 16px;border-radius:var(--radius);
+            border:2px solid var(--gray-300);font-size:15px;text-align:center;
+            font-family:monospace;letter-spacing:2px;"
+          value="${esc(AppState.selectedShipment||"")}"
+          onkeydown="if(event.key==='Enter') App.manualTrack()"
+          autofocus/>
+        <button class="btn btn-primary" style="padding:12px 20px;"
+          onclick="App.manualTrack()">بحث</button>
+      </div>
+      ${AppState.selectedShipment?`
+        <div style="margin-top:20px;font-size:13px;color:var(--gray-400);">
+          لم يتم العثور على شحنة برقم <b>${esc(AppState.selectedShipment)}</b>
+        </div>`:""}
+    </div>`;
+
+  // ── Shipment found ─────────────────────────────────────────
+  const meta    = STATUS_MAP[s.status] || {label:s.status, badge:"badge-gray"};
+  const steps   = STATUS_STEPS;
+  const curIdx  = steps.indexOf(s.status);
+  const isDel   = s.status==="delivered";
+  const isRet   = s.status==="returned";
+  const isCan   = s.status==="cancelled";
+  const isProb  = ["suspended","rescheduled"].includes(s.status);
+
+  // Timeline event icons
+  const TL_ICON = {
+    created:"🆕", submitted:"📋", pickup_requested:"📬",
+    picked_up:"📦", at_warehouse:"🏭", in_transit:"🚚",
+    at_branch:"🏪", out_for_delivery:"🛵", delivered:"✅",
+    returned:"↩️", cancelled:"❌", rescheduled:"🔄",
+    suspended:"⏸️", otp_sent:"📱", otp_verified:"🔐",
+    signature_captured:"✍️", status_change:"🔄",
+    default:"📋",
+  };
+
+  // Tracking URL for sharing
+  const trackUrl = `${window.location.origin}${window.location.pathname}?track=${encodeURIComponent(s.id)}`;
+  const waMsg    = encodeURIComponent(`تتبع شحنتي: ${s.id}\n${trackUrl}`);
+
   return `
-    <div class="track-hero">
-      <div><div class="th-eyebrow">تتبع الشحنة</div><div class="th-id">${esc(s.id)}</div>
-        <div class="th-sub">${esc(s.customerName)} · ${esc(s.governorate||s.address?.slice(0,30))}</div></div>
-      <span class="badge ${meta.badge}" style="font-size:13px;padding:5px 14px;">${meta.label}</span>
-    </div>
-    <div class="card">
-      <div class="prog-track">
-        ${steps.map((st,i)=>`
-          <div class="prog-step">
-            <div class="prog-circle ${i<curIdx?"done":i===curIdx?"curr":""}">${i<=curIdx?"✓":i+1}</div>
-            <span>${STATUS_MAP[st]?.label||st}</span>
+    <div style="max-width:680px;margin:0 auto;padding:0 0 40px;">
+
+      <!-- Hero banner -->
+      <div class="track-hero" style="border-radius:var(--radius-lg);margin-bottom:20px;
+        background:${isDel?"var(--success)":isRet?"var(--danger)":isCan?"var(--gray-600)":isProb?"var(--warning)":"var(--brand)"};
+        color:#fff;padding:24px 28px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+        <div>
+          <div style="font-size:11px;font-weight:600;opacity:.8;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">
+            رقم الشحنة
           </div>
-          ${i<steps.length-1?`<div class="prog-line ${i<curIdx?"done":""}"></div>`:""}`).join("")}
+          <div style="font-size:22px;font-weight:800;font-family:monospace;letter-spacing:2px;">${esc(s.id)}</div>
+          <div style="font-size:13px;opacity:.85;margin-top:4px;">${esc(s.customerName)}
+            ${s.governorate?` · ${esc(s.governorate)}`:""}
+          </div>
+        </div>
+        <div style="text-align:left;">
+          <div style="background:rgba(255,255,255,.25);border-radius:99px;
+            padding:6px 18px;font-size:14px;font-weight:700;margin-bottom:8px;">
+            ${meta.label}
+          </div>
+          <button class="btn-icon" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);
+            border-radius:var(--radius);padding:6px 14px;color:#fff;font-size:12px;cursor:pointer;"
+            onclick="navigator.clipboard?.writeText('${esc(trackUrl)}').then(()=>toast('✅ تم نسخ الرابط'));App._dummy()">
+            🔗 نسخ رابط التتبع
+          </button>
+        </div>
       </div>
-      <div class="detail-grid" style="margin-top:16px;">
-        <div class="detail-field"><div class="df-label">العميل</div><div class="df-value">${esc(s.customerName)}</div></div>
-        <div class="detail-field"><div class="df-label">الهاتف</div><div class="df-value"><a href="tel:${esc(s.customerPhone)}" style="color:var(--brand);">📞 ${esc(s.customerPhone)}</a></div></div>
-        <div class="detail-field"><div class="df-label">العنوان</div><div class="df-value">${esc(s.governorate?`${s.governorate} / ${s.city}`:s.address)}</div></div>
-        <div class="detail-field"><div class="df-label">موعد التسليم</div><div class="df-value">${esc(s.eta)||"قيد التجهيز"}</div></div>
+
+      <!-- Progress stepper -->
+      ${!isRet&&!isCan?`
+      <div class="card" style="margin-bottom:16px;overflow-x:auto;">
+        <div class="prog-track" style="min-width:560px;">
+          ${steps.map((st,i)=>`
+            <div class="prog-step">
+              <div class="prog-circle ${i<curIdx?"done":i===curIdx?"curr":""}">
+                ${i<curIdx?"✓":i===curIdx?`<span style="font-size:10px;">●</span>`:(i+1)}
+              </div>
+              <span style="font-size:11px;${i===curIdx?"font-weight:700;color:var(--brand)":"color:var(--gray-400)"};">
+                ${STATUS_MAP[st]?.label||st}
+              </span>
+            </div>
+            ${i<steps.length-1?`<div class="prog-line ${i<curIdx?"done":""}"></div>`:""}`
+          ).join("")}
+        </div>
+      </div>`:
+      isRet?`<div style="background:var(--danger-bg);border:1px solid var(--danger-border);
+        border-radius:var(--radius-lg);padding:16px 20px;margin-bottom:16px;font-size:14px;font-weight:600;color:var(--danger);">
+        ↩️ تم إرجاع الشحنة
+      </div>`:`<div style="background:var(--danger-bg);border:1px solid var(--danger-border);
+        border-radius:var(--radius-lg);padding:16px 20px;margin-bottom:16px;font-size:14px;font-weight:600;color:var(--danger);">
+        ❌ تم إلغاء الشحنة
+      </div>`}
+
+      <!-- Shipment details card -->
+      <div class="card" style="margin-bottom:16px;">
+        <h3 class="card-title" style="margin-bottom:16px;">📋 تفاصيل الشحنة</h3>
+        <div class="detail-grid">
+          <div class="detail-field">
+            <div class="df-label">اسم المستلم</div>
+            <div class="df-value" style="font-weight:600;">${esc(s.customerName)}</div>
+          </div>
+          <div class="detail-field">
+            <div class="df-label">رقم الهاتف</div>
+            <div class="df-value">
+              <a href="tel:${esc(s.customerPhone)}" style="color:var(--brand);font-weight:600;">
+                📞 ${esc(s.customerPhone)}
+              </a>
+            </div>
+          </div>
+          <div class="detail-field">
+            <div class="df-label">العنوان</div>
+            <div class="df-value">
+              ${esc(s.governorate||"")}${s.city?` / ${esc(s.city)}`:""}
+              ${s.street?`<br/><span style="font-size:12px;color:var(--gray-500);">${esc(s.street)}</span>`:""}
+            </div>
+          </div>
+          <div class="detail-field">
+            <div class="df-label">نوع الخدمة</div>
+            <div class="df-value">${SERVICE_MAP[s.serviceType]?.label||s.serviceType||"—"}</div>
+          </div>
+          ${s.amount?`
+          <div class="detail-field">
+            <div class="df-label">مبلغ الاستلام (COD)</div>
+            <div class="df-value" style="font-size:18px;font-weight:800;color:var(--success);">
+              ${money(s.amount)}
+            </div>
+          </div>`:""}
+          ${s.eta?`
+          <div class="detail-field">
+            <div class="df-label">موعد التسليم المتوقع</div>
+            <div class="df-value" style="font-weight:600;color:var(--brand);">📅 ${esc(s.eta)}</div>
+          </div>`:""}
+          ${s.weight?`
+          <div class="detail-field">
+            <div class="df-label">الوزن</div>
+            <div class="df-value">${s.weight} كجم</div>
+          </div>`:""}
+          ${s.notes?`
+          <div class="detail-field" style="grid-column:1/-1;">
+            <div class="df-label">ملاحظات</div>
+            <div class="df-value">${esc(s.notes)}</div>
+          </div>`:""}
+        </div>
+
+        <!-- OTP / signature status for delivered shipments -->
+        ${isDel?`
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;padding-top:16px;border-top:1px solid var(--gray-100);">
+          ${s.otpVerified?`<span style="background:var(--success-bg);color:var(--success);border:1px solid var(--success-border,#bbf7d0);
+            border-radius:99px;padding:4px 14px;font-size:12px;font-weight:600;">✅ تم التحقق من الهوية</span>`:""}
+          ${s.signatureUrl?`<span style="background:var(--brand-light);color:var(--brand-dark);
+            border-radius:99px;padding:4px 14px;font-size:12px;font-weight:600;">✍️ تم التوقيع</span>`:""}
+        </div>`:""}
       </div>
-      ${s.podUrl||s.signatureUrl?`<div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;">
-        ${s.podUrl?`<div><div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:6px;">📷 إثبات التسليم</div>
-          <img src="${esc(s.podUrl)}" style="width:150px;border-radius:var(--radius);border:2px solid var(--gray-200);"/></div>`:""}
-        ${s.signatureUrl?`<div><div style="font-size:11px;font-weight:700;color:var(--gray-400);text-transform:uppercase;margin-bottom:6px;">✍️ توقيع العميل</div>
-          <img src="${esc(s.signatureUrl)}" style="width:150px;border-radius:var(--radius);border:2px solid var(--gray-200);background:#fff;"/></div>`:""}
+
+      <!-- POD + signature images -->
+      ${s.podUrl||s.signatureUrl?`
+      <div class="card" style="margin-bottom:16px;">
+        <h3 class="card-title" style="margin-bottom:14px;">📷 إثبات التسليم</h3>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;">
+          ${s.podUrl?`
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--gray-400);
+              text-transform:uppercase;margin-bottom:8px;">صورة إثبات التسليم</div>
+            <img src="${esc(s.podUrl)}" alt="POD"
+              style="max-width:200px;border-radius:var(--radius);
+                border:2px solid var(--gray-200);cursor:pointer;"
+              onclick="window.open('${esc(s.podUrl)}','_blank')"/>
+          </div>`:""} 
+          ${s.signatureUrl?`
+          <div>
+            <div style="font-size:11px;font-weight:700;color:var(--gray-400);
+              text-transform:uppercase;margin-bottom:8px;">توقيع المستلم</div>
+            <img src="${esc(s.signatureUrl)}" alt="Signature"
+              style="max-width:200px;border-radius:var(--radius);
+                border:2px solid var(--gray-200);background:#fff;cursor:pointer;"
+              onclick="window.open('${esc(s.signatureUrl)}','_blank')"/>
+          </div>`:""}
+        </div>
       </div>`:""}
-      <div class="timeline" id="tlBox-${esc(s.id)}" style="margin-top:20px;">
-        <h4>${icon("log",13)} سجل الأحداث</h4>
-        <div class="page-loader"><span class="spinner"></span></div>
+
+      <!-- Event timeline -->
+      <div class="card" style="margin-bottom:16px;">
+        <h3 class="card-title" style="margin-bottom:16px;">${icon("log",14)} سجل الأحداث</h3>
+        <div id="tlBox-${esc(s.id)}">
+          <div class="page-loader"><span class="spinner"></span></div>
+        </div>
+      </div>
+
+      <!-- Share section -->
+      <div style="text-align:center;padding:16px;">
+        <div style="font-size:13px;color:var(--gray-500);margin-bottom:12px;">شارك رقم التتبع</div>
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+          <a href="https://wa.me/?text=${waMsg}" target="_blank"
+            style="display:inline-flex;align-items:center;gap:6px;padding:8px 18px;
+              background:#25d366;color:#fff;border-radius:99px;text-decoration:none;font-size:13px;font-weight:600;">
+            <span style="font-size:16px;">💬</span> WhatsApp
+          </a>
+          <button onclick="App.manualTrack()" class="btn btn-secondary" style="border-radius:99px;">
+            🔍 تتبع شحنة أخرى
+          </button>
+        </div>
+        <div style="font-size:11px;color:var(--gray-300);margin-top:12px;">
+          ${esc(trackUrl)}
+        </div>
       </div>
     </div>`;
 }
 
+// Dummy no-op to allow chaining in onclick (clipboard.then is async)
+App._dummy = () => {};
 // ── ACCOUNTS VIEW ─────────────────────────────────────────
 function viewAccounts() {
   const role = AppState.user.primary_role||AppState.user.role;
