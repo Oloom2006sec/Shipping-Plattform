@@ -185,3 +185,27 @@ Before fixing any bug report, check this file first — if the symptom matches a
 **Root cause:** `AppState.liveActivityFeed` starts as `[]` and is only populated by future Realtime events (INSERT/UPDATE on `shipments` after login). Historical activity is never loaded. A user who logs in and immediately opens Live Ops sees an empty feed even if thousands of status changes happened today.
 **Fix:** `App.refreshLiveOpsData()` (called by `postRender()` whenever `view==="liveops"`) now loads the 30 most recent `shipment_timeline` events from DB and maps them to the feed format — but **only if the feed is currently empty** (to avoid overwriting accumulated live events). Each event gets an appropriate icon from a `STATUS_ICON` map. The feed also now shows a `statusLabel` badge derived from `STATUS_MAP` on RT events.
 **Fixed:** Live Ops Stabilization Sprint
+
+---
+
+## Fixed in Live Ops Stabilization Sprint #2
+
+### 🟢 #19 — RT connection shows only Connected/Disconnected (binary)
+**Symptom:** Realtime connection status showed "متصل" or "غير متصل" with no intermediate states. Any non-SUBSCRIBED status (timeout, closed, error) looked the same as disconnected.
+**Root cause:** `AppState.rtConnected` was a boolean — `status === "SUBSCRIBED"` was true, everything else was false. Supabase Realtime actually emits four distinct status strings: `SUBSCRIBED`, `TIMED_OUT`, `CLOSED`, `CHANNEL_ERROR`, plus the implicit initial state (connecting).
+**Fix:** Replaced `AppState.rtConnected:false` with `AppState.rtStatus:"CONNECTING"` (string). Added `rtStatusConfig(status)` helper mapping all 4 Supabase states + default to `{color, textColor, label}`. Subscribe callback stores full string and updates both the dot and the text element in-place (no re-render). Topbar and liveops banner both use `rtStatusConfig()`.
+**Fixed:** Live Ops Stabilization Sprint #2
+
+### 🟢 #20 — Courier board says "No active couriers" even with couriers present
+**Symptom:** Courier board always showed "لا يوجد مناديب نشطون الآن" even when courier users existed in the system.
+**Root cause:** The board split couriers into "Active" (has active shipments) and "Idle" sections. When `activeCouriers.length === 0` (no courier has an active shipment right now), the Active section showed the empty-state message and the Idle section below it showed all couriers — but users saw only the empty-state first and interpreted the whole board as broken. Additionally the terminology "active/idle" conflates two meanings: "has work assigned" vs "is online" (which requires Presence, not implemented).
+**Fix:** Rewrote board to show ALL couriers in a single scrollable list sorted by workload. Each courier card shows green (Busy) or gray (Available) based on whether `courierWorkload[id].assigned > 0`. Summary badges at the top show total/busy/available counts. Added honest disclaimer: "الحالة بناءً على الشحنات المخصصة حالياً · لا تعكس الوجود الفعلي للمندوب". KPIs updated to show "مشغولون" and "متاحون للتعيين" separately.
+**Fixed:** Live Ops Stabilization Sprint #2
+**Note:** True online/offline status requires Supabase Presence (Realtime presence tracking). This would let couriers broadcast their online state and admins see it in real-time. Deferred to future phase.
+
+### 🟢 #21 — App fails to load: "can't access lexical declaration 'App' before initialization"
+**Symptom:** Application completely fails to start. Browser console: `Uncaught ReferenceError: can't access lexical declaration 'App' before initialization` at app.js:2175.
+**Root cause:** `App._dummy = () => {};` was placed at module top level (line 2175), before `const App = {...}` is declared later in the file. `const` declarations are not hoisted in JavaScript — unlike `var`, a `const` binding cannot be accessed before its declaration, not even to assign properties to it. This caused the entire script to fail on load.
+**Fix:** Removed the top-level `App._dummy` assignment. Added `_dummy() {}` as a proper no-op method inside the `App` object itself, so `onclick="App._dummy()"` calls still work at runtime.
+**Fixed:** Immediately on discovery
+**Prevention rule:** Never assign properties to `App`, `DB`, `AppState`, or any module-level `const` object outside the object's own declaration block. All methods belong inside `const App = { ... }`.

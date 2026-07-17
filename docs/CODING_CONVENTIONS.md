@@ -247,3 +247,23 @@ The `can(code)` helper resolves aliases then checks `AppPerms` (the live DB-load
 - Fields holding DB-loaded arrays are initialized as `[]`, not `null`
 - Fields holding DB-loaded scalars are initialized as `0` or `""`, not `null`
 - Lazy-load flags are initialized as `false` with `_` prefix (e.g. `_branchDataLoaded: false`)
+
+---
+
+## 7. Module-level const assignment rule (new — from KNOWN_BUGS.md #21)
+
+**Never assign properties to `App`, `DB`, `AppState`, or any `const` object outside that object's own declaration block.**
+
+```js
+// ❌ WRONG — App is const, not hoisted. This line runs before App is declared
+//            and throws: "can't access lexical declaration 'App' before initialization"
+App._dummy = () => {};     // placed at module top level
+
+// ✅ CORRECT — add the method inside the App object declaration
+const App = {
+  _dummy() {},             // no-op method, accessible as App._dummy()
+  someOtherMethod() { ... },
+};
+```
+
+This applies equally to `DB`, `AppState`, and any other module-level `const`. If you need to add a utility that references `App` from outside (e.g. from a `view*()` function), call the method via `App.methodName()` at runtime — that is fine because by the time any event fires, `const App` is already fully initialized. The problem only occurs at **parse/initialization time** (top-level statements that execute before the `const` declaration is reached).

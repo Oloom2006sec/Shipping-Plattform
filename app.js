@@ -2171,8 +2171,6 @@ function viewTrack() {
     </div>`;
 }
 
-// Dummy no-op to allow chaining in onclick (clipboard.then is async)
-App._dummy = () => {};
 // ── ACCOUNTS VIEW ─────────────────────────────────────────
 function viewAccounts() {
   const role = AppState.user.primary_role||AppState.user.role;
@@ -5784,6 +5782,8 @@ const App={
       if (showToast) toast("فشل التحديث: "+err.message, "error");
     }
   },
+
+  _dummy() {}, // no-op — used in onclick chains after async clipboard calls
 
   resetRtCounter() {
     AppState.rtEventCount = 0;
