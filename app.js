@@ -428,15 +428,20 @@ const DB = {
   },
   async loadNotifications(role) {
     if(role==="customer")return[];
-    let q=db.from("notifications").select("*").order("created_at",{ascending:false}).limit(20);
+    let q=db.from("notifications").select("*").order("created_at",{ascending:false}).limit(30);
     if(role==="courier")       q=q.eq("recipient_role","courier");
     else if(role==="merchant") q=q.in("recipient_role",["merchant","admin"]);
     const{data}=await q;
     return(data||[]).map(n=>({
-      text:n.body||n.text||"",
-      role:n.recipient_role||n.role||"admin",
-      time:fmtTime(n.created_at),
-      isRead:n.is_read||false
+      id:          n.id,
+      title:       n.title||"",
+      text:        n.body||n.message||n.text||"",
+      type:        n.type||"info",
+      referenceId: n.reference_id||null,
+      recipientRole: n.recipient_role||"admin",
+      time:        fmtTime(n.created_at),
+      createdAt:   n.created_at,
+      isRead:      n.is_read||false,
     }));
   },
   async createShipment(data) {
@@ -1476,11 +1481,44 @@ function renderSimpleShell(navKeys,unread) {
 }
 
 function renderNotifPanel() {
-  const n=AppState.notifications;
-  return`<div id="notifDropdown" class="notif-dropdown">
-    <div class="notif-header"><span>الإشعارات</span><button class="text-link" id="clearNotif">مسح</button></div>
-    ${!n.length?`<div class="notif-item"><div class="ni-text" style="color:var(--gray-400);">لا توجد إشعارات</div></div>`
-      :n.slice(0,10).map(x=>`<div class="notif-item ${x.isRead?"":"unread"}"><div class="ni-text">${esc(x.text)}</div><div class="ni-time">${esc(x.time)}</div></div>`).join("")}
+  const n    = AppState.notifications;
+  const unrd = n.filter(x=>!x.isRead).length;
+  const TYPE_ICON = {
+    info:"ℹ️", success:"✅", warning:"⚠️", error:"❌", shipment:"📦", default:"🔔"
+  };
+  return `<div id="notifDropdown" class="notif-dropdown">
+    <div class="notif-header">
+      <span>الإشعارات ${unrd>0?`<span class="notif-count" style="position:relative;top:-1px;margin-right:4px;">${unrd}</span>`:""}</span>
+      <div style="display:flex;gap:8px;">
+        ${unrd>0?`<button class="text-link" onclick="App.markAllNotifsRead()">قراءة الكل</button>`:""}
+        <button class="text-link" id="clearNotif">مسح</button>
+      </div>
+    </div>
+    <div style="max-height:360px;overflow-y:auto;">
+      ${!n.length
+        ?`<div class="notif-item"><div class="ni-text" style="color:var(--gray-400);text-align:center;padding:16px 0;">
+            🔔 لا توجد إشعارات
+          </div></div>`
+        :n.slice(0,20).map(x=>`
+          <div class="notif-item ${x.isRead?"":"unread"}"
+            onclick="App.markNotifRead('${x.id||""}','${x.referenceId||""}')"
+            style="cursor:pointer;">
+            <div style="display:flex;gap:10px;align-items:flex-start;">
+              <span style="font-size:16px;flex-shrink:0;margin-top:1px;">
+                ${TYPE_ICON[x.type]||TYPE_ICON.default}
+              </span>
+              <div style="flex:1;min-width:0;">
+                ${x.title?`<div style="font-size:12px;font-weight:700;margin-bottom:2px;">${esc(x.title)}</div>`:""}
+                <div class="ni-text">${esc(x.text)}</div>
+                <div class="ni-time">${esc(x.time)}</div>
+              </div>
+              ${!x.isRead?`<span style="width:7px;height:7px;border-radius:50%;background:var(--brand);flex-shrink:0;margin-top:4px;"></span>`:""}
+            </div>
+          </div>`).join("")}
+    </div>
+    ${n.length>20?`<div style="text-align:center;padding:8px;font-size:12px;color:var(--gray-400);">
+      + ${n.length-20} إشعار آخر
+    </div>`:""}
   </div>`;
 }
 
@@ -1692,8 +1730,14 @@ function viewOverview() {
     <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:var(--radius);
       background:var(--warning-bg);border:1px solid var(--warning-border);margin-bottom:16px;font-size:13px;">
       📱 <span>مزود SMS في وضع الاختبار — الرسائل لا تُرسل فعلياً.</span>
-      <button class="btn btn-secondary btn-sm" style="margin-right:auto;" onclick="App.openSmsSettings()">إعداد مزود SMS</button>
-    </div>`:""}
+      <div style="margin-right:auto;display:flex;gap:6px;">
+        <button class="btn btn-secondary btn-sm" onclick="App.broadcastNotification()">📢 إشعار جماعي</button>
+        <button class="btn btn-secondary btn-sm" onclick="App.openSmsSettings()">إعداد مزود SMS</button>
+      </div>
+    </div>`:`
+    <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+      <button class="btn btn-secondary btn-sm" onclick="App.broadcastNotification()">📢 إشعار جماعي</button>
+    </div>`}
     <div class="kpi-grid">
       ${kpi("إجمالي الشحنات",total,"box","var(--brand)","var(--brand-light)","all")}
       ${kpi("تنتظر الاستلام",pending,"qr","var(--warning)","var(--warning-bg)","created")}
@@ -2762,11 +2806,28 @@ function bindDashboardEvents() {
     const d=$("notifDropdown");if(!d)return;
     const open=d.style.display==="block";
     d.style.display=open?"none":"block";
-    if(!open){AppState.notifications.forEach(n=>n.isRead=true);document.querySelector(".notif-count")?.remove();}
+    if(!open){
+      // Mark visible unread notifications as read in DB when panel opens
+      const unreadIds=AppState.notifications.filter(n=>!n.isRead&&n.id).map(n=>n.id);
+      if(unreadIds.length){
+        AppState.notifications.forEach(n=>n.isRead=true);
+        document.querySelector(".notif-count")?.remove();
+        // Persist to DB (fire-and-forget — UI already updated)
+        db.from("notifications").update({is_read:true,read_at:new Date().toISOString()})
+          .in("id",unreadIds).then(()=>{}).catch(()=>{});
+      }
+    }
   });
   $("clearNotif")?.addEventListener("click",async()=>{
-    AppState.notifications=[];
-    try{await db.from("notifications").delete().neq("id","00000000-0000-0000-0000-000000000000");}catch(e){}
+    // Mark all as read (not hard delete — preserve notification history)
+    const ids = AppState.notifications.filter(n=>n.id).map(n=>n.id);
+    AppState.notifications = [];
+    if(ids.length){
+      try {
+        await db.from("notifications").update({is_read:true,read_at:new Date().toISOString()})
+          .in("id",ids);
+      } catch(e){ console.warn("clearNotif:",e.message); }
+    }
     rerenderContent();
   });
   $("menuToggle")?.addEventListener("click",()=>{
@@ -5801,6 +5862,118 @@ const App={
     } catch(err) {
       console.warn("refreshLiveOpsData:", err.message);
       if (showToast) toast("فشل التحديث: "+err.message, "error");
+    }
+  },
+
+  // ── Notifications ─────────────────────────────────────────
+  async markNotifRead(id, referenceId) {
+    if (!id) return;
+    const n = AppState.notifications.find(x=>x.id===id);
+    if (n) n.isRead = true;
+    // Update badge count in-place
+    const unrd = AppState.notifications.filter(x=>!x.isRead).length;
+    const badge = document.querySelector(".notif-count");
+    if (badge) { unrd>0 ? badge.textContent=unrd : badge.remove(); }
+    // Persist to DB fire-and-forget
+    db.from("notifications").update({is_read:true,read_at:new Date().toISOString()})
+      .eq("id",id).then(()=>{}).catch(()=>{});
+    // If notification has a shipment reference, navigate to it
+    if (referenceId && referenceId.startsWith("ANE-")) {
+      AppState.selectedShipment = referenceId;
+      AppState.view = "shipments";
+      $("notifDropdown").style.display="none";
+      rerenderContent();
+    } else {
+      // Re-render just the dropdown in-place
+      const dropdown = $("notifDropdown");
+      if (dropdown) dropdown.outerHTML = renderNotifPanel();
+    }
+  },
+
+  async markAllNotifsRead() {
+    const ids = AppState.notifications.filter(n=>!n.isRead&&n.id).map(n=>n.id);
+    AppState.notifications.forEach(n=>n.isRead=true);
+    document.querySelector(".notif-count")?.remove();
+    if (ids.length) {
+      db.from("notifications").update({is_read:true,read_at:new Date().toISOString()})
+        .in("id",ids).then(()=>{}).catch(()=>{});
+    }
+    const dropdown = $("notifDropdown");
+    if (dropdown) dropdown.outerHTML = renderNotifPanel();
+  },
+
+  // Admin: broadcast a system notification to a role group
+  async broadcastNotification() {
+    const roles = ["admin","merchant","courier","customer","all"];
+    Modals.open(`<div class="modal" style="max-width:420px;">
+      <div class="modal-header">
+        <h3>📢 إشعار جماعي</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>المستلمون</label>
+          <select id="bnRole" style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            ${roles.map(r=>`<option value="${r}">${
+              {admin:"الإدارة",merchant:"التجار",courier:"المناديب",customer:"العملاء",all:"الجميع"}[r]||r
+            }</option>`).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>نوع الإشعار</label>
+          <select id="bnType" style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            <option value="info">ℹ️ معلومة</option>
+            <option value="success">✅ نجاح</option>
+            <option value="warning">⚠️ تحذير</option>
+            <option value="error">❌ خطأ</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>العنوان (اختياري)</label>
+          <input id="bnTitle" placeholder="عنوان الإشعار"/>
+        </div>
+        <div class="field">
+          <label>الرسالة *</label>
+          <textarea id="bnBody" rows="3" placeholder="نص الإشعار..."
+            style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);
+              resize:vertical;font-family:inherit;box-sizing:border-box;"></textarea>
+        </div>
+        <div id="bnErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="bnSendBtn" class="btn btn-primary" onclick="App._sendBroadcast()">📤 إرسال</button>
+      </div>
+    </div>`);
+    setTimeout(()=>$("bnBody")?.focus(), 80);
+  },
+
+  async _sendBroadcast() {
+    const role  = $("bnRole")?.value || "admin";
+    const type  = $("bnType")?.value || "info";
+    const title = $("bnTitle")?.value?.trim() || "";
+    const body  = $("bnBody")?.value?.trim();
+    const errEl = $("bnErr");
+    const btn   = $("bnSendBtn");
+
+    if (!body) { errEl.style.display="block"; errEl.textContent="الرسالة مطلوبة"; return; }
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> إرسال...`;
+    try {
+      const {error} = await db.from("notifications").insert([{
+        recipient_role: role,
+        title,
+        body,
+        type,
+        is_read: false,
+      }]);
+      if (error) throw error;
+      await DB.addAudit("BROADCAST_NOTIFICATION","",
+        `To:${role} Type:${type} By:${AppState.user.name} — ${body.slice(0,50)}`, "admin");
+      Modals.close();
+      toast(`✅ تم إرسال الإشعار إلى ${role}`);
+    } catch(err) {
+      errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
+      btn.disabled=false; btn.textContent="📤 إرسال";
     }
   },
 
