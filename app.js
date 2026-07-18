@@ -266,6 +266,8 @@ const AppState = {
   importBatches:[], importWizard:null, _importDataLoaded:false,
   // Phase 9 reports
   reportsTab:"overview", reportRange:"month", reportCourier:"", reportMerchant:"",
+  // Bulk actions
+  selectedShipments: new Set(),
   // Phase 4 live ops
   liveActivityFeed:[], rtStatus:"CONNECTING", rtEventCount:0,
 };
@@ -1904,6 +1906,96 @@ function shipTable(list) {
   </table></div>`;
 }
 
+// ── BULK ACTIONS ──────────────────────────────────────────
+function bulkToolbar(total) {
+  const sel = AppState.selectedShipments;
+  if (!sel.size) return "";
+  const couriers = AppState.couriers;
+  return `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+    padding:10px 16px;background:var(--brand);color:#fff;border-radius:var(--radius);
+    margin-bottom:12px;font-size:13px;">
+    <span style="font-weight:700;">${sel.size} شحنة محددة</span>
+    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.3);"
+      onclick="App.bulkSelectAll()">تحديد الكل (${total})</button>
+    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.3);"
+      onclick="AppState.selectedShipments=new Set();rerenderContent()">إلغاء التحديد</button>
+    <div style="width:1px;height:24px;background:rgba(255,255,255,.3);margin:0 4px;"></div>
+    <select id="bulkStatusSel" style="padding:5px 10px;border-radius:var(--radius);border:none;font-size:12px;"
+      onchange="if(this.value)App.bulkUpdateStatus(this.value)">
+      <option value="">📋 تغيير الحالة...</option>
+      ${["submitted","picked_up","at_warehouse","in_transit","at_branch","out_for_delivery","delivered","returned","cancelled"]
+        .map(s=>`<option value="${s}">${STATUS_MAP[s]?.label||s}</option>`).join("")}
+    </select>
+    ${couriers.length?`<select id="bulkCourierSel" style="padding:5px 10px;border-radius:var(--radius);border:none;font-size:12px;"
+      onchange="if(this.value)App.bulkAssignCourier(this.value,this.options[this.selectedIndex].text)">
+      <option value="">🚚 تعيين مندوب...</option>
+      ${couriers.map(c=>`<option value="${esc(c.id)}">${esc(c.full_name)}</option>`).join("")}
+    </select>`:""}
+    <button class="btn btn-sm" style="background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.3);"
+      onclick="App.bulkExport()">📊 تصدير Excel</button>
+  </div>`;
+}
+
+function shipTableBulk(list) {
+  if(!list.length) return `
+    <div class="empty">
+      <div class="empty-icon">📦</div>
+      <h3>لا توجد شحنات</h3>
+      <p>${AppState.statusFilter!=="all"?"لا توجد شحنات بهذا الفلتر":"لم تُضف شحنات بعد"}</p>
+      ${AppState.statusFilter!=="all"?`<button class="btn btn-secondary btn-sm" onclick="App.setFilter('all')">إظهار الكل</button>`:""}
+    </div>`;
+
+  const sel = AppState.selectedShipments;
+
+  return `<div class="table-wrap"><table>
+    <thead><tr>
+      <th style="width:32px;padding:8px 6px;">
+        <input type="checkbox" title="تحديد الكل في الصفحة"
+          ${list.every(s=>sel.has(s.id))?"checked":""}
+          onchange="App.bulkTogglePage(${JSON.stringify(list.map(s=>s.id))},this.checked)"/>
+      </th>
+      <th>الكود</th><th>الخدمة</th><th>العميل</th><th>الهاتف</th>
+      <th>المنطقة</th><th>الحالة</th><th>المبلغ</th><th>الوزن</th>
+      <th>التاجر</th><th>المندوب</th><th>إجراءات</th>
+    </tr></thead>
+    <tbody>
+      ${list.map(s=>`<tr style="${sel.has(s.id)?"background:var(--brand-light);":""}">
+        <td style="padding:8px 6px;">
+          <input type="checkbox" ${sel.has(s.id)?"checked":""}
+            onchange="App.bulkToggleOne('${esc(s.id)}',this.checked)"/>
+        </td>
+        <td>
+          <div class="td-mono">${esc(s.id)}</div>
+          <div style="font-size:10px;color:var(--gray-400);margin-top:2px;">${fmtDate(s.createdAt)}</div>
+          ${s.barcode?`<div style="font-size:10px;color:var(--gray-500);">🔲 ${esc(s.barcode)}</div>`:""}
+        </td>
+        <td>
+          <div>${SERVICE_MAP[s.serviceType]?.icon||""} <span style="font-size:11px;">${SERVICE_MAP[s.serviceType]?.label||""}</span></div>
+          <span class="badge ${ORDER_TYPE_MAP[s.orderType]?.badge||"badge-gray"}" style="font-size:10px;margin-top:3px;">${ORDER_TYPE_MAP[s.orderType]?.icon||""} ${ORDER_TYPE_MAP[s.orderType]?.label||""}</span>
+        </td>
+        <td class="td-primary">${esc(s.customerName)}</td>
+        <td class="td-phone">
+          <a href="tel:${esc(s.customerPhone)}">${esc(s.customerPhone)}</a>
+          ${s.customerPhone2?`<br/><a href="tel:${esc(s.customerPhone2)}" style="font-size:11px;color:var(--gray-500);">${esc(s.customerPhone2)}</a>`:""}
+        </td>
+        <td style="font-size:12px;">${esc(s.governorate||"—")}</td>
+        <td><span class="badge ${STATUS_MAP[s.status]?.badge||"badge-gray"}">${STATUS_MAP[s.status]?.label||s.status}</span></td>
+        <td style="font-weight:600;">${money(s.amount)}</td>
+        <td style="font-size:12px;color:var(--gray-500);">${s.weight?s.weight+"كجم":"—"}</td>
+        <td style="font-size:12px;color:var(--gray-600);">${s.merchantName?esc(s.merchantName):'<span style="color:var(--gray-300);">—</span>'}</td>
+        <td style="font-size:12px;color:var(--gray-600);">${s.courierName?esc(s.courierName):'<span style="color:var(--gray-300);">—</span>'}</td>
+        <td>
+          <div class="td-actions">
+            <button class="btn btn-secondary btn-sm" data-open="${esc(s.id)}">عرض</button>
+            ${can("print_shipment")?`<button class="btn-icon" onclick="App.print('${esc(s.id)}')" title="طباعة">${icon("pkg",13)}</button>`:""}
+            <canvas id="qr-${esc(s.id)}" style="width:34px;height:34px;"></canvas>
+          </div>
+        </td>
+      </tr>`).join("")}
+    </tbody>
+  </table></div>`;
+}
+
 // ── SHIPMENTS VIEW ────────────────────────────────────────
 function viewShipments() {
   const sel=AppState.shipments.find(s=>s.id===AppState.selectedShipment)||visible()[0]||null;
@@ -1930,7 +2022,8 @@ function viewShipments() {
         <button class="filter-btn ${!AppState.orderFilter?"active":""}" onclick="App.setOrderFilter('')">كل الأنواع</button>
         ${Object.entries(ORDER_TYPE_MAP).map(([k,v])=>`<button class="filter-btn ${AppState.orderFilter===k?"active":""}" onclick="App.setOrderFilter('${k}')">${v.icon} ${v.label}</button>`).join("")}
       </div>
-      ${shipTable(visible())}
+      ${bulkToolbar(visible().length)}
+      ${shipTableBulk(visible())}
     </div>
     ${sel?detailPanel(sel):""}`;
 }
@@ -4855,7 +4948,9 @@ function viewPickupRequests() {
 }
 
 const App={
-  setFilter(f)       { AppState.statusFilter  = f; rerenderContent(); },
+  setFilter(f)       { AppState.statusFilter  = f; AppState.selectedShipments=new Set(); rerenderContent(); },
+  setServiceFilter(f){ AppState.serviceFilter = f; AppState.selectedShipments=new Set(); rerenderContent(); },
+  setOrderFilter(f)  { AppState.orderFilter   = f; AppState.selectedShipments=new Set(); rerenderContent(); },
 
   // ── Phase 2C: Pricing ─────────────────────────────────────
   // ── Phase 2D: Branches & Warehouses ──────────────────────
@@ -5772,8 +5867,6 @@ const App={
       Modals.close();await App.loadPricingData();toast(`✅ تم تحديث ${name}`);
     });
   },
-  setServiceFilter(f){ AppState.serviceFilter = f; rerenderContent(); },
-  setOrderFilter(f)  { AppState.orderFilter   = f; rerenderContent(); },
 
   // ── Phase 2B: Finance ────────────────────────────────────
   // ── Phase 9: Reports & Analytics ─────────────────────────────
@@ -6138,6 +6231,108 @@ const App={
       errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
       btn.disabled=false; btn.textContent="📤 إرسال";
     }
+  },
+
+  // ── Bulk Actions ───────────────────────────────────────────
+  bulkToggleOne(id, checked) {
+    if (checked) AppState.selectedShipments.add(id);
+    else         AppState.selectedShipments.delete(id);
+    rerenderContent();
+  },
+
+  bulkTogglePage(ids, checked) {
+    ids.forEach(id => checked
+      ? AppState.selectedShipments.add(id)
+      : AppState.selectedShipments.delete(id));
+    rerenderContent();
+  },
+
+  bulkSelectAll() {
+    visible().forEach(s => AppState.selectedShipments.add(s.id));
+    rerenderContent();
+  },
+
+  async bulkUpdateStatus(status) {
+    const ids   = [...AppState.selectedShipments];
+    const label = STATUS_MAP[status]?.label||status;
+    if (!ids.length) return;
+    if (!confirm(`تغيير حالة ${ids.length} شحنة إلى "${label}"؟`)) {
+      const sel = document.getElementById("bulkStatusSel");
+      if (sel) sel.value = "";
+      return;
+    }
+    toast("جاري التحديث...", "info");
+    let done=0, failed=0;
+    for (const id of ids) {
+      try {
+        await DB.updateShipment(id, {status});
+        await DB.addTimeline(id, `تغيير جماعي إلى: ${label}`,
+          AppState.user.name, AppState.user.primary_role||AppState.user.role, "status_change");
+        const s = AppState.shipments.find(x=>x.id===id);
+        if (s) s.status = status;
+        done++;
+      } catch { failed++; }
+    }
+    await DB.addAudit("BULK_STATUS_UPDATE","",
+      `IDs:${ids.length} → ${status} | Done:${done} Failed:${failed} By:${AppState.user.name}`, "shipment");
+    AppState.selectedShipments = new Set();
+    rerenderContent();
+    toast(`✅ تم تحديث ${done} شحنة${failed?` · فشل ${failed}`:""}`);
+  },
+
+  async bulkAssignCourier(courierId, courierName) {
+    const ids = [...AppState.selectedShipments];
+    if (!ids.length) return;
+    if (!confirm(`تعيين ${ids.length} شحنة للمندوب "${courierName}"؟`)) {
+      const sel = document.getElementById("bulkCourierSel");
+      if (sel) sel.value = "";
+      return;
+    }
+    toast("جاري التعيين...", "info");
+    let done=0, failed=0;
+    for (const id of ids) {
+      try {
+        await DB.updateShipment(id, {courier_id:courierId, courier_name:courierName});
+        await DB.addTimeline(id, `تعيين جماعي للمندوب: ${courierName}`,
+          AppState.user.name, AppState.user.primary_role||AppState.user.role, "assignment");
+        const s = AppState.shipments.find(x=>x.id===id);
+        if (s) { s.courierId=courierId; s.courierName=courierName; }
+        done++;
+      } catch { failed++; }
+    }
+    await DB.addAudit("BULK_ASSIGN_COURIER","",
+      `IDs:${ids.length} → ${courierName} | Done:${done} By:${AppState.user.name}`, "shipment");
+    AppState.selectedShipments = new Set();
+    rerenderContent();
+    toast(`✅ تم تعيين ${done} شحنة للمندوب ${courierName}${failed?` · فشل ${failed}`:""}`);
+  },
+
+  bulkExport() {
+    const ids  = [...AppState.selectedShipments];
+    const list = ids.length ? AppState.shipments.filter(s=>ids.includes(s.id)) : visible();
+    const data = list.map(s=>({
+      "كود الشحنة":     s.id,
+      "اسم العميل":     s.customerName,
+      "الهاتف":         s.customerPhone,
+      "الهاتف 2":       s.customerPhone2||"",
+      "المحافظة":       s.governorate||"",
+      "المدينة":        s.city||"",
+      "الحالة":         STATUS_MAP[s.status]?.label||s.status,
+      "نوع الخدمة":     SERVICE_MAP[s.serviceType]?.label||"",
+      "مبلغ COD":       s.amount||0,
+      "رسوم الشحن":     s.deliveryFee||0,
+      "الوزن (كجم)":   s.weight||"",
+      "التاجر":         s.merchantName||"",
+      "المندوب":        s.courierName||"",
+      "تاريخ الإنشاء": fmtDate(s.createdAt),
+    }));
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    ws["!cols"] = Object.keys(data[0]||{}).map((_,i)=>({wch:i<2?22:i<5?15:12}));
+    XLSX.utils.book_append_sheet(wb, ws, "شحنات");
+    XLSX.writeFile(wb, `شحنات_${ids.length?"محددة":"مفلترة"}_${Date.now()}.xlsx`);
+    DB.addAudit("BULK_EXPORT","",`${data.length} rows By:${AppState.user.name}`,"export");
+    toast(`✅ تم تصدير ${data.length} شحنة`);
   },
 
   // ── User Profile & Settings ────────────────────────────────
@@ -7465,8 +7660,6 @@ const App={
     if(error){toast("خطأ: "+error.message,"error");return;}
     await App.loadMerchantData();rerenderContent();toast("تم إلغاء الطلب","info");
   },
-  setServiceFilter(f){ AppState.serviceFilter = f; rerenderContent(); },
-  setOrderFilter(f)  { AppState.orderFilter   = f; rerenderContent(); },
   manualTrack(){const c=prompt("أدخل رقم الشحنة:");if(c)location.href=`${location.origin}${location.pathname}?track=${encodeURIComponent(c.trim())}`;},
 
   async updateStatus(id,status){
