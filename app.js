@@ -1708,20 +1708,100 @@ function viewOverview() {
   const pending=list.filter(s=>s.status==="created").length;
 
   if((AppState.user.primary_role||AppState.user.role)==="merchant") {
-    const bal=list.filter(s=>s.status==="delivered").reduce((a,s)=>a+(s.amount-s.deliveryFee),0);
+    const delivered  = list.filter(s=>s.status==="delivered");
+    const returned   = list.filter(s=>s.status==="returned");
+    const inProgress = list.filter(s=>!["delivered","returned","cancelled"].includes(s.status));
+    const cod        = delivered.reduce((a,s)=>a+(s.amount||0),0);
+    const fees       = delivered.reduce((a,s)=>a+(s.deliveryFee||0),0);
+    const retFees    = returned.reduce((a,s)=>a+(s.returnFee||0),0);
+    const netBal     = cod - fees - retFees;
+    const pendingPU  = AppState.pickupRequests?.filter(p=>p.status==="pending")||[];
+
+    // Today's shipments
+    const todayStr = new Date().toDateString();
+    const todayNew = list.filter(s=>s.createdAt&&new Date(s.createdAt).toDateString()===todayStr);
+
     return `
-      <div class="kpi-grid">
-        ${kpi("شحناتي",total,"box","var(--brand)","var(--brand-light)","all")}
-        ${kpi("تم التسليم",done,"chart","var(--success)","var(--success-bg)","delivered",pct(done,total)+"%")}
-        ${kpi("مرتجعات",ret,"refresh","var(--danger)","var(--danger-bg)","returned")}
-        ${kpi("الرصيد المستحق",money(bal),"wallet","var(--info)","var(--info-bg)")}
+      <!-- Quick actions bar -->
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
+        ${can("create_shipment")?`<button class="btn btn-primary" id="newShipBtn">${icon("plus",14)} شحنة جديدة</button>`:""}
+        <button class="btn btn-secondary" onclick="AppState.view='pickup';rerenderContent();">📬 طلب استلام</button>
+        <button class="btn btn-secondary" onclick="AppState.view='recipients';rerenderContent();">👥 العملاء</button>
+        <button class="btn btn-secondary" onclick="AppState.view='accounts';rerenderContent();">💰 حسابي</button>
       </div>
+
+      <!-- KPI grid -->
+      <div class="kpi-grid" style="margin-bottom:16px;">
+        ${kpi("إجمالي شحناتي",total,"box","var(--brand)","var(--brand-light)","all")}
+        ${kpi("تم التسليم",delivered.length,"chart","var(--success)","var(--success-bg)","delivered",pct(delivered.length,total)+"%")}
+        ${kpi("مرتجع",returned.length,"refresh","var(--danger)","var(--danger-bg)","returned")}
+        ${kpi("قيد التنفيذ",inProgress.length,"truck","var(--warning)","var(--warning-bg)")}
+        ${kpi("اليوم",todayNew.length,"box","var(--info)","var(--info-bg)")}
+        ${kpi("الرصيد المستحق",money(AppState.merchantBalance||netBal),"wallet","var(--success)","var(--success-bg)")}
+      </div>
+
+      <div class="grid-2col" style="gap:16px;margin-bottom:16px;">
+        <!-- Financial summary -->
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:14px;">${icon("chart")} ملخص مالي</h3>
+          ${[
+            ["إجمالي COD المحصل", money(cod),            "var(--success)"],
+            ["رسوم الشحن",         money(fees),           "var(--danger)"],
+            ["رسوم الإرجاع",      money(retFees),        "var(--danger)"],
+            ["صافي مستحق",         money(netBal),         netBal>=0?"var(--success)":"var(--danger)"],
+          ].map(([l,v,c])=>`
+            <div style="display:flex;justify-content:space-between;align-items:center;
+              padding:8px 0;border-bottom:1px solid var(--gray-100);">
+              <span style="font-size:13px;color:var(--gray-600);">${l}</span>
+              <span style="font-weight:700;color:${c};">${v}</span>
+            </div>`).join("")}
+          <div style="margin-top:12px;">
+            <button class="btn btn-secondary btn-sm" style="width:100%;"
+              onclick="App.requestSettlement()">💸 طلب تسوية</button>
+          </div>
+        </div>
+
+        <!-- Status breakdown -->
+        <div class="card">
+          <h3 class="card-title" style="margin-bottom:14px;">${icon("box")} توزيع الشحنات</h3>
+          ${Object.entries(STATUS_MAP)
+            .filter(([k])=>["submitted","picked_up","out_for_delivery","delivered","returned","cancelled","rescheduled"].includes(k))
+            .map(([k,v])=>{
+              const cnt=list.filter(s=>s.status===k).length;
+              if(!cnt) return "";
+              return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:7px;cursor:pointer;"
+                onclick="App.setFilter('${k}');AppState.view='shipments';rerenderContent();">
+                <span class="badge ${v.badge||"badge-gray"}" style="font-size:10px;min-width:70px;text-align:center;">${v.label}</span>
+                <div style="flex:1;background:var(--gray-100);border-radius:99px;height:5px;overflow:hidden;">
+                  <div style="background:var(--brand);height:100%;border-radius:99px;
+                    width:${Math.round(cnt/total*100)}%;"></div>
+                </div>
+                <span style="font-weight:600;font-size:12px;min-width:20px;">${cnt}</span>
+              </div>`;
+            }).join("")}
+        </div>
+      </div>
+
+      <!-- Pending pickup requests -->
+      ${pendingPU.length?`
+      <div class="card" style="margin-bottom:16px;border-right:3px solid var(--warning);">
+        <div class="card-header">
+          <h3 class="card-title">📬 طلبات الاستلام المعلقة (${pendingPU.length})</h3>
+          <button class="btn btn-secondary btn-sm" onclick="AppState.view='pickup';rerenderContent();">عرض الكل</button>
+        </div>
+        ${pendingPU.slice(0,3).map(p=>`
+          <div style="padding:8px;background:var(--warning-bg);border-radius:var(--radius);margin-bottom:6px;font-size:13px;">
+            📍 ${esc(p.address||"—")} · ${esc(p.shipmentCount||0)} شحنة
+          </div>`).join("")}
+      </div>`:""}
+
+      <!-- Recent shipments -->
       <div class="card">
         <div class="card-header">
-          <h3 class="card-title">${icon("box")} شحناتي الأخيرة</h3>
-          ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn">${icon("plus",13)} شحنة جديدة</button>`:""}
+          <h3 class="card-title">${icon("box")} آخر شحناتي</h3>
+          ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn2">${icon("plus",13)} شحنة جديدة</button>`:""}
         </div>
-        ${shipTable(list.slice(0,10))}
+        ${shipTable(list.slice(0,8))}
       </div>`;
   }
 
@@ -2943,6 +3023,18 @@ const Modals={
           </div>
         </div>
         <div class="form-section-label">بيانات العميل</div>
+        ${(AppState.merchantRecipients?.length||AppState.allMerchants?.length)?`
+        <div class="field" style="margin-bottom:12px;">
+          <label>بحث سريع في العملاء المحفوظين</label>
+          <div style="position:relative;">
+            <input id="fRecipientSearch" placeholder="ابحث بالاسم أو الهاتف..." autocomplete="off"
+              style="width:100%;padding:8px 12px;border-radius:var(--radius);border:1.5px solid var(--gray-300);box-sizing:border-box;"
+              oninput="App._filterRecipientSuggestions(this.value)"/>
+            <div id="fRecipientDropdown" style="display:none;position:absolute;top:100%;right:0;left:0;z-index:200;
+              background:#fff;border:1px solid var(--gray-200);border-radius:var(--radius);
+              max-height:200px;overflow-y:auto;box-shadow:0 4px 16px rgba(0,0,0,.1);margin-top:2px;"></div>
+          </div>
+        </div>`:""}
         <div class="form-row">
           <div class="field"><label>اسم العميل *</label><input id="fCustName"/></div>
           <div class="field"><label>الهاتف الأول *</label><input id="fPhone" type="tel" placeholder="01xxxxxxxxx"/></div>
@@ -5865,7 +5957,78 @@ const App={
     }
   },
 
-  // ── Notifications ─────────────────────────────────────────
+  _filterRecipientSuggestions(query) {
+    const dd = $("fRecipientDropdown");
+    if (!dd) return;
+    if (!query || query.length < 2) { dd.style.display="none"; return; }
+    const q    = query.toLowerCase();
+    const role = AppState.user.primary_role||AppState.user.role;
+    // Use merchant's own recipients or the admin's full user list
+    const pool = role==="merchant"
+      ? (AppState.merchantRecipients||[])
+      : AppState.users.filter(u=>u.role==="merchant"||u.role==="customer");
+    const matches = pool.filter(r=>{
+      const name  = (r.name||r.full_name||"").toLowerCase();
+      const phone = (r.phone||"");
+      return name.includes(q) || phone.includes(q);
+    }).slice(0,8);
+
+    if (!matches.length) { dd.style.display="none"; return; }
+    dd.innerHTML = matches.map(r=>`
+      <div onclick="App._fillRecipient(${JSON.stringify({
+        name:  r.name||r.full_name||"",
+        phone: r.phone||"",
+        phone2:r.phone2||"",
+        governorate: r.governorate||"",
+        city:  r.city||"",
+        street:r.street||"",
+      })})"
+        style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--gray-100);
+          display:flex;align-items:center;gap:10px;"
+        onmouseover="this.style.background='var(--gray-50)'"
+        onmouseout="this.style.background=''">
+        <div style="width:30px;height:30px;border-radius:50%;background:var(--brand-light);
+          color:var(--brand-dark);display:flex;align-items:center;justify-content:center;
+          font-size:11px;font-weight:700;flex-shrink:0;">${initials(r.name||r.full_name||"")}</div>
+        <div>
+          <div style="font-weight:600;font-size:13px;">${esc(r.name||r.full_name||"—")}</div>
+          <div style="font-size:11px;color:var(--gray-500);">${esc(r.phone||"")}
+            ${r.governorate?` · ${esc(r.governorate)}`:""}
+          </div>
+        </div>
+      </div>`).join("");
+    dd.style.display = "block";
+  },
+
+  async _fillRecipient(data) {
+    // Close dropdown
+    const dd = $("fRecipientDropdown");
+    if (dd) dd.style.display = "none";
+    const search = $("fRecipientSearch");
+    if (search) search.value = data.name;
+
+    // Fill customer fields
+    if ($("fCustName"))  $("fCustName").value  = data.name  || "";
+    if ($("fPhone"))     $("fPhone").value      = data.phone || "";
+    if ($("fPhone2"))    $("fPhone2").value     = data.phone2|| "";
+
+    // Fill address if available
+    if (data.governorate && $("fGov")) {
+      await loadEgyptData();
+      $("fGov").value = data.governorate;
+      // Trigger city dropdown update
+      const cityEl = $("fCity");
+      if (cityEl && EGYPT_GOV[data.governorate]) {
+        cityEl.innerHTML = `<option value="">اختر المدينة</option>` +
+          EGYPT_GOV[data.governorate].map(c=>`<option value="${esc(c)}" ${c===data.city?"selected":""}>${esc(c)}</option>`).join("");
+      }
+    }
+    if (data.street && $("fStreet")) $("fStreet").value = data.street || "";
+
+    // Trigger governorate change event to update city dropdown and fee calc
+    $("fGov")?.dispatchEvent(new Event("change"));
+    toast("✅ تم تعبئة بيانات العميل", "success");
+  },
   async markNotifRead(id, referenceId) {
     if (!id) return;
     const n = AppState.notifications.find(x=>x.id===id);
