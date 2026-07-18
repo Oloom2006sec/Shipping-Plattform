@@ -2174,15 +2174,36 @@ function viewTrack() {
 // ── ACCOUNTS VIEW ─────────────────────────────────────────
 function viewAccounts() {
   const role = AppState.user.primary_role||AppState.user.role;
+  const u    = AppState.user;
 
-  if (role === "customer") return `<div class="empty">
+  // ── Profile card — shown for all roles ───────────────────
+  const profileCard = `
+    <div class="card" style="margin-bottom:16px;">
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+        <div style="width:52px;height:52px;border-radius:50%;background:var(--brand);color:#fff;
+          display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;flex-shrink:0;">
+          ${initials(u.name||"?")}
+        </div>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:18px;font-weight:700;margin-bottom:2px;">${esc(u.name||"—")}</div>
+          <div style="font-size:13px;color:var(--gray-500);">${esc(u.email||"")}${u.phone?` · ${esc(u.phone)}`:""}</div>
+          <span class="badge badge-brand" style="margin-top:4px;">${role}</span>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn btn-secondary btn-sm" onclick="App.openEditProfile()">✏️ تعديل الملف</button>
+          <button class="btn btn-secondary btn-sm" onclick="App.openChangePassword()">🔑 تغيير كلمة المرور</button>
+        </div>
+      </div>
+    </div>`;
+
+  if (role === "customer") return profileCard + `<div class="empty">
     <div class="empty-icon">📦</div><h3>تتبع شحنتك</h3>
     <p>أدخل رقم الشحنة لمعرفة حالتها</p>
     <button class="btn btn-primary" onclick="App.manualTrack()">🔍 تتبع شحنة</button>
   </div>`;
 
   // Courier: real wallet view from driver_transactions
-  if (role === "courier") return viewMyWallet();
+  if (role === "courier") return profileCard + viewMyWallet();
 
   // Merchant / Admin: existing COD account view
   const list=visible();
@@ -2193,7 +2214,7 @@ function viewAccounts() {
   const retFee=ret.reduce((a,s)=>a+(s.returnFee||0),0);
   const isMerchant=role==="merchant";
   const bal=isMerchant?AppState.merchantBalance:(rev-fee-retFee);
-  return `
+  return profileCard + `
     <div class="acct-header">
       <div>
         <div class="ah-label">الرصيد المستحق</div>
@@ -5780,6 +5801,139 @@ const App={
     } catch(err) {
       console.warn("refreshLiveOpsData:", err.message);
       if (showToast) toast("فشل التحديث: "+err.message, "error");
+    }
+  },
+
+  // ── User Profile & Settings ────────────────────────────────
+  openEditProfile() {
+    const u = AppState.user;
+    Modals.open(`<div class="modal" style="max-width:420px;">
+      <div class="modal-header">
+        <h3>✏️ تعديل الملف الشخصي</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>الاسم الكامل *</label>
+          <input id="epName" value="${esc(u.name||"")}" placeholder="الاسم الكامل"/>
+        </div>
+        <div class="field">
+          <label>رقم الهاتف</label>
+          <input id="epPhone" value="${esc(u.phone||"")}" placeholder="01xxxxxxxxx" inputmode="tel"/>
+        </div>
+        <div class="field">
+          <label>البريد الإلكتروني</label>
+          <input id="epEmail" value="${esc(u.email||"")}" disabled
+            style="background:var(--gray-50);color:var(--gray-400);"
+            title="لا يمكن تغيير البريد الإلكتروني"/>
+          <div style="font-size:11px;color:var(--gray-400);margin-top:4px;">البريد الإلكتروني لا يمكن تغييره</div>
+        </div>
+        <div id="epErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="epSaveBtn" class="btn btn-primary" onclick="App.saveProfile()">💾 حفظ</button>
+      </div>
+    </div>`);
+    setTimeout(()=>$("epName")?.focus(), 80);
+  },
+
+  async saveProfile() {
+    const name  = $("epName")?.value?.trim();
+    const phone = $("epPhone")?.value?.trim();
+    const errEl = $("epErr");
+    const btn   = $("epSaveBtn");
+
+    if (!name) {
+      errEl.style.display="block"; errEl.textContent="الاسم مطلوب"; return;
+    }
+    if (phone && !/^01[0-9]{9}$/.test(phone)) {
+      errEl.style.display="block"; errEl.textContent="رقم هاتف غير صحيح (11 رقم يبدأ بـ 01)"; return;
+    }
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      const { error } = await db.from("profiles").update({
+        full_name:  name,
+        phone:      phone||null,
+        updated_at: new Date().toISOString(),
+      }).eq("id", AppState.user.id);
+      if (error) throw error;
+
+      // Update local state
+      AppState.user.name  = name;
+      AppState.user.phone = phone;
+
+      await DB.addAudit("PROFILE_UPDATE", AppState.user.id,
+        `Name: ${name} | Phone: ${phone||"—"} | By: ${name}`, "user");
+
+      Modals.close();
+      rerenderContent();
+      toast("✅ تم تحديث الملف الشخصي");
+    } catch(err) {
+      errEl.style.display="block";
+      errEl.textContent="خطأ: " + err.message;
+      btn.disabled=false; btn.textContent="💾 حفظ";
+    }
+  },
+
+  openChangePassword() {
+    Modals.open(`<div class="modal" style="max-width:380px;">
+      <div class="modal-header">
+        <h3>🔑 تغيير كلمة المرور</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>كلمة المرور الجديدة *</label>
+          <input id="cpNew" type="password" placeholder="8 أحرف على الأقل"/>
+        </div>
+        <div class="field">
+          <label>تأكيد كلمة المرور *</label>
+          <input id="cpConfirm" type="password" placeholder="أعد كتابة كلمة المرور"
+            onkeydown="if(event.key==='Enter') App.changePassword()"/>
+        </div>
+        <div id="cpErr" class="form-error" style="display:none;"></div>
+        <div style="font-size:12px;color:var(--gray-500);margin-top:8px;">
+          كلمة المرور يجب أن تكون 8 أحرف على الأقل
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="cpBtn" class="btn btn-primary" onclick="App.changePassword()">تغيير</button>
+      </div>
+    </div>`);
+    setTimeout(()=>$("cpNew")?.focus(), 80);
+  },
+
+  async changePassword() {
+    const pw1   = $("cpNew")?.value;
+    const pw2   = $("cpConfirm")?.value;
+    const errEl = $("cpErr");
+    const btn   = $("cpBtn");
+
+    errEl.style.display="none";
+    if (!pw1||pw1.length<8) {
+      errEl.style.display="block"; errEl.textContent="كلمة المرور يجب أن تكون 8 أحرف على الأقل"; return;
+    }
+    if (pw1!==pw2) {
+      errEl.style.display="block"; errEl.textContent="كلمتا المرور غير متطابقتين"; return;
+    }
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      const { error } = await db.auth.updateUser({ password: pw1 });
+      if (error) throw error;
+
+      await DB.addAudit("PASSWORD_CHANGE", AppState.user.id,
+        `Password changed by ${AppState.user.name}`, "auth");
+
+      Modals.close();
+      toast("✅ تم تغيير كلمة المرور بنجاح");
+    } catch(err) {
+      errEl.style.display="block";
+      errEl.textContent="خطأ: " + err.message;
+      btn.disabled=false; btn.textContent="تغيير";
     }
   },
 
