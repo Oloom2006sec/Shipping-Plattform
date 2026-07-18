@@ -268,6 +268,11 @@ const AppState = {
   reportsTab:"overview", reportRange:"month", reportCourier:"", reportMerchant:"",
   // Bulk actions
   selectedShipments: new Set(),
+  // Advanced search filters
+  advancedFilter: {
+    dateFrom:"", dateTo:"", amountMin:"", amountMax:"",
+    courierId:"", merchantId:"", governorate:"", showAdvanced:false,
+  },
   // Phase 4 live ops
   liveActivityFeed:[], rtStatus:"CONNECTING", rtEventCount:0,
 };
@@ -985,13 +990,23 @@ function visible() {
   if(role==="merchant")list=list.filter(s=>s.merchantId===uid);
   if(role==="customer")return[];
   const q=AppState.query.trim().toLowerCase();
+  const af=AppState.advancedFilter||{};
   return list.filter(s=>{
-    const txt=`${s.id} ${s.customerName} ${s.customerPhone} ${s.customerPhone2} ${s.address} ${s.governorate}`.toLowerCase();
-    const matchQ       = !q || txt.includes(q);
-    const matchStatus  = AppState.statusFilter==="all"  || s.status===AppState.statusFilter;
-    const matchService = !AppState.serviceFilter || s.serviceType===AppState.serviceFilter;
-    const matchOrder   = !AppState.orderFilter   || s.orderType===AppState.orderFilter;
-    return matchQ && matchStatus && matchService && matchOrder;
+    const txt=`${s.id} ${s.customerName} ${s.customerPhone} ${s.customerPhone2} ${s.address} ${s.governorate} ${s.merchantName} ${s.courierName} ${s.barcode||""}`.toLowerCase();
+    const matchQ        = !q || txt.includes(q);
+    const matchStatus   = AppState.statusFilter==="all" || s.status===AppState.statusFilter;
+    const matchService  = !AppState.serviceFilter || s.serviceType===AppState.serviceFilter;
+    const matchOrder    = !AppState.orderFilter   || s.orderType===AppState.orderFilter;
+    const matchDateFrom = !af.dateFrom || new Date(s.createdAt)>=new Date(af.dateFrom);
+    const matchDateTo   = !af.dateTo   || new Date(s.createdAt)<=new Date(af.dateTo+"T23:59:59");
+    const matchAmtMin   = !af.amountMin   || (s.amount||0)>=Number(af.amountMin);
+    const matchAmtMax   = !af.amountMax   || (s.amount||0)<=Number(af.amountMax);
+    const matchCourier  = !af.courierId   || s.courierId===af.courierId;
+    const matchMerchant = !af.merchantId  || s.merchantId===af.merchantId;
+    const matchGov      = !af.governorate || (s.governorate||"").includes(af.governorate);
+    return matchQ&&matchStatus&&matchService&&matchOrder&&
+           matchDateFrom&&matchDateTo&&matchAmtMin&&matchAmtMax&&
+           matchCourier&&matchMerchant&&matchGov;
   });
 }
 
@@ -1906,6 +1921,83 @@ function shipTable(list) {
   </table></div>`;
 }
 
+// ── ADVANCED FILTER PANEL ─────────────────────────────────
+function advancedFilterPanel() {
+  const af      = AppState.advancedFilter||{};
+  const role    = AppState.user?.primary_role||AppState.user?.role;
+  const isAdmin = role==="admin";
+  const hasActive = Object.entries(af).some(([k,v])=>k!=="showAdvanced"&&v);
+  const vis     = visible();
+
+  return `
+    <div style="margin-bottom:10px;">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+        <button class="btn btn-secondary btn-sm" onclick="App.toggleAdvancedFilter()"
+          style="${af.showAdvanced?"background:var(--brand);color:#fff;border-color:var(--brand);":""}">
+          🔍 بحث متقدم ${hasActive?`<span class="badge badge-brand" style="margin-right:4px;font-size:10px;">نشط</span>`:""}
+        </button>
+        ${hasActive?`<button class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="App.clearAdvancedFilter()">✕ مسح الفلاتر</button>`:""}
+        <span style="font-size:12px;color:var(--gray-400);margin-right:auto;">
+          ${vis.length} شحنة ${AppState.shipments.length!==vis.length?`من ${AppState.shipments.length} إجمالي`:""}
+        </span>
+        ${isAdmin?`
+        <button class="btn btn-secondary btn-sm" onclick="App.saveFilterPreset()" title="حفظ هذا البحث">💾 حفظ البحث</button>
+        <button class="btn btn-secondary btn-sm" onclick="App.showFilterPresets()" title="البحوثات المحفوظة">📂 محفوظة</button>`:""}
+      </div>
+
+      ${af.showAdvanced?`
+      <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:var(--radius);
+        padding:14px;margin-top:10px;">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+          <div class="field" style="margin:0;">
+            <label style="font-size:11px;">من تاريخ</label>
+            <input type="date" id="afDateFrom" value="${af.dateFrom||""}"
+              onchange="App.applyAdvancedFilter()" style="padding:6px 8px;font-size:13px;"/>
+          </div>
+          <div class="field" style="margin:0;">
+            <label style="font-size:11px;">إلى تاريخ</label>
+            <input type="date" id="afDateTo" value="${af.dateTo||""}"
+              onchange="App.applyAdvancedFilter()" style="padding:6px 8px;font-size:13px;"/>
+          </div>
+          <div class="field" style="margin:0;">
+            <label style="font-size:11px;">الحد الأدنى للمبلغ</label>
+            <input type="number" id="afAmtMin" placeholder="0" value="${af.amountMin||""}"
+              min="0" onchange="App.applyAdvancedFilter()" style="padding:6px 8px;font-size:13px;"/>
+          </div>
+          <div class="field" style="margin:0;">
+            <label style="font-size:11px;">الحد الأقصى للمبلغ</label>
+            <input type="number" id="afAmtMax" placeholder="∞" value="${af.amountMax||""}"
+              min="0" onchange="App.applyAdvancedFilter()" style="padding:6px 8px;font-size:13px;"/>
+          </div>
+          <div class="field" style="margin:0;">
+            <label style="font-size:11px;">المحافظة</label>
+            <input id="afGov" placeholder="القاهرة، الإسكندرية..." value="${af.governorate||""}"
+              oninput="App.applyAdvancedFilter()" style="padding:6px 8px;font-size:13px;"/>
+          </div>
+          ${isAdmin?`
+          <div class="field" style="margin:0;">
+            <label style="font-size:11px;">المندوب</label>
+            <select id="afCourier" onchange="App.applyAdvancedFilter()" style="padding:6px 8px;font-size:13px;">
+              <option value="">كل المناديب</option>
+              ${AppState.couriers.map(c=>`<option value="${esc(c.id)}" ${af.courierId===c.id?"selected":""}>${esc(c.full_name)}</option>`).join("")}
+            </select>
+          </div>
+          <div class="field" style="margin:0;">
+            <label style="font-size:11px;">التاجر</label>
+            <select id="afMerchant" onchange="App.applyAdvancedFilter()" style="padding:6px 8px;font-size:13px;">
+              <option value="">كل التجار</option>
+              ${AppState.allMerchants.map(m=>`<option value="${esc(m.id)}" ${af.merchantId===m.id?"selected":""}>${esc(m.full_name)}</option>`).join("")}
+            </select>
+          </div>`:""}
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;">
+          <button class="btn btn-primary btn-sm" onclick="App.applyAdvancedFilter()">تطبيق</button>
+          <button class="btn btn-secondary btn-sm" onclick="App.clearAdvancedFilter()">مسح</button>
+        </div>
+      </div>`:""}
+    </div>`;
+}
+
 // ── BULK ACTIONS ──────────────────────────────────────────
 function bulkToolbar(total) {
   const sel = AppState.selectedShipments;
@@ -2023,6 +2115,7 @@ function viewShipments() {
         ${Object.entries(ORDER_TYPE_MAP).map(([k,v])=>`<button class="filter-btn ${AppState.orderFilter===k?"active":""}" onclick="App.setOrderFilter('${k}')">${v.icon} ${v.label}</button>`).join("")}
       </div>
       ${bulkToolbar(visible().length)}
+      ${advancedFilterPanel()}
       ${shipTableBulk(visible())}
     </div>
     ${sel?detailPanel(sel):""}`;
@@ -2931,6 +3024,7 @@ function bindDashboardEvents() {
     btn.addEventListener("click",()=>{
       AppState.view=btn.dataset.view;
       AppState.statusFilter="all";
+      if(AppState.advancedFilter) AppState.advancedFilter.showAdvanced=false;
       // rerenderContent() only replaces #viewContent — it never
       // touches the sidebar, so the active class must be synced here.
       $$("[data-view]").forEach(b=>{
@@ -6231,6 +6325,106 @@ const App={
       errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
       btn.disabled=false; btn.textContent="📤 إرسال";
     }
+  },
+
+  // ── Advanced Search & Filter ──────────────────────────────
+  toggleAdvancedFilter() {
+    AppState.advancedFilter.showAdvanced = !AppState.advancedFilter.showAdvanced;
+    rerenderContent();
+  },
+
+  applyAdvancedFilter() {
+    const af = AppState.advancedFilter;
+    af.dateFrom    = $("afDateFrom")?.value   || "";
+    af.dateTo      = $("afDateTo")?.value     || "";
+    af.amountMin   = $("afAmtMin")?.value     || "";
+    af.amountMax   = $("afAmtMax")?.value     || "";
+    af.governorate = $("afGov")?.value?.trim()|| "";
+    af.courierId   = $("afCourier")?.value    || "";
+    af.merchantId  = $("afMerchant")?.value   || "";
+    AppState.selectedShipments = new Set();
+    rerenderContent();
+  },
+
+  clearAdvancedFilter() {
+    AppState.advancedFilter = { dateFrom:"", dateTo:"", amountMin:"", amountMax:"",
+      courierId:"", merchantId:"", governorate:"", showAdvanced:false };
+    AppState.query = "";
+    AppState.selectedShipments = new Set();
+    rerenderContent();
+  },
+
+  saveFilterPreset() {
+    const name = prompt("اسم البحث المحفوظ:");
+    if (!name) return;
+    const af  = AppState.advancedFilter;
+    const preset = {
+      name,
+      query:         AppState.query,
+      statusFilter:  AppState.statusFilter,
+      serviceFilter: AppState.serviceFilter,
+      orderFilter:   AppState.orderFilter,
+      advancedFilter:{...af, showAdvanced:false},
+      savedAt:       new Date().toISOString(),
+    };
+    try {
+      const presets = JSON.parse(localStorage.getItem("nukhba_filter_presets")||"[]");
+      // Replace if name exists
+      const idx = presets.findIndex(p=>p.name===name);
+      if (idx>=0) presets[idx]=preset; else presets.push(preset);
+      localStorage.setItem("nukhba_filter_presets", JSON.stringify(presets.slice(-10)));
+      toast(`✅ تم حفظ البحث "${name}"`);
+    } catch(e) { toast("فشل الحفظ","error"); }
+  },
+
+  showFilterPresets() {
+    let presets = [];
+    try { presets = JSON.parse(localStorage.getItem("nukhba_filter_presets")||"[]"); } catch {}
+    if (!presets.length) { toast("لا توجد بحوثات محفوظة","info"); return; }
+    Modals.open(`<div class="modal" style="max-width:400px;">
+      <div class="modal-header">
+        <h3>📂 البحوثات المحفوظة</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        ${presets.map((p,i)=>`
+          <div style="display:flex;align-items:center;gap:10px;padding:10px;
+            border-radius:var(--radius);border:1px solid var(--gray-200);margin-bottom:8px;">
+            <div style="flex:1;">
+              <div style="font-weight:600;font-size:13px;">${esc(p.name)}</div>
+              <div style="font-size:11px;color:var(--gray-400);">${fmtDate(p.savedAt)}</div>
+            </div>
+            <button class="btn btn-primary btn-sm" onclick="App.loadFilterPreset(${i});Modals.close();">تطبيق</button>
+            <button class="btn btn-secondary btn-sm" style="color:var(--danger);" onclick="App.deleteFilterPreset(${i})">✕</button>
+          </div>`).join("")}
+      </div>
+    </div>`);
+  },
+
+  loadFilterPreset(idx) {
+    let presets = [];
+    try { presets = JSON.parse(localStorage.getItem("nukhba_filter_presets")||"[]"); } catch {}
+    const p = presets[idx];
+    if (!p) return;
+    AppState.query         = p.query        || "";
+    AppState.statusFilter  = p.statusFilter || "all";
+    AppState.serviceFilter = p.serviceFilter|| "";
+    AppState.orderFilter   = p.orderFilter  || "";
+    AppState.advancedFilter= {...(p.advancedFilter||{}), showAdvanced:true};
+    AppState.selectedShipments = new Set();
+    rerenderContent();
+    toast(`✅ تم تطبيق البحث "${p.name}"`);
+  },
+
+  deleteFilterPreset(idx) {
+    let presets = [];
+    try { presets = JSON.parse(localStorage.getItem("nukhba_filter_presets")||"[]"); } catch {}
+    const name = presets[idx]?.name;
+    presets.splice(idx,1);
+    localStorage.setItem("nukhba_filter_presets", JSON.stringify(presets));
+    toast(`تم حذف البحث "${name||""}"`, "info");
+    Modals.close();
+    if (presets.length) App.showFilterPresets();
   },
 
   // ── Bulk Actions ───────────────────────────────────────────
