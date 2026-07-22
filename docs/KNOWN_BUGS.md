@@ -209,3 +209,32 @@ Before fixing any bug report, check this file first — if the symptom matches a
 **Fix:** Removed the top-level `App._dummy` assignment. Added `_dummy() {}` as a proper no-op method inside the `App` object itself, so `onclick="App._dummy()"` calls still work at runtime.
 **Fixed:** Immediately on discovery
 **Prevention rule:** Never assign properties to `App`, `DB`, `AppState`, or any module-level `const` object outside the object's own declaration block. All methods belong inside `const App = { ... }`.
+
+---
+
+## Fixed in Progress Report Bug Sprint
+
+### 🟢 #22 — manualTrack() broken on enhanced tracking page
+**Symptom:** "بحث" button and "تتبع شحنة أخرى" button on the tracking page silently did nothing. Customer types a shipment code and presses search — nothing happens.
+**Root cause:** The enhanced tracking page (`viewTrack()`) uses `<input id="trackCodeInput">` for the search field and calls `App.manualTrack()` on submit. The existing `manualTrack()` used `prompt()` which opens a browser dialog — it never read from `trackCodeInput`. The two implementations were incompatible.
+**Fix:** `manualTrack()` now: (1) reads from `$("trackCodeInput")` if present, (2) falls back to `prompt()` for other call sites (shipments view "تتبع" button), (3) searches `AppState.shipments` first (fast path for logged-in users), (4) navigates via URL for public/not-found cases.
+**Fixed:** Progress Report Bug Sprint
+**Prevention rule:** When changing a view that calls an existing App method, verify the method's implementation matches the new call context — don't assume the method handles all cases.
+
+### 🟢 #23 — Import row status never updated to "imported"
+**Symptom:** Bulk import creates shipments correctly, but individual `import_rows` records stay at `status="pending"` forever. Error reports and retry-failed-rows logic were broken as a result.
+**Root cause:** `runBulkImport()` called `DB.updateImportRow(rowPayloads[i+X-X]?.id, ...)`. Two bugs: (1) the index arithmetic `i+X-X` always equals `i`, but the real problem was (2) `rowPayloads[i]` is a plain JS object with no `.id` field — IDs are assigned by Supabase server-side after insert. So `rowPayloads[i]?.id` was always `undefined`, and the update call silently no-oped.
+**Fix:** Both the success and failure paths now update by `(batch_id, row_number)` which are always known client-side. Both updates are fire-and-forget (`.then().catch()`) so they don't block the import loop.
+**Fixed:** Progress Report Bug Sprint
+
+### 🟢 #24 — LiveOps dashboard triggers full DB reload on every RT event
+**Symptom:** While viewing the Live Ops tab, every realtime event (new shipment, status change) triggered `App.refreshLiveOpsData()` which calls both `DB.loadShipments()` and `DB.loadCouriers()`. On a busy instance receiving 10+ RT events per minute, this caused continuous DB round-trips.
+**Root cause:** `postRender()` called `App.refreshLiveOpsData()` unconditionally whenever `AppState.view === "liveops"`. Since RT events trigger `rerenderContent()` → `postRender()`, the liveops view generated a DB call per event.
+**Fix:** Added `AppState._liveopsLastRefresh` timestamp. `postRender()` now only triggers `refreshLiveOpsData()` if more than 10 seconds have elapsed since the last refresh. Manual "🔄 تحديث" button bypasses the throttle.
+**Fixed:** Progress Report Bug Sprint
+
+### 🟢 #25 — Notification updates write to non-existent read_at column
+**Symptom:** Marking notifications as read called `.update({is_read:true, read_at:new Date().toISOString()})` but `read_at` is not in the `notifications` table schema (`migration_production.sql`). Supabase may silently ignore or may throw an error depending on version.
+**Root cause:** `read_at` was added to application code but never added to the migration SQL. The column doesn't exist in production.
+**Fix:** Removed `read_at` from all 4 notification update calls. Only `is_read:true` is written. If `read_at` is needed in the future, add `ALTER TABLE notifications ADD COLUMN IF NOT EXISTS read_at timestamptz;` to a migration.
+**Fixed:** Progress Report Bug Sprint

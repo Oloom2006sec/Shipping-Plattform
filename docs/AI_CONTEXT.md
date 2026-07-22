@@ -1,12 +1,12 @@
 # AI_CONTEXT.md — Al-Nukhba Express
 **Compact bootstrap for new AI sessions. Read this first. Consult other docs only for detail.**
-Last updated: after Regression Sprint #2 (5 bugs fixed)
+Last updated: Customer Portal + progress report bug fixes (July 2026)
 
 ---
 
 ## Project in One Paragraph
 
-Al-Nukhba Express is an Arabic RTL enterprise logistics SaaS (comparable to Bosta/Mylerz) built with **Vanilla JS + Supabase + GitHub Pages**. No build step. One `app.js` (~5,200 lines), one `styles.css` (~1,070 lines), one `index.html` shell. All persistence through Supabase (Postgres + Auth + Storage + Realtime). Four active user roles: Admin, Merchant, Courier, Customer.
+Al-Nukhba Express is an Arabic RTL enterprise logistics SaaS (comparable to Bosta/Mylerz) built with **Vanilla JS + Supabase + GitHub Pages**. No build step. One `app.js` (~6,700 lines), one `styles.css` (~1,070 lines), one `index.html` shell. All persistence through Supabase (Postgres + Auth + Storage + Realtime). Four active user roles: Admin, Merchant, Courier, Customer.
 
 ---
 
@@ -14,9 +14,9 @@ Al-Nukhba Express is an Arabic RTL enterprise logistics SaaS (comparable to Bost
 
 | Item | Value |
 |---|---|
-| **Current phase** | Phase 3 — Driver Ecosystem (in progress) |
-| **Last completed** | Regression Sprint #2 (5 bugs fixed: merchant_name NULL, pricing gov dropdown, Preview As, mobile sidebar, mobile dashboard) |
-| **Next action** | Resume OTP delivery verification — backend methods exist, courier UI not built |
+| **Current phase** | Post-roadmap stabilization — all phases shipped + 8 extra features |
+| **Last completed** | SMS Provider — Twilio/Vonage/HTTP Gateway + admin settings modal + test button |
+| **Next action** | Supabase Edge Function for SMS credentials — or Driver Location Tracking |
 | **Live URL** | `https://oloom2006sec.github.io/Shipping-Plattform/` |
 | **Supabase project** | `urktddxiyzwsilddamci` (London) |
 | **Local path** | `C:\Users\AMY\shipping-platform\Shipping-Plattform` |
@@ -35,6 +35,12 @@ Al-Nukhba Express is an Arabic RTL enterprise logistics SaaS (comparable to Bost
 | 2C | Pricing engine: zones, rules, auto-calculate fee, simulator |
 | 2D | Branches & warehouses with branch log |
 | 3 (partial) | Driver self-service wallet view. OTP backend methods written, UI pending. |
+| 3 (OTP) | OTP delivery verification — send/verify/resend in courier tasks, 3-attempt lockout, SMS stub |
+| 3 (Sig) | Signature capture — canvas modal, touch/mouse, DPI scaling, PNG upload, detail panel display |
+| 9 | Reporting — 5-tab analytics, period picker, bar charts, courier/merchant perf tables, Excel+PDF export |
+| 4 | Realtime Ops — live pipeline, courier board, activity feed, RT status dot, enhanced Realtime channels |
+| Customer | Customer Portal — overview, shipment history, DB-scoped loadShipments, customer nav 4 tabs |
+| Import | Bulk Shipment Import — 6-step wizard, validation, Excel template, error reports, auto-create |
 | Stabilization | Fixed 8 regressions — see KNOWN_BUGS.md for full list |
 
 ---
@@ -46,7 +52,7 @@ app.js
 ├── AppState          — single global state object (all UI reads from here)
 ├── DB                — all Supabase queries (never call db.from() outside DB.*)
 ├── App               — all onclick handlers (try/catch/finally + button-lock mandatory)
-├── view*()           — 17 page functions returning HTML strings
+├── view*()           — 21 page functions returning HTML strings (+ viewImport, viewLiveOps, viewCustomerOverview, viewCustomerShipments)
 ├── render()          — full page rebuild (on login/logout/boot)
 ├── rerenderContent() — replaces #viewContent only (on nav clicks + App.* actions)
 ├── bindDashboardEvents() — shell-level listeners, wired once per render()
@@ -83,7 +89,7 @@ Shipping-Plattform/
 
 ---
 
-## Database — 19 Tables
+## Database — 21 Tables
 
 **Core:** `profiles` · `roles` · `permissions` · `role_permissions` · `profile_roles` · `shipments` · `shipment_timeline` · `notifications` · `audit_logs`
 
@@ -95,15 +101,17 @@ Shipping-Plattform/
 
 **Phase 2D:** `branches` · `warehouses` · `shipment_branch_log`†
 
+**Import:** `import_batches` · `import_rows`
+
 † = append-only (SELECT + INSERT only via RLS — never UPDATE or DELETE)
 
 **Key DB functions:** `get_user_permissions()` · `calculate_shipping_fee()` · `get_merchant_balance()` · `get_driver_balance()` · `get_branch_metrics()` · `next_invoice_number()`
 
 ---
 
-## Admin Nav Tabs (12)
+## Admin Nav Tabs (14) · Customer Nav Tabs (4)
 
-`overview` · `shipments` · `tasks` · `accounts` · `finance` · `pricing` · `branches` · `reports` · `users` · `merchants` · `audit` · `track`
+`overview` · `shipments` · `tasks` · `accounts` · `finance` · `pricing` · `branches` · `liveops` · `reports` · `users` · `merchants` · `import` · `audit` · `track`
 
 ---
 
@@ -144,7 +152,13 @@ Skipping this caused frozen UI (KNOWN_BUGS #2, #3).
 
 **9. Role switching must call `render()`, not `renderDashboard()`.** Only `render()` rebuilds the full sidebar nav for the new role (KNOWN_BUGS #11).
 
-**8. `address_full` is GENERATED ALWAYS.** Never include it in INSERT/UPDATE.
+**10. `address_full` is GENERATED ALWAYS.** Never include it in INSERT/UPDATE.
+
+**11. Never write to DB columns that may not exist.** Always check the migration SQL before adding new fields to `.update()` calls. The `read_at` column was written before being created (KNOWN_BUGS #25).
+
+**12. Import row IDs are server-assigned.** After `insertImportRows()`, client JS objects have no `.id`. Update rows by `(batch_id, row_number)` not by a client-side id field (KNOWN_BUGS #23).
+
+**13. `manualTrack()` reads input field first.** Any call site that adds a `<input id="trackCodeInput">` will be read by `manualTrack()` automatically. Don't add competing track logic.
 
 ---
 
@@ -159,17 +173,17 @@ AppState._branchDataLoaded // boolean flag — lazy-load guard
 AppState._pricingDataLoaded// boolean flag — lazy-load guard
 AppState.allMerchants      // loaded on admin login + boot (must be awaited)
 AppState.myWalletBalance   // courier's real wallet balance (Phase 3)
+// SMS_CONFIG (not AppState — module-level const at top of app.js)
+// SMS_CONFIG.provider        // "stub"|"twilio"|"vonage"|"http_gateway"
 ```
 
 ---
 
 ## Pending Work (Priority Order)
 
-1. **OTP courier UI** — `viewTasks()` needs "📱 إرسال كود" button + "🔐 تأكيد بالكود" modal. Backend: `DB.generateAndSendOTP()`, `DB.verifyOTP()` exist. SMS stub in `DB.sendSMS()` — replace body with real provider when chosen.
-2. **Signature capture** — canvas POD; `signature_url` column exists.
-3. **Phase 9 — Reporting** — period-based reports, PDF export (jsPDF already imported).
-4. **Real SMS provider** — wire into `DB.sendSMS()` body only; no other changes needed.
-5. **Multi-tenant activation** — schema 100% ready (`tenant_id` on all tables). Needs RLS policy updates + tenant UI.
+1. **Phase 4 Realtime Ops** — live driver status board, live shipment updates beyond the current admin-only Realtime channel.
+2. ~~SMS provider~~ ✅ Done — set `SMS_CONFIG.provider` in app.js to activate Twilio/Vonage/HTTP Gateway.
+3. **Multi-tenant activation** — schema 100% ready (`tenant_id` on all tables). Needs RLS policy updates + tenant-switching UI.
 
 ---
 

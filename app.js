@@ -103,14 +103,14 @@ const ROLE_MAP = {
   admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","branches","liveops","reports","users","merchants","import","audit","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
-  customer: { label:"عميل",  badge:"badge-info",    nav:["track","accounts"] }
+  customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","accounts"] }
 };
 
 const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  liveops:"العمليات المباشرة",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  liveops:"العمليات المباشرة",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -275,6 +275,7 @@ const AppState = {
   },
   // Phase 4 live ops
   liveActivityFeed:[], rtStatus:"CONNECTING", rtEventCount:0,
+  _liveopsLastRefresh:0,
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -404,9 +405,19 @@ const DB = {
     } catch(e) { return null; }
   },
   async loadShipments() {
-    const{data,error}=await db.from("shipments").select("*").order("created_at",{ascending:false});
+    const role  = AppState.user?.primary_role||AppState.user?.role||"";
+    const phone = AppState.user?.phone||"";
+    let q = db.from("shipments").select("*").order("created_at",{ascending:false});
+    // Customer: filter at DB level by their phone — never fetch all shipments
+    if (role==="customer" && phone) q = q.eq("customer_phone", phone);
+    // Courier: filter at DB level by their ID
+    else if (role==="courier") q = q.eq("courier_id", AppState.user?.id);
+    // Merchant: filter at DB level by their ID
+    else if (role==="merchant") q = q.eq("merchant_id", AppState.user?.id);
+    // Admin/ops: fetch all (no filter)
+    const{data,error}=await q.limit(role==="admin"||role==="operations_manager"?500:200);
     if(error)throw error;
-    return data.map(mapRow);
+    return (data||[]).map(mapRow);
   },
   async loadCouriers() {
     const { data, error } = await db.from("profiles")
@@ -988,7 +999,8 @@ function visible() {
   const role=AppState.user?.primary_role||AppState.user?.role||"customer";
   if(role==="courier") list=list.filter(s=>s.courierId===uid);
   if(role==="merchant")list=list.filter(s=>s.merchantId===uid);
-  if(role==="customer")return[];
+  // Customer: shipments already DB-filtered at load time — show all loaded ones
+  // (no client-side filter needed; loadShipments() already filtered by customer_phone)
   const q=AppState.query.trim().toLowerCase();
   const af=AppState.advancedFilter||{};
   return list.filter(s=>{
@@ -1348,6 +1360,10 @@ async function handleLogin(e) {
     }
     if (role === "merchant") await App.loadMerchantData();
     if (role === "courier")  await App.loadMyWallet();
+    if (role === "customer") {
+      // loadShipments() already DB-filters by customer_phone for this role
+      AppState.shipments = await DB.loadShipments();
+    }
 
     // Step 9: audit (fire-and-forget, do not await — avoid delaying render)
     DB.addAudit("LOGIN", data.user.id, `role:${role} perms:${AppPerms.size}`, "auth");
@@ -1389,7 +1405,7 @@ async function handleRegister(e) {
     saveSession(user);
     AppState.user = user;
     AppState.page = "dashboard";
-    AppState.view = "track";
+    AppState.view = "overview"; // → viewCustomerOverview()
     await loadUserPermissions(data.user.id);
     render();
     toast(`مرحباً ${fullname}! تم إنشاء حسابك`);
@@ -1557,9 +1573,12 @@ function renderView() {
     case"recipients": return viewRecipients();
     case"products":   return viewProducts();
     case"pickup":     return viewPickupRequests();
+    case"cshipments": return viewCustomerShipments();
     case"import":     return viewImport();
     case"liveops":    return viewLiveOps();
-    default:          return viewOverview();
+    default:
+      if((AppState.user?.primary_role||AppState.user?.role)==="customer") return viewCustomerOverview();
+      return viewOverview();
   }
 }
 
@@ -1670,7 +1689,13 @@ function postRender() {
     App.loadImportBatches();
   }
   if(AppState.view==="liveops"){
-    App.refreshLiveOpsData();
+    // Throttle: only auto-refresh if >10s since last refresh to prevent
+    // cascading DB calls when RT events arrive in bursts
+    const now = Date.now();
+    if (!AppState._liveopsLastRefresh || now - AppState._liveopsLastRefresh > 10000) {
+      AppState._liveopsLastRefresh = now;
+      App.refreshLiveOpsData();
+    }
   }
 }
 
@@ -3080,7 +3105,7 @@ function bindDashboardEvents() {
         AppState.notifications.forEach(n=>n.isRead=true);
         document.querySelector(".notif-count")?.remove();
         // Persist to DB (fire-and-forget — UI already updated)
-        db.from("notifications").update({is_read:true,read_at:new Date().toISOString()})
+        db.from("notifications").update({is_read:true})
           .in("id",unreadIds).then(()=>{}).catch(()=>{});
       }
     }
@@ -3091,7 +3116,7 @@ function bindDashboardEvents() {
     AppState.notifications = [];
     if(ids.length){
       try {
-        await db.from("notifications").update({is_read:true,read_at:new Date().toISOString()})
+        await db.from("notifications").update({is_read:true})
           .in("id",ids);
       } catch(e){ console.warn("clearNotif:",e.message); }
     }
@@ -4884,6 +4909,161 @@ function viewImport() {
   return `<div class="empty"><div class="empty-icon">📦</div><h3>جاري التحميل...</h3></div>`;
 }
 
+// ══════════════════════════════════════════════════════════════
+// CUSTOMER PORTAL
+// ══════════════════════════════════════════════════════════════
+function viewCustomerOverview() {
+  const ships    = AppState.shipments;
+  const u        = AppState.user;
+  const delivered= ships.filter(s=>s.status==="delivered");
+  const inProg   = ships.filter(s=>!["delivered","returned","cancelled"].includes(s.status));
+  const returned = ships.filter(s=>s.status==="returned");
+  const todayStr = new Date().toDateString();
+  const todayDel = delivered.filter(s=>s.deliveredAt&&new Date(s.deliveredAt).toDateString()===todayStr);
+
+  return `
+    <!-- Welcome banner -->
+    <div style="background:var(--brand);color:#fff;border-radius:var(--radius-lg);
+      padding:20px 24px;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;">
+      <div>
+        <div style="font-size:11px;opacity:.8;margin-bottom:4px;">أهلاً وسهلاً</div>
+        <div style="font-size:22px;font-weight:800;">${esc(u.name?.split(" ")[0]||"عميل")}</div>
+        <div style="font-size:13px;opacity:.8;margin-top:2px;">${esc(u.phone||u.email||"")}</div>
+      </div>
+      <button class="btn" style="background:rgba(255,255,255,.2);color:#fff;border:1px solid rgba(255,255,255,.3);"
+        onclick="AppState.view='track';rerenderContent();">🔍 تتبع شحنة</button>
+    </div>
+
+    <!-- KPIs -->
+    <div class="kpi-grid" style="margin-bottom:20px;">
+      ${kpi("إجمالي شحناتي",ships.length,"box","var(--brand)","var(--brand-light)")}
+      ${kpi("جاري التوصيل",inProg.length,"truck","var(--warning)","var(--warning-bg)")}
+      ${kpi("تم التسليم",delivered.length,"chart","var(--success)","var(--success-bg)")}
+      ${kpi("وصل اليوم",todayDel.length,"chart","var(--info)","var(--info-bg)")}
+    </div>
+
+    <!-- Active shipments -->
+    ${inProg.length?`
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header">
+        <h3 class="card-title">${icon("truck")} شحناتي الجارية</h3>
+        <button class="btn btn-secondary btn-sm"
+          onclick="AppState.view='cshipments';rerenderContent();">عرض الكل</button>
+      </div>
+      ${inProg.slice(0,5).map(s=>`
+        <div style="display:flex;align-items:center;gap:12px;padding:12px 0;
+          border-bottom:1px solid var(--gray-100);cursor:pointer;"
+          onclick="AppState.selectedShipment='${esc(s.id)}';AppState.view='track';rerenderContent();">
+          <div style="width:36px;height:36px;border-radius:50%;flex-shrink:0;
+            background:${STATUS_MAP[s.status]?.badge==="badge-success"?"var(--success-bg)":"var(--brand-light)"};
+            display:flex;align-items:center;justify-content:center;font-size:16px;">
+            ${s.status==="out_for_delivery"?"🛵":s.status==="at_branch"?"🏪":s.status==="in_transit"?"🚚":"📦"}
+          </div>
+          <div style="flex:1;min-width:0;">
+            <div style="font-family:monospace;font-weight:700;font-size:13px;">${esc(s.id)}</div>
+            <div style="font-size:11px;color:var(--gray-500);">${fmtDate(s.createdAt)}</div>
+          </div>
+          <div style="text-align:left;">
+            <span class="badge ${STATUS_MAP[s.status]?.badge||"badge-gray"}">${STATUS_MAP[s.status]?.label||s.status}</span>
+            ${s.amount?`<div style="font-size:12px;font-weight:600;color:var(--success);margin-top:3px;">${money(s.amount)}</div>`:""}
+          </div>
+        </div>`).join("")}
+      ${inProg.length>5?`<div style="text-align:center;padding-top:10px;">
+        <button class="btn btn-secondary btn-sm"
+          onclick="AppState.view='cshipments';rerenderContent();">عرض ${inProg.length-5} شحنة أخرى</button>
+      </div>`:""}
+    </div>`:""}
+
+    <!-- Track by code shortcut -->
+    <div class="card">
+      <h3 class="card-title" style="margin-bottom:14px;">${icon("search")} تتبع شحنة بالرقم</h3>
+      <div style="display:flex;gap:8px;">
+        <input id="trackCodeInput" placeholder="ANE-XXXXXXX"
+          style="flex:1;padding:10px 14px;border-radius:var(--radius);
+            border:1.5px solid var(--gray-300);font-family:monospace;font-size:14px;"
+          onkeydown="if(event.key==='Enter')App.manualTrack()"/>
+        <button class="btn btn-primary" onclick="App.manualTrack()">تتبع</button>
+      </div>
+      ${!ships.length?`
+        <div style="margin-top:16px;padding:16px;background:var(--gray-50);border-radius:var(--radius);
+          font-size:13px;color:var(--gray-500);text-align:center;">
+          📦 لا توجد شحنات مسجلة بهذا الرقم حتى الآن
+        </div>`:""}
+    </div>`;
+}
+
+function viewCustomerShipments() {
+  const ships = AppState.shipments;
+  const STATUS_FILTER = AppState.statusFilter||"all";
+
+  const filtered = STATUS_FILTER==="all"
+    ? ships
+    : ships.filter(s=>s.status===STATUS_FILTER);
+
+  const STATUS_TABS = [
+    {v:"all",     l:"الكل",         count:ships.length},
+    {v:"out_for_delivery", l:"قيد التوصيل",  count:ships.filter(s=>s.status==="out_for_delivery").length},
+    {v:"delivered",l:"مُسلَّم",     count:ships.filter(s=>s.status==="delivered").length},
+    {v:"returned", l:"مرتجع",       count:ships.filter(s=>s.status==="returned").length},
+  ].filter(t=>t.v==="all"||t.count>0);
+
+  return `
+    <div class="card">
+      <h3 class="card-title" style="margin-bottom:16px;">${icon("box")} شحناتي</h3>
+
+      <!-- Status tabs -->
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;
+        border-bottom:1px solid var(--gray-200);padding-bottom:12px;">
+        ${STATUS_TABS.map(t=>`
+          <button onclick="App.setFilter('${t.v}')"
+            style="padding:6px 14px;border-radius:99px;font-size:13px;cursor:pointer;
+              border:1.5px solid ${STATUS_FILTER===t.v?"var(--brand)":"var(--gray-200)"};
+              background:${STATUS_FILTER===t.v?"var(--brand)":"#fff"};
+              color:${STATUS_FILTER===t.v?"#fff":"var(--gray-600)"};">
+            ${t.l} <span style="opacity:.7;">(${t.count})</span>
+          </button>`).join("")}
+      </div>
+
+      ${!filtered.length?`
+        <div class="empty">
+          <div class="empty-icon">📦</div>
+          <h3>${STATUS_FILTER==="all"?"لا توجد شحنات بعد":"لا توجد شحنات بهذه الحالة"}</h3>
+          <p>ستظهر شحناتك هنا بمجرد إنشائها من قِبَل التاجر</p>
+          <button class="btn btn-secondary" onclick="App.setFilter('all')">عرض الكل</button>
+        </div>`:`
+        <div>
+          ${filtered.map(s=>`
+            <div style="display:flex;align-items:center;gap:14px;padding:14px 0;
+              border-bottom:1px solid var(--gray-100);cursor:pointer;transition:background .1s;"
+              onclick="AppState.selectedShipment='${esc(s.id)}';AppState.view='track';rerenderContent();"
+              onmouseover="this.style.background='var(--gray-50)'"
+              onmouseout="this.style.background=''">
+              <div style="width:42px;height:42px;border-radius:var(--radius);flex-shrink:0;
+                background:${s.status==="delivered"?"var(--success-bg)":s.status==="returned"?"var(--danger-bg)":"var(--brand-light)"};
+                display:flex;align-items:center;justify-content:center;font-size:20px;">
+                ${s.status==="delivered"?"✅":s.status==="returned"?"↩️":s.status==="out_for_delivery"?"🛵":"📦"}
+              </div>
+              <div style="flex:1;min-width:0;">
+                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:3px;">
+                  <span style="font-family:monospace;font-weight:700;font-size:13px;">${esc(s.id)}</span>
+                  <span class="badge ${STATUS_MAP[s.status]?.badge||"badge-gray"}" style="font-size:10px;">
+                    ${STATUS_MAP[s.status]?.label||s.status}
+                  </span>
+                </div>
+                <div style="font-size:12px;color:var(--gray-500);">
+                  ${fmtDate(s.createdAt)}
+                  ${s.merchantName?` · ${esc(s.merchantName)}`:""}
+                </div>
+              </div>
+              <div style="text-align:left;flex-shrink:0;">
+                ${s.amount?`<div style="font-weight:700;color:var(--success);font-size:14px;">${money(s.amount)}</div>`:""}
+                <div style="font-size:11px;color:var(--gray-400);margin-top:2px;">← تتبع</div>
+              </div>
+            </div>`).join("")}
+        </div>`}
+    </div>`;
+}
+
 function viewAddresses() {
   const addrs = AppState.merchantAddresses;
   const uid   = AppState.user.id;
@@ -5294,14 +5474,27 @@ const App={
             }]).then(()=>{}).catch(()=>{});
           }
 
-          // Update import row status
-          await DB.updateImportRow(rowPayloads[i+wiz.progress.done-wiz.progress.done]?.id||"",
-            {status:"imported", shipment_code:code});
+          // Update import row status — use batch_id + row_number (client has no row UUID)
+          if (wiz.batch?.id && r.row_number) {
+            db.from("import_rows")
+              .update({status:"imported", shipment_code:code, updated_at:new Date().toISOString()})
+              .eq("batch_id", wiz.batch.id)
+              .eq("row_number", r.row_number)
+              .then(()=>{}).catch(()=>{});
+          }
 
           wiz.progress.done++;
         } catch(rowErr) {
           wiz.progress.failed++;
           console.warn("Import row failed:",rowErr.message);
+          // Mark row as failed in DB
+          if (wiz.batch?.id && r.row_number) {
+            db.from("import_rows")
+              .update({status:"failed", error_message:rowErr.message, updated_at:new Date().toISOString()})
+              .eq("batch_id", wiz.batch.id)
+              .eq("row_number", r.row_number)
+              .then(()=>{}).catch(()=>{});
+          }
         }
 
         // Update progress bar every 10 rows
@@ -6225,7 +6418,7 @@ const App={
     const badge = document.querySelector(".notif-count");
     if (badge) { unrd>0 ? badge.textContent=unrd : badge.remove(); }
     // Persist to DB fire-and-forget
-    db.from("notifications").update({is_read:true,read_at:new Date().toISOString()})
+    db.from("notifications").update({is_read:true})
       .eq("id",id).then(()=>{}).catch(()=>{});
     // If notification has a shipment reference, navigate to it
     if (referenceId && referenceId.startsWith("ANE-")) {
@@ -6245,7 +6438,7 @@ const App={
     AppState.notifications.forEach(n=>n.isRead=true);
     document.querySelector(".notif-count")?.remove();
     if (ids.length) {
-      db.from("notifications").update({is_read:true,read_at:new Date().toISOString()})
+      db.from("notifications").update({is_read:true})
         .in("id",ids).then(()=>{}).catch(()=>{});
     }
     const dropdown = $("notifDropdown");
@@ -7854,7 +8047,26 @@ const App={
     if(error){toast("خطأ: "+error.message,"error");return;}
     await App.loadMerchantData();rerenderContent();toast("تم إلغاء الطلب","info");
   },
-  manualTrack(){const c=prompt("أدخل رقم الشحنة:");if(c)location.href=`${location.origin}${location.pathname}?track=${encodeURIComponent(c.trim())}`;},
+  manualTrack(){
+    // Read from the tracking page search input if present; otherwise prompt
+    const input = $("trackCodeInput");
+    const code  = (input ? input.value : null) || prompt("أدخل رقم الشحنة:");
+    if (!code || !code.trim()) return;
+    const trimmed = code.trim();
+    // First try to find in already-loaded shipments
+    const found = AppState.shipments.find(s=>
+      s.id===trimmed || s.barcode===trimmed ||
+      s.customerPhone===trimmed.replace(/\s/g,"")
+    );
+    if (found) {
+      AppState.selectedShipment = found.id;
+      AppState.view = "track";
+      rerenderContent();
+    } else {
+      // Navigate via URL so the boot sequence can fetch it for non-logged-in users
+      location.href = `${location.origin}${location.pathname}?track=${encodeURIComponent(trimmed)}`;
+    }
+  },
 
   async updateStatus(id,status){
     const s=AppState.shipments.find(x=>x.id===id);if(!s)return;
@@ -8246,35 +8458,147 @@ const App={
     DB.addAudit("EXPORT_EXCEL","",`${data.length} rows`);
   },
 
-  async print(id){
+  async print(id, size) {
     if(!can("print_shipment")){toast("غير مصرح","error");return;}
     const s=AppState.shipments.find(x=>x.id===id);if(!s)return;
-    const el=document.createElement("div");
-    el.style.cssText="width:680px;padding:28px;background:#fff;direction:rtl;font-family:Arial;position:fixed;top:-9999px;left:0;";
-    el.innerHTML=`<div style="border:2px solid #0d9488;padding:22px;border-radius:12px;">
-      <h1 style="text-align:center;color:#0f766e;margin-bottom:18px;">النخبة للشحن السريع</h1>
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px;">
-        <div style="font-size:14px;line-height:2.2;">
-          <p><b>رقم الشحنة:</b> ${esc(s.id)}</p>
-          <p><b>العميل:</b> ${esc(s.customerName)}</p>
-          <p><b>الهاتف:</b> ${esc(s.customerPhone)}</p>
-          ${s.customerPhone2?`<p><b>هاتف 2:</b> ${esc(s.customerPhone2)}</p>`:""}
-          <p><b>المبلغ:</b> ${s.amount} ج.م</p>
-          <p><b>رسوم الشحن:</b> ${s.deliveryFee} ج.م</p>
-          <p><b>العنوان:</b> ${esc(s.address||s.address_full)}</p>
-          ${s.merchantName?`<p><b>التاجر:</b> ${esc(s.merchantName)}</p>`:""}
+
+    // Show label size picker if size not specified
+    if (!size) {
+      Modals.open(`<div class="modal" style="max-width:360px;">
+        <div class="modal-header">
+          <h3>🖨️ طباعة الشحنة</h3>
+          <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
         </div>
-        <canvas id="pQR"></canvas>
+        <div class="modal-body">
+          <div style="font-size:13px;font-weight:600;margin-bottom:12px;">اختر حجم اللصاقة:</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+            ${[
+              {id:"thermal",label:"حرارية 80mm",icon:"🏷️",desc:"طابعات حرارية"},
+              {id:"a5",     label:"A5",          icon:"📄",desc:"ورق A5 عادي"},
+              {id:"a4",     label:"A4",          icon:"📋",desc:"ورق A4 كامل"},
+            ].map(opt=>`
+              <button onclick="Modals.close();App.print('${esc(id)}','${opt.id}')"
+                style="padding:14px 8px;border:2px solid var(--gray-200);border-radius:var(--radius);
+                  background:#fff;cursor:pointer;text-align:center;transition:.15s;"
+                onmouseover="this.style.borderColor='var(--brand)';this.style.background='var(--brand-light)'"
+                onmouseout="this.style.borderColor='var(--gray-200)';this.style.background='#fff'">
+                <div style="font-size:22px;margin-bottom:4px;">${opt.icon}</div>
+                <div style="font-weight:700;font-size:12px;">${opt.label}</div>
+                <div style="font-size:10px;color:var(--gray-400);margin-top:2px;">${opt.desc}</div>
+              </button>`).join("")}
+          </div>
+        </div>
+      </div>`);
+      return;
+    }
+
+    // Build the tracking URL + QR
+    const trackUrl = `${location.origin}${location.pathname}?track=${encodeURIComponent(s.id)}`;
+
+    // Size configs
+    const sizes = {
+      thermal: {w:"80mm",  h:"auto", fs:"11px", title:"لصاقة حرارية 80mm"},
+      a5:      {w:"148mm", h:"210mm",fs:"12px", title:"A5"},
+      a4:      {w:"210mm", h:"297mm",fs:"13px", title:"A4"},
+    };
+    const cfg = sizes[size] || sizes.a5;
+
+    // Build label HTML
+    const labelHtml = `<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8"/>
+  <title>شحنة ${s.id}</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family: Arial, sans-serif; font-size:${cfg.fs}; direction:rtl;
+           width:${cfg.w}; ${cfg.h!=="auto"?"min-height:"+cfg.h+";":""} padding:8mm;
+           color:#000; background:#fff; }
+    .label { border:2px solid #0d9488; border-radius:6px; padding:8px; }
+    .header { text-align:center; border-bottom:1px solid #0d9488; padding-bottom:6px; margin-bottom:8px; }
+    .company { font-size:16px; font-weight:800; color:#0f766e; }
+    .tagline { font-size:10px; color:#666; margin-top:2px; }
+    .body { display:flex; gap:8px; align-items:flex-start; }
+    .fields { flex:1; }
+    .row { display:flex; gap:4px; margin-bottom:5px; font-size:${cfg.fs}; }
+    .lbl { color:#555; min-width:55px; font-size:10px; }
+    .val { font-weight:700; }
+    .val.big { font-size:17px; font-weight:800; color:#0f766e; letter-spacing:1px; }
+    .val.phone { font-family:monospace; font-size:13px; }
+    .qr-block { text-align:center; flex-shrink:0; }
+    .qr-block canvas { display:block; }
+    .qr-label { font-size:9px; color:#666; margin-top:2px; text-align:center; }
+    .footer { border-top:1px dashed #ccc; margin-top:8px; padding-top:6px;
+               display:flex; justify-content:space-between; font-size:10px; color:#666; }
+    .cod-box { background:#f0fdf4; border:1.5px solid #16a34a; border-radius:4px;
+               padding:4px 10px; margin-top:6px; text-align:center; }
+    .cod-label { font-size:10px; color:#15803d; }
+    .cod-amount { font-size:18px; font-weight:800; color:#15803d; }
+    .status-badge { display:inline-block; padding:2px 10px; border-radius:99px;
+                    background:#0d9488; color:#fff; font-size:10px; font-weight:700; margin-top:4px; }
+    @media print {
+      body { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+    }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+  <div class="label">
+    <div class="header">
+      <div class="company">النخبة للشحن السريع</div>
+      <div class="tagline">Al-Nukhba Express Logistics</div>
+      <div class="val big" style="margin-top:4px;">${s.id}</div>
+      <span class="status-badge">${STATUS_MAP[s.status]?.label||s.status}</span>
+    </div>
+    <div class="body">
+      <div class="fields">
+        <div class="row"><span class="lbl">العميل:</span><span class="val">${s.customerName}</span></div>
+        <div class="row"><span class="lbl">الهاتف:</span><span class="val phone">${s.customerPhone}</span></div>
+        ${s.customerPhone2?`<div class="row"><span class="lbl">هاتف 2:</span><span class="val phone">${s.customerPhone2}</span></div>`:""}
+        <div class="row"><span class="lbl">المحافظة:</span><span class="val">${s.governorate||"—"}${s.city?" / "+s.city:""}</span></div>
+        ${s.street?`<div class="row"><span class="lbl">الشارع:</span><span class="val">${s.street}${s.building?" - "+s.building:""}</span></div>`:""}
+        <div class="row"><span class="lbl">الخدمة:</span><span class="val">${SERVICE_MAP[s.serviceType]?.label||s.serviceType||"—"}</span></div>
+        ${s.weight?`<div class="row"><span class="lbl">الوزن:</span><span class="val">${s.weight} كجم</span></div>`:""}
+        ${s.merchantName?`<div class="row"><span class="lbl">التاجر:</span><span class="val">${s.merchantName}</span></div>`:""}
+        ${s.notes?`<div class="row"><span class="lbl">ملاحظات:</span><span class="val">${s.notes}</span></div>`:""}
+        ${s.amount?`<div class="cod-box">
+          <div class="cod-label">مبلغ الاستلام (COD)</div>
+          <div class="cod-amount">${s.amount.toLocaleString("ar-EG")} ج.م</div>
+        </div>`:""}
       </div>
-    </div>`;
-    document.body.appendChild(el);
-    await QRCode.toCanvas(document.querySelector("#pQR"),`${location.origin}${location.pathname}?track=${s.id}`,{width:140});
-    const canvas=await html2canvas(el);
-    const{jsPDF}=window.jspdf;
-    const pdf=new jsPDF("p","mm","a4");
-    pdf.addImage(canvas.toDataURL("image/png"),"PNG",10,10,190,130);
-    pdf.save(`${s.id}.pdf`);
-    el.remove();DB.addAudit("PRINT_SHIPMENT",s.id,`By ${AppState.user.name}`);
+      <div class="qr-block">
+        <div id="qrcode"></div>
+        <div class="qr-label">امسح للتتبع</div>
+        ${s.barcode?`<div style="margin-top:6px;font-family:monospace;font-size:9px;word-break:break-all;">${s.barcode}</div>`:""}
+      </div>
+    </div>
+    <div class="footer">
+      <span>تاريخ الطباعة: ${new Date().toLocaleDateString("ar-EG")}</span>
+      <span>${s.serviceType==="express"?"⚡ سريع":s.serviceType==="scheduled"?"📅 مجدول":"📦 عادي"}</span>
+      <span>رقم: ${s.id}</span>
+    </div>
+  </div>
+  <script>
+    new QRCode(document.getElementById("qrcode"), {
+      text: "${trackUrl}",
+      width: ${size==="thermal"?80:110},
+      height: ${size==="thermal"?80:110},
+      colorDark:"#0f766e", colorLight:"#ffffff",
+      correctLevel: QRCode.CorrectLevel.M
+    });
+    setTimeout(()=>{ window.print(); window.close(); }, 800);
+  </script>
+</body>
+</html>`;
+
+    const w = window.open("","_blank","width=700,height=900");
+    if (!w) { toast("يُرجى السماح بالنوافذ المنبثقة لطباعة الشحنة","warning"); return; }
+    w.document.write(labelHtml);
+    w.document.close();
+
+    DB.addAudit("PRINT_SHIPMENT",s.id,
+      `Size:${size} By:${AppState.user.name}`,"shipment");
+    toast("✅ جاري فتح نافذة الطباعة...");
   },
 
   editUser(id){
@@ -8496,6 +8820,7 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
       }
       if (role === "merchant") await App.loadMerchantData();
       if (role === "courier")  await App.loadMyWallet();
+      if (role === "customer") AppState.shipments = await DB.loadShipments();
 
       // Single render — everything ready
       render();
