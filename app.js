@@ -100,7 +100,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","branches","liveops","reports","users","merchants","import","audit","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","users","merchants","import","audit","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","accounts"] }
@@ -110,7 +110,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  liveops:"العمليات المباشرة",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -268,6 +268,10 @@ const AppState = {
   reportsTab:"overview", reportRange:"month", reportCourier:"", reportMerchant:"",
   // Bulk actions
   selectedShipments: new Set(),
+  // Auto-dispatch
+  dispatchRules:[], courierConfigs:[], _dispatchDataLoaded:false,
+  // Driver location tracking
+  driverLocations:{}, locationBroadcasting:false, _locationWatchId:null,
   // Advanced search filters
   advancedFilter: {
     dateFrom:"", dateTo:"", amountMin:"", amountMax:"",
@@ -769,6 +773,127 @@ const DB = {
       .insert([payload]).select().single();
     if (error) throw error;
     return data;
+  },
+
+  // ── Auto-Dispatch Engine ───────────────────────────────────
+  async loadDispatchRules() {
+    const { data, error } = await db.from("dispatch_rules")
+      .select("*").order("priority").order("created_at");
+    if (error) { console.warn("loadDispatchRules:", error.message); return []; }
+    return data || [];
+  },
+
+  async saveDispatchRule(payload) {
+    if (payload.id) {
+      const { error } = await db.from("dispatch_rules").update(payload).eq("id", payload.id);
+      if (error) throw error;
+    } else {
+      const { error } = await db.from("dispatch_rules")
+        .insert([{ ...payload, created_by: AppState.user.id }]);
+      if (error) throw error;
+    }
+  },
+
+  async deleteDispatchRule(id) {
+    const { error } = await db.from("dispatch_rules").delete().eq("id", id);
+    if (error) throw error;
+  },
+
+  async loadCourierConfigs() {
+    const { data, error } = await db.from("courier_configs")
+      .select("*, profiles!courier_configs_courier_id_fkey(full_name,phone,is_active)");
+    if (error) { console.warn("loadCourierConfigs:", error.message); return []; }
+    return (data || []).map(r => ({
+      ...r, courierName: r.profiles?.full_name || "—",
+      courierPhone: r.profiles?.phone || "",
+      isActive: r.profiles?.is_active !== false,
+    }));
+  },
+
+  async saveCourierConfig(payload) {
+    const { error } = await db.from("courier_configs")
+      .upsert([{ ...payload, updated_by: AppState.user.id, updated_at: new Date().toISOString() }],
+              { onConflict: "courier_id" });
+    if (error) throw error;
+  },
+
+  async runAutoDispatch(shipmentCode) {
+    const { data, error } = await db.rpc("auto_assign_shipment",
+      { p_shipment_code: shipmentCode });
+    if (error) throw error;
+    return data;
+  },
+
+  async runBatchDispatch(codes) {
+    const { data, error } = await db.rpc("auto_assign_batch",
+      { p_codes: codes });
+    if (error) throw error;
+    return data;
+  },
+
+  async loadDispatchLog(limit = 50) {
+    const { data, error } = await db.from("dispatch_log")
+      .select("*").order("dispatched_at", { ascending: false }).limit(limit);
+    if (error) { console.warn("loadDispatchLog:", error.message); return []; }
+    return data || [];
+  },
+
+  // ── Driver Location Tracking ────────────────────────────────
+  async loadDriverLocations() {
+    const { data, error } = await db.from("driver_locations")
+      .select("*, profiles!driver_locations_courier_id_fkey(full_name,phone)")
+      .order("last_seen_at", { ascending: false });
+    if (error) { console.warn("loadDriverLocations:", error.message); return {}; }
+    const map = {};
+    (data||[]).forEach(r => {
+      map[r.courier_id] = {
+        courierId:   r.courier_id,
+        courierName: r.profiles?.full_name || "—",
+        courierPhone:r.profiles?.phone || "",
+        lat:         parseFloat(r.lat),
+        lng:         parseFloat(r.lng),
+        accuracy:    r.accuracy ? parseFloat(r.accuracy) : null,
+        speed:       r.speed    ? parseFloat(r.speed)    : null,
+        heading:     r.heading  ? parseFloat(r.heading)  : null,
+        battery:     r.battery,
+        isOnline:    r.is_online,
+        lastSeenAt:  r.last_seen_at,
+      };
+    });
+    return map;
+  },
+
+  async updateMyLocation(lat, lng, accuracy, speed, heading, battery) {
+    const { error } = await db.rpc("update_driver_location", {
+      p_courier_id: AppState.user.id,
+      p_lat:        lat,
+      p_lng:        lng,
+      p_accuracy:   accuracy || null,
+      p_speed:      speed    || null,
+      p_heading:    heading  || null,
+      p_battery:    battery  || null,
+    });
+    if (error) throw error;
+  },
+
+  async markMyselfOffline() {
+    await db.rpc("mark_driver_offline", { p_courier_id: AppState.user.id })
+      .then(()=>{}).catch(()=>{});
+  },
+
+  async loadLocationHistory(courierId, limitHours = 8) {
+    const since = new Date(Date.now() - limitHours * 3600000).toISOString();
+    const { data, error } = await db.from("driver_location_history")
+      .select("lat,lng,speed,heading,recorded_at")
+      .eq("courier_id", courierId)
+      .gte("recorded_at", since)
+      .order("recorded_at", { ascending: true })
+      .limit(500);
+    if (error) { console.warn("loadLocationHistory:", error.message); return []; }
+    return (data||[]).map(r=>({
+      lat: parseFloat(r.lat), lng: parseFloat(r.lng),
+      speed: r.speed, heading: r.heading, recordedAt: r.recorded_at,
+    }));
   },
 
   async updateImportBatch(id, patch) {
@@ -1575,6 +1700,7 @@ function renderView() {
     case"pickup":     return viewPickupRequests();
     case"cshipments": return viewCustomerShipments();
     case"import":     return viewImport();
+    case"dispatch":   return viewDispatch();
     case"liveops":    return viewLiveOps();
     default:
       if((AppState.user?.primary_role||AppState.user?.role)==="customer") return viewCustomerOverview();
@@ -1688,6 +1814,11 @@ function postRender() {
     AppState._importDataLoaded = true;
     App.loadImportBatches();
   }
+  if(AppState.view==="dispatch" && !AppState._dispatchDataLoaded){
+    AppState._dispatchDataLoaded = true;
+    App.loadDispatchData();
+  }
+  if(AppState.view==="liveops") App.loadDriverLocations();
   if(AppState.view==="liveops"){
     // Throttle: only auto-refresh if >10s since last refresh to prevent
     // cascading DB calls when RT events arrive in bursts
@@ -4912,6 +5043,235 @@ function viewImport() {
 // ══════════════════════════════════════════════════════════════
 // CUSTOMER PORTAL
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// AUTO-DISPATCH ENGINE VIEW
+// ══════════════════════════════════════════════════════════════
+function viewDispatch() {
+  const rules   = AppState.dispatchRules  || [];
+  const configs = AppState.courierConfigs || [];
+  const ships   = AppState.shipments;
+  const tab     = AppState.dispatchTab    || "rules";
+
+  const unassigned = ships.filter(s=>
+    !s.courierId && !["delivered","returned","cancelled"].includes(s.status)
+  );
+
+  const STRATEGY_LABEL = {
+    specific_courier:"مندوب محدد", zone_pool:"مجموعة منطقة",
+    least_loaded:"الأقل تحميلاً", best_performer:"الأفضل أداءً",
+  };
+
+  const tabBar=`<div style="display:flex;gap:0;overflow-x:auto;
+    border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+    ${[
+      {id:"rules",   label:"قواعد التوزيع"},
+      {id:"couriers",label:"إعداد المناديب"},
+      {id:"preview", label:`معاينة (${unassigned.length} غير مُعيَّنة)`},
+      {id:"log",     label:"سجل التوزيع"},
+    ].map(t=>`<button onclick="App.setDispatchTab('${t.id}')"
+      style="padding:10px 18px;border:none;background:none;font-size:13px;font-weight:500;
+        white-space:nowrap;cursor:pointer;
+        border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+        color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">${t.label}</button>`).join("")}
+  </div>`;
+
+  // ── Rules ──────────────────────────────────────────────────
+  if (tab==="rules") return `
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">${icon("truck")} قواعد التوزيع التلقائي</h3>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-secondary btn-sm" onclick="App.runDispatchAll()"
+            ${unassigned.length===0?"disabled":""}>
+            🚀 توزيع الكل (${unassigned.length})
+          </button>
+          <button class="btn btn-primary btn-sm" onclick="App.openDispatchRuleModal()">
+            ${icon("plus",13)} قاعدة جديدة
+          </button>
+        </div>
+      </div>
+      ${tabBar}
+      ${!rules.length?`
+        <div class="empty">
+          <div class="empty-icon">⚡</div>
+          <h3>لا توجد قواعد توزيع</h3>
+          <p>أنشئ قاعدة لتعيين الشحنات تلقائياً إلى المناديب بناءً على المحافظة أو نوع الخدمة</p>
+          <button class="btn btn-primary" onclick="App.openDispatchRuleModal()">إنشاء أول قاعدة</button>
+        </div>
+      `:`
+        <div style="margin-bottom:10px;font-size:12px;color:var(--gray-400);">
+          القواعد تُطبَّق بالترتيب — الأولوية الأقل رقماً تُطبَّق أولاً
+        </div>
+        <div class="table-wrap"><table>
+          <thead><tr>
+            <th>الأولوية</th><th>اسم القاعدة</th><th>المحافظات</th>
+            <th>نوع الخدمة</th><th>الاستراتيجية</th><th>الهدف</th>
+            <th>الحد اليومي</th><th>الحالة</th><th>إجراءات</th>
+          </tr></thead>
+          <tbody>
+            ${rules.map(r=>{
+              const targetName = r.strategy==="specific_courier"&&r.target_courier_id
+                ?(configs.find(c=>c.courier_id===r.target_courier_id)?.courierName||r.target_courier_id.slice(-6))
+                :r.zone_tag||"—";
+              return `<tr>
+                <td style="font-weight:700;font-size:16px;color:var(--brand);">${r.priority}</td>
+                <td style="font-weight:600;">${esc(r.name)}</td>
+                <td style="font-size:12px;">${r.match_governorates?.join(" · ")||`<span style="color:var(--gray-400)">الكل</span>`}</td>
+                <td style="font-size:12px;">${r.match_service_types?.join(" · ")||`<span style="color:var(--gray-400)">الكل</span>`}</td>
+                <td><span class="badge badge-brand" style="font-size:11px;">${STRATEGY_LABEL[r.strategy]||r.strategy}</span></td>
+                <td style="font-size:12px;font-weight:600;">${esc(targetName)}</td>
+                <td style="font-size:12px;">${r.max_per_courier_per_day}/يوم</td>
+                <td><label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="checkbox" ${r.is_active?"checked":""}
+                    onchange="App.toggleDispatchRule('${esc(r.id)}',this.checked)"/>
+                  <span style="font-size:12px;">${r.is_active?"مفعّل":"معطّل"}</span>
+                </label></td>
+                <td><div class="td-actions">
+                  <button class="btn btn-secondary btn-sm"
+                    onclick="App.openDispatchRuleModal('${esc(r.id)}')">تعديل</button>
+                  <button class="btn btn-secondary btn-sm" style="color:var(--danger);"
+                    onclick="App.deleteDispatchRule('${esc(r.id)}','${esc(r.name)}')">حذف</button>
+                </div></td>
+              </tr>`;}).join("")}
+          </tbody>
+        </table></div>
+      `}
+    </div>`;
+
+  // ── Courier Configs ────────────────────────────────────────
+  if (tab==="couriers") {
+    const allCouriers=AppState.couriers||[];
+    return `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("users")} إعداد المناديب للتوزيع</h3>
+          <button class="btn btn-secondary btn-sm" onclick="App.autoCreateCourierConfigs()">
+            ⚡ تهيئة تلقائية للكل
+          </button>
+        </div>
+        ${tabBar}
+        ${!allCouriers.length?`<div class="empty"><div class="empty-icon">🚚</div>
+          <h3>لا يوجد مناديب</h3></div>`:`
+        <div class="table-wrap"><table>
+          <thead><tr>
+            <th>المندوب</th><th>الهاتف</th><th>الحد اليومي</th>
+            <th>المناطق</th><th>الخدمات</th><th>متاح للتوزيع</th><th>إجراءات</th>
+          </tr></thead>
+          <tbody>
+            ${allCouriers.map(c=>{
+              const cfg=configs.find(x=>x.courier_id===c.id);
+              return `<tr>
+                <td style="font-weight:600;">${esc(c.full_name||"—")}</td>
+                <td class="td-phone">${esc(c.phone||"—")}</td>
+                <td style="font-weight:600;">${cfg?cfg.max_daily_shipments:`<span style="color:var(--gray-400)">—</span>`}</td>
+                <td style="font-size:12px;">${cfg?.zone_tags?.join(" · ")||`<span style="color:var(--gray-400)">غير محدد</span>`}</td>
+                <td style="font-size:12px;">${cfg?.service_capabilities?.join(" · ")||`<span style="color:var(--gray-400)">غير محدد</span>`}</td>
+                <td>${cfg?`<label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="checkbox" ${cfg.is_available_for_dispatch?"checked":""}
+                    onchange="App.toggleCourierAvailability('${c.id}',this.checked)"/>
+                  <span style="font-size:12px;">${cfg.is_available_for_dispatch?"متاح":"موقوف"}</span>
+                </label>`:`<span style="color:var(--gray-400);font-size:12px;">غير مُهيَّأ</span>`}</td>
+                <td><button class="btn btn-secondary btn-sm"
+                  onclick="App.openCourierConfigModal('${c.id}','${esc(c.full_name||"")}')">
+                  ${cfg?"تعديل":"إعداد"}
+                </button></td>
+              </tr>`;}).join("")}
+          </tbody>
+        </table></div>`}
+      </div>`;
+  }
+
+  // ── Preview ────────────────────────────────────────────────
+  if (tab==="preview") {
+    const pr=AppState.dispatchPreview||null;
+    return `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">🔍 معاينة التوزيع</h3>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-secondary btn-sm" onclick="App.runDispatchPreview()">
+              🔄 تحديث المعاينة
+            </button>
+            ${pr?`<button class="btn btn-primary btn-sm" onclick="App.confirmDispatch()">
+              ✅ تأكيد التوزيع (${pr.wouldAssign||0} شحنة)
+            </button>`:""}
+          </div>
+        </div>
+        ${tabBar}
+        ${!pr?`
+          <div style="text-align:center;padding:40px;">
+            <div style="font-size:32px;margin-bottom:12px;">🔍</div>
+            <p style="color:var(--gray-500);margin-bottom:16px;">
+              ${unassigned.length} شحنة غير مُعيَّنة — انقر لمعاينة نتائج التوزيع
+            </p>
+            <button class="btn btn-primary" onclick="App.runDispatchPreview()">تشغيل المعاينة</button>
+          </div>
+        `:`
+          <div class="kpi-grid" style="margin-bottom:20px;">
+            ${kpi("سيتم تعيينها",pr.wouldAssign||0,"chart","var(--success)","var(--success-bg)")}
+            ${kpi("بلا قاعدة مطابقة",pr.noMatch||0,"refresh","var(--warning)","var(--warning-bg)")}
+            ${kpi("إجمالي غير مُعيَّنة",unassigned.length,"box","var(--brand)","var(--brand-light)")}
+          </div>
+          ${pr.items?.length?`
+          <div class="table-wrap"><table>
+            <thead><tr>
+              <th>الشحنة</th><th>العميل</th><th>المحافظة</th>
+              <th>الخدمة</th><th>المندوب المقترح</th><th>القاعدة</th>
+            </tr></thead>
+            <tbody>
+              ${pr.items.map(p=>`<tr>
+                <td class="td-mono">${esc(p.shipmentCode)}</td>
+                <td>${esc(p.customerName)}</td>
+                <td>${esc(p.governorate||"—")}</td>
+                <td style="font-size:12px;">${esc(p.serviceType||"—")}</td>
+                <td style="font-weight:600;color:${p.courierName?"var(--success)":"var(--warning)"};">
+                  ${p.courierName?`✅ ${esc(p.courierName)}`:"⚠️ لا تطابق"}
+                </td>
+                <td style="font-size:12px;color:var(--gray-500);">${esc(p.ruleName||"—")}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`:""}
+        `}
+      </div>`;
+  }
+
+  // ── Log ────────────────────────────────────────────────────
+  if (tab==="log") {
+    const log=AppState.dispatchLog||[];
+    return `
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">${icon("log")} سجل التوزيع</h3>
+          <button class="btn btn-secondary btn-sm" onclick="App.loadDispatchLogIntoState()">🔄 تحديث</button>
+        </div>
+        ${tabBar}
+        ${!log.length?`<div class="empty"><div class="empty-icon">📋</div>
+          <h3>لا توجد سجلات بعد</h3>
+          <p>ستظهر هنا قرارات التوزيع التلقائي بعد تشغيله</p></div>`:`
+        <div class="table-wrap"><table>
+          <thead><tr>
+            <th>الشحنة</th><th>المندوب المُعيَّن</th><th>القاعدة</th><th>الاستراتيجية</th><th>التوقيت</th>
+          </tr></thead>
+          <tbody>
+            ${log.map(l=>`<tr>
+              <td class="td-mono" style="cursor:pointer;"
+                onclick="AppState.selectedShipment='${esc(l.shipment_code)}';AppState.view='shipments';rerenderContent();">
+                ${esc(l.shipment_code)}
+              </td>
+              <td style="font-weight:600;">${esc(l.assigned_courier_name||"—")}</td>
+              <td style="font-size:12px;">${esc(l.rule_name||"—")}</td>
+              <td><span class="badge badge-brand" style="font-size:10px;">
+                ${STRATEGY_LABEL[l.strategy_used]||l.strategy_used||"—"}</span></td>
+              <td style="font-size:12px;color:var(--gray-400);">${fmtDate(l.dispatched_at)}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>`}
+      </div>`;
+  }
+
+  return "";
+}
+
 function viewCustomerOverview() {
   const ships    = AppState.shipments;
   const u        = AppState.user;
@@ -6518,6 +6878,422 @@ const App={
       errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
       btn.disabled=false; btn.textContent="📤 إرسال";
     }
+  },
+
+  // ── Auto-Dispatch Engine ──────────────────────────────────────
+  setDispatchTab(tab) {
+    AppState.dispatchTab = tab;
+    if (tab === "log" && !(AppState.dispatchLog?.length)) App.loadDispatchLogIntoState();
+    rerenderContent();
+  },
+
+  async loadDispatchData() {
+    try {
+      const [rules, configs] = await Promise.all([
+        DB.loadDispatchRules(),
+        DB.loadCourierConfigs(),
+      ]);
+      AppState.dispatchRules   = rules;
+      AppState.courierConfigs  = configs;
+      rerenderContent();
+    } catch(err) { toast("فشل تحميل بيانات التوزيع: "+err.message,"error"); }
+  },
+
+  async loadDispatchLogIntoState() {
+    AppState.dispatchLog = await DB.loadDispatchLog(50);
+    rerenderContent();
+  },
+
+  // ── Rule management ───────────────────────────────────────────
+  openDispatchRuleModal(ruleId) {
+    const existing = ruleId ? AppState.dispatchRules.find(r=>r.id===ruleId) : null;
+    const couriers = AppState.courierConfigs || [];
+    const GOVS     = Object.keys(EGYPT_GOV || {});
+
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header">
+        <h3>⚡ ${existing?"تعديل":"إنشاء"} قاعدة توزيع</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="field">
+            <label>اسم القاعدة *</label>
+            <input id="drName" value="${esc(existing?.name||"")}" placeholder="مثال: توزيع القاهرة الكبرى"/>
+          </div>
+          <div class="field">
+            <label>الأولوية (1 = الأعلى)</label>
+            <input id="drPriority" type="number" min="1" max="999"
+              value="${existing?.priority||rules.length+1||1}"/>
+          </div>
+        </div>
+        <div class="field">
+          <label>الاستراتيجية *</label>
+          <select id="drStrategy" onchange="App._toggleDispatchStrategyFields(this.value)"
+            style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            <option value="specific_courier" ${existing?.strategy==="specific_courier"?"selected":""}>مندوب محدد</option>
+            <option value="zone_pool"        ${existing?.strategy==="zone_pool"?"selected":""}>مجموعة منطقة</option>
+            <option value="least_loaded"     ${existing?.strategy==="least_loaded"?"selected":""}>الأقل تحميلاً</option>
+            <option value="best_performer"   ${existing?.strategy==="best_performer"?"selected":""}>الأفضل أداءً</option>
+          </select>
+        </div>
+        <div id="drCourierField" style="display:${!existing||existing.strategy==="specific_courier"?"block":"none"}">
+          <div class="field">
+            <label>المندوب المحدد</label>
+            <select id="drCourierId" style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+              <option value="">-- اختر مندوباً --</option>
+              ${couriers.map(c=>`<option value="${c.courier_id}" ${existing?.target_courier_id===c.courier_id?"selected":""}>
+                ${esc(c.courierName)}
+              </option>`).join("")}
+            </select>
+          </div>
+        </div>
+        <div id="drZoneField" style="display:${existing?.strategy==="zone_pool"?"block":"none"}">
+          <div class="field">
+            <label>منطقة المجموعة (zone tag)</label>
+            <input id="drZoneTag" value="${esc(existing?.zone_tag||"")}"
+              placeholder="مثال: cairo-east"/>
+          </div>
+        </div>
+        <div class="field">
+          <label>تطبيق على المحافظات (اتركه فارغاً للكل)</label>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;" id="drGovsWrap">
+            ${GOVS.slice(0,12).map(g=>`
+              <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;">
+                <input type="checkbox" value="${g}"
+                  ${existing?.match_governorates?.includes(g)?"checked":""}
+                  class="drGovCheck"/>
+                ${g}
+              </label>`).join("")}
+          </div>
+        </div>
+        <div class="form-row">
+          <div class="field">
+            <label>نوع الخدمة (اتركه فارغاً للكل)</label>
+            <div style="display:flex;gap:10px;margin-top:4px;flex-wrap:wrap;">
+              ${["door_to_door","drop_off","pickup"].map(s=>`
+                <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer;">
+                  <input type="checkbox" value="${s}" class="drSvcCheck"
+                    ${existing?.match_service_types?.includes(s)?"checked":""}/>
+                  ${SERVICE_MAP[s]?.label||s}
+                </label>`).join("")}
+            </div>
+          </div>
+          <div class="field">
+            <label>الحد الأقصى اليومي للمندوب</label>
+            <input id="drMaxPerDay" type="number" min="1" max="999"
+              value="${existing?.max_per_courier_per_day||50}"/>
+          </div>
+        </div>
+        <div id="drErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="drSaveBtn" class="btn btn-primary"
+          onclick="App.saveDispatchRule('${ruleId||""}')">💾 حفظ القاعدة</button>
+      </div>
+    </div>`);
+  },
+
+  _toggleDispatchStrategyFields(strategy) {
+    const cf=$("drCourierField"), zf=$("drZoneField");
+    if(cf) cf.style.display = strategy==="specific_courier"?"block":"none";
+    if(zf) zf.style.display = strategy==="zone_pool"?"block":"none";
+  },
+
+  async saveDispatchRule(ruleId) {
+    const name     = $("drName")?.value?.trim();
+    const priority = parseInt($("drPriority")?.value)||10;
+    const strategy = $("drStrategy")?.value;
+    const courierId= $("drCourierId")?.value||null;
+    const zoneTag  = $("drZoneTag")?.value?.trim()||null;
+    const maxPer   = parseInt($("drMaxPerDay")?.value)||50;
+    const govs     = [...$$(".drGovCheck")].filter(c=>c.checked).map(c=>c.value);
+    const svcs     = [...$$(".drSvcCheck")].filter(c=>c.checked).map(c=>c.value);
+    const errEl    = $("drErr");
+    const btn      = $("drSaveBtn");
+
+    if (!name) { errEl.style.display="block"; errEl.textContent="اسم القاعدة مطلوب"; return; }
+    if (strategy==="specific_courier"&&!courierId) {
+      errEl.style.display="block"; errEl.textContent="يرجى اختيار المندوب"; return;
+    }
+    if (strategy==="zone_pool"&&!zoneTag) {
+      errEl.style.display="block"; errEl.textContent="يرجى إدخال اسم المنطقة"; return;
+    }
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      await DB.saveDispatchRule({
+        id:                   ruleId||undefined,
+        name, priority,       strategy,
+        target_courier_id:    strategy==="specific_courier"?courierId:null,
+        zone_tag:             strategy==="zone_pool"?zoneTag:null,
+        max_per_courier_per_day: maxPer,
+        match_governorates:   govs.length?govs:null,
+        match_service_types:  svcs.length?svcs:null,
+        is_active:            true,
+      });
+      await DB.addAudit(ruleId?"DISPATCH_RULE_UPDATE":"DISPATCH_RULE_CREATE",
+        ruleId||"", `Rule: ${name} By: ${AppState.user.name}`, "dispatch");
+      AppState.dispatchRules   = await DB.loadDispatchRules();
+      AppState._dispatchDataLoaded = true;
+      Modals.close();
+      rerenderContent();
+      toast(`✅ تم ${ruleId?"تحديث":"إنشاء"} القاعدة "${name}"`);
+    } catch(err) {
+      errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
+      btn.disabled=false; btn.textContent="💾 حفظ القاعدة";
+    }
+  },
+
+  async deleteDispatchRule(id, name) {
+    if (!confirm(`حذف القاعدة "${name}"؟`)) return;
+    try {
+      await DB.deleteDispatchRule(id);
+      await DB.addAudit("DISPATCH_RULE_DELETE", id,
+        `Deleted: ${name} By: ${AppState.user.name}`, "dispatch");
+      AppState.dispatchRules = await DB.loadDispatchRules();
+      rerenderContent();
+      toast(`تم حذف القاعدة "${name}"`, "info");
+    } catch(err) { toast("فشل الحذف: "+err.message,"error"); }
+  },
+
+  async toggleDispatchRule(id, isActive) {
+    try {
+      await db.from("dispatch_rules").update({is_active:isActive}).eq("id",id);
+      const r=AppState.dispatchRules.find(x=>x.id===id);
+      if(r) r.is_active=isActive;
+      toast(isActive?"تم تفعيل القاعدة":"تم تعطيل القاعدة","info");
+    } catch(err) { toast("فشل التحديث: "+err.message,"error"); }
+  },
+
+  // ── Courier config management ──────────────────────────────
+  openCourierConfigModal(courierId, courierName) {
+    const existing = AppState.courierConfigs.find(c=>c.courier_id===courierId);
+    const SVCS = ["standard","express","scheduled","fragile","bulky"];
+    Modals.open(`<div class="modal" style="max-width:440px;">
+      <div class="modal-header">
+        <h3>🚚 إعداد المندوب: ${esc(courierName)}</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>الحد الأقصى من الشحنات يومياً</label>
+          <input id="ccMaxDaily" type="number" min="1" max="999"
+            value="${existing?.max_daily_shipments||50}"/>
+        </div>
+        <div class="field">
+          <label>وسوم المناطق (zone tags) — مفصولة بفاصلة</label>
+          <input id="ccZoneTags" placeholder="cairo-east, cairo-west"
+            value="${existing?.zone_tags?.join(", ")||""}"/>
+          <div style="font-size:11px;color:var(--gray-400);margin-top:4px;">
+            هذه الوسوم تُستخدم في قواعد التوزيع من نوع "مجموعة منطقة"
+          </div>
+        </div>
+        <div class="field">
+          <label>خدمات يمكن للمندوب تقديمها</label>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;">
+            ${SVCS.map(s=>`<label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer;">
+              <input type="checkbox" value="${s}" class="ccSvcCheck"
+                ${existing?.service_capabilities?.includes(s)||(!existing&&s==="standard")?"checked":""}/>
+              ${s}
+            </label>`).join("")}
+          </div>
+        </div>
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="ccAvailable"
+              ${existing?.is_available_for_dispatch!==false?"checked":""}/>
+            متاح للتوزيع التلقائي
+          </label>
+        </div>
+        <div id="ccErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="ccSaveBtn" class="btn btn-primary"
+          onclick="App.saveCourierConfig('${courierId}')">💾 حفظ</button>
+      </div>
+    </div>`);
+  },
+
+  async saveCourierConfig(courierId) {
+    const maxDaily = parseInt($("ccMaxDaily")?.value)||50;
+    const zoneTags = $("ccZoneTags")?.value?.split(",").map(z=>z.trim()).filter(Boolean)||[];
+    const svcs     = [...$$(".ccSvcCheck")].filter(c=>c.checked).map(c=>c.value);
+    const avail    = $("ccAvailable")?.checked !== false;
+    const btn      = $("ccSaveBtn");
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      await DB.saveCourierConfig({
+        courier_id:               courierId,
+        max_daily_shipments:      maxDaily,
+        zone_tags:                zoneTags,
+        service_capabilities:     svcs.length?svcs:["standard"],
+        is_available_for_dispatch:avail,
+      });
+      await DB.addAudit("COURIER_CONFIG_SAVE", courierId,
+        `MaxDaily:${maxDaily} Zones:[${zoneTags.join(",")}] By:${AppState.user.name}`,"dispatch");
+      AppState.courierConfigs = await DB.loadCourierConfigs();
+      Modals.close();
+      rerenderContent();
+      toast("✅ تم حفظ إعداد المندوب");
+    } catch(err) {
+      $("ccErr").style.display="block"; $("ccErr").textContent="خطأ: "+err.message;
+      btn.disabled=false; btn.textContent="💾 حفظ";
+    }
+  },
+
+  async toggleCourierAvailability(courierId, isAvailable) {
+    try {
+      await db.from("courier_configs")
+        .update({is_available_for_dispatch:isAvailable, updated_at:new Date().toISOString()})
+        .eq("courier_id", courierId);
+      const c=AppState.courierConfigs.find(x=>x.courier_id===courierId);
+      if(c) c.is_available_for_dispatch=isAvailable;
+      toast(isAvailable?"المندوب متاح للتوزيع التلقائي":"تم إيقاف المندوب من التوزيع التلقائي","info");
+    } catch(err) { toast("فشل التحديث: "+err.message,"error"); }
+  },
+
+  async autoCreateCourierConfigs() {
+    const couriers = AppState.couriers||[];
+    const existing = new Set((AppState.courierConfigs||[]).map(c=>c.courier_id));
+    const missing  = couriers.filter(c=>!existing.has(c.id));
+    if (!missing.length) { toast("جميع المناديب مُهيَّؤون بالفعل","info"); return; }
+    if (!confirm(`إنشاء إعداد افتراضي لـ ${missing.length} مندوب؟`)) return;
+    try {
+      await db.from("courier_configs").insert(missing.map(c=>({
+        courier_id:               c.id,
+        max_daily_shipments:      50,
+        zone_tags:                [],
+        service_capabilities:     ["standard"],
+        is_available_for_dispatch:true,
+        updated_by:               AppState.user.id,
+      })));
+      AppState.courierConfigs = await DB.loadCourierConfigs();
+      rerenderContent();
+      toast(`✅ تم إنشاء إعداد افتراضي لـ ${missing.length} مندوب`);
+    } catch(err) { toast("فشل الإنشاء: "+err.message,"error"); }
+  },
+
+  // ── Dispatch execution ─────────────────────────────────────
+  async runDispatchPreview() {
+    const unassigned = AppState.shipments.filter(s=>
+      !s.courierId && !["delivered","returned","cancelled"].includes(s.status)
+    );
+    if (!unassigned.length) { toast("لا توجد شحنات غير مُعيَّنة","info"); return; }
+
+    toast("جاري المعاينة...","info");
+    const items=[], rules=AppState.dispatchRules.filter(r=>r.is_active);
+    const configs=AppState.courierConfigs;
+    const todayLoad={}; // courierId → count (simulated)
+
+    for (const s of unassigned) {
+      let matched=null;
+      for (const rule of rules) {
+        if (rule.match_governorates?.length && !rule.match_governorates.includes(s.governorate)) continue;
+        if (rule.match_service_types?.length && !rule.match_service_types.includes(s.serviceType)) continue;
+
+        let courierId=null, courierName="";
+        if (rule.strategy==="specific_courier" && rule.target_courier_id) {
+          const cfg=configs.find(c=>c.courier_id===rule.target_courier_id);
+          if (cfg?.is_available_for_dispatch) {
+            todayLoad[rule.target_courier_id]=(todayLoad[rule.target_courier_id]||0);
+            if (todayLoad[rule.target_courier_id]<rule.max_per_courier_per_day) {
+              courierId=rule.target_courier_id;
+              courierName=cfg.courierName||"";
+            }
+          }
+        } else if (rule.strategy==="zone_pool" && rule.zone_tag) {
+          const pool=configs.filter(c=>c.is_available_for_dispatch&&c.zone_tags?.includes(rule.zone_tag));
+          const pick=pool.sort((a,b)=>(todayLoad[a.courier_id]||0)-(todayLoad[b.courier_id]||0))[0];
+          if (pick) { courierId=pick.courier_id; courierName=pick.courierName||""; }
+        } else if (["least_loaded","best_performer"].includes(rule.strategy)) {
+          const pool=configs.filter(c=>c.is_available_for_dispatch);
+          const pick=pool.sort((a,b)=>(todayLoad[a.courier_id]||0)-(todayLoad[b.courier_id]||0))[0];
+          if (pick) { courierId=pick.courier_id; courierName=pick.courierName||""; }
+        }
+
+        if (courierId) {
+          todayLoad[courierId]=(todayLoad[courierId]||0)+1;
+          matched={ courierId, courierName, ruleName:rule.name };
+          break;
+        }
+      }
+      items.push({
+        shipmentCode:  s.id,
+        customerName:  s.customerName,
+        governorate:   s.governorate,
+        serviceType:   s.serviceType,
+        courierId:     matched?.courierId||null,
+        courierName:   matched?.courierName||"",
+        ruleName:      matched?.ruleName||"",
+      });
+    }
+
+    AppState.dispatchPreview = {
+      wouldAssign: items.filter(i=>i.courierId).length,
+      noMatch:     items.filter(i=>!i.courierId).length,
+      items,
+    };
+    AppState.dispatchTab = "preview";
+    rerenderContent();
+  },
+
+  async confirmDispatch() {
+    const pr = AppState.dispatchPreview;
+    if (!pr?.items?.length) return;
+    const toAssign = pr.items.filter(i=>i.courierId);
+    if (!toAssign.length) { toast("لا توجد شحنات يمكن تعيينها","warning"); return; }
+    if (!confirm(`تأكيد تعيين ${toAssign.length} شحنة؟`)) return;
+
+    toast("جاري التوزيع...","info");
+    const codes = toAssign.map(i=>i.shipmentCode);
+    try {
+      const result = await DB.runBatchDispatch(codes);
+      // Update local AppState
+      toAssign.forEach(item=>{
+        const s=AppState.shipments.find(x=>x.id===item.shipmentCode);
+        if(s){ s.courierId=item.courierId; s.courierName=item.courierName; }
+      });
+      await DB.addAudit("AUTO_DISPATCH_RUN","",
+        `Assigned:${result.assigned} Skipped:${result.skipped} Failed:${result.failed} By:${AppState.user.name}`,
+        "dispatch");
+      AppState.dispatchPreview     = null;
+      AppState._dispatchDataLoaded = false;
+      AppState.dispatchLog         = await DB.loadDispatchLog(50);
+      rerenderContent();
+      toast(`✅ تم التوزيع: ${result.assigned} شحنة · ${result.failed} فشل · ${result.skipped} تخطي`);
+    } catch(err) { toast("فشل التوزيع: "+err.message,"error"); }
+  },
+
+  async runDispatchAll() {
+    const unassigned=AppState.shipments.filter(s=>
+      !s.courierId&&!["delivered","returned","cancelled"].includes(s.status)
+    );
+    if (!unassigned.length) { toast("لا توجد شحنات غير مُعيَّنة","info"); return; }
+    if (!confirm(`تشغيل التوزيع التلقائي على ${unassigned.length} شحنة؟`)) return;
+    const codes=unassigned.map(s=>s.id);
+    toast("جاري التوزيع...","info");
+    try {
+      const result=await DB.runBatchDispatch(codes);
+      // Update local AppState from server result
+      if (result.results) {
+        (Array.isArray(result.results)?result.results:Object.values(result.results)).forEach(r=>{
+          if (r?.success) {
+            const s=AppState.shipments.find(x=>x.id===r.shipment_code);
+            if(s){ s.courierId=r.courier_id; s.courierName=r.courier_name; }
+          }
+        });
+      }
+      await DB.addAudit("AUTO_DISPATCH_RUN","",
+        `Assigned:${result.assigned} Skipped:${result.skipped} Failed:${result.failed} By:${AppState.user.name}`,
+        "dispatch");
+      AppState.dispatchLog=await DB.loadDispatchLog(50);
+      rerenderContent();
+      toast(`✅ التوزيع مكتمل: ${result.assigned} مُعيَّنة · ${result.failed} فشل · ${result.skipped} تخطي`);
+    } catch(err) { toast("فشل التوزيع: "+err.message,"error"); }
   },
 
   // ── Advanced Search & Filter ──────────────────────────────
