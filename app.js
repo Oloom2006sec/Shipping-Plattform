@@ -1818,7 +1818,10 @@ function postRender() {
     AppState._dispatchDataLoaded = true;
     App.loadDispatchData();
   }
-  if(AppState.view==="liveops") App.loadDriverLocations();
+  if(AppState.view==="liveops"){
+    // Load driver locations into AppState for the courier board map
+    DB.loadDriverLocations().then(locs=>{ AppState.driverLocations=locs; }).catch(()=>{});
+  }
   if(AppState.view==="liveops"){
     // Throttle: only auto-refresh if >10s since last refresh to prevent
     // cascading DB calls when RT events arrive in bursts
@@ -6924,7 +6927,7 @@ const App={
           <div class="field">
             <label>الأولوية (1 = الأعلى)</label>
             <input id="drPriority" type="number" min="1" max="999"
-              value="${existing?.priority||rules.length+1||1}"/>
+              value="${existing?.priority||(AppState.dispatchRules.length+1)||1}"/>
           </div>
         </div>
         <div class="field">

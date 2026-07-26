@@ -238,3 +238,35 @@ Before fixing any bug report, check this file first — if the symptom matches a
 **Root cause:** `read_at` was added to application code but never added to the migration SQL. The column doesn't exist in production.
 **Fix:** Removed `read_at` from all 4 notification update calls. Only `is_read:true` is written. If `read_at` is needed in the future, add `ALTER TABLE notifications ADD COLUMN IF NOT EXISTS read_at timestamptz;` to a migration.
 **Fixed:** Progress Report Bug Sprint
+
+---
+
+### 🟢 #26 — Dispatch migration failed: update_updated_at_column() does not exist
+**Symptom:** Running `phase_dispatch_migration.sql` in Supabase failed with `ERROR 42883: function update_updated_at_column() does not exist`.
+**Root cause:** The migration referenced `update_updated_at_column()` in a trigger, but the production schema defines the helper as `set_updated_at()`. Additionally: (1) `INSERT INTO permissions` used `name` column but the table schema defines `label`; (2) `v_result->>'reason' IN (...)` is invalid PL/pgSQL syntax — must use `= ANY(ARRAY[...])`; (3) trigger and policy CREATE statements were not idempotent (no DROP IF EXISTS before CREATE TRIGGER, no DROP POLICY IF EXISTS).
+**Fix (v2 migration):**
+- Added `CREATE OR REPLACE FUNCTION set_updated_at()` at the top — self-contained, no external dependency
+- All triggers: `DROP TRIGGER IF EXISTS` before `CREATE TRIGGER`
+- All policies: `DROP POLICY IF EXISTS` before `CREATE POLICY`
+- `INSERT INTO permissions`: changed `name` → `label` (correct column), added `ON CONFLICT (code) DO NOTHING`
+- `auto_assign_batch`: changed `IN (...)` to `= ANY(ARRAY[...])`, added per-row `EXCEPTION WHEN OTHERS THEN` handler, added NULL input guard
+- `service_type` / `order_type` NULL guards added (these columns are nullable on rows created before phase1 migration)
+- No `DROP TABLE` — safe on databases with existing data
+- Verification query included as comment block at end of file
+**Fixed:** Dispatch migration v2
+**Prevention rule:** Never reference functions defined in a previous migration without first verifying they exist. Always include `CREATE OR REPLACE FUNCTION` for any helper a migration uses. Always use `DROP ... IF EXISTS` before `CREATE TRIGGER` and `CREATE POLICY`. Always check the actual column names in the target table before writing INSERT statements.
+
+---
+
+### 🟢 #27 — openDispatchRuleModal: ReferenceError: rules is not defined
+**Symptom:** Clicking "Create Rule" or "تعديل" in the Dispatch view threw `ReferenceError: rules is not defined`.
+**Root cause:** `openDispatchRuleModal(ruleId)` referenced `rules.length+1` to calculate the default priority. `rules` is a local variable declared inside `viewDispatch()` and is not accessible inside App methods. The App method has no local `rules` variable.
+**Fix:** Changed `rules.length+1` to `AppState.dispatchRules.length+1`. AppState is always accessible from any App method.
+**Fixed:** P1 regression sprint
+
+### 🟢 #28 — Live Operations: TypeError: App.loadDriverLocations is not a function
+**Symptom:** Navigating to Live Operations threw `TypeError: App.loadDriverLocations is not a function`. This aborted `postRender()`, causing the activity feed to be empty and all liveops widgets to stop updating.
+**Root cause:** `postRender()` contained `App.loadDriverLocations()` — added during the interrupted P2 (Driver Location Tracking) session. The `DB.loadDriverLocations()` method exists on the DB object but was never added to the `App` object. `postRender` called a non-existent App method.
+**Fix:** Changed `App.loadDriverLocations()` to `DB.loadDriverLocations().then(locs=>{ AppState.driverLocations=locs; }).catch(()=>{})` — calls the existing DB method directly, stores result in AppState, fire-and-forget (does not block postRender).
+**Fixed:** P1 regression sprint
+**Prevention rule:** Never reference `App.X()` in postRender or event handlers without first confirming `X` is defined in the App object. The global error handler (bug #21) will surface these as toasts in production, but the damage is already done by the time it fires.
