@@ -1821,6 +1821,8 @@ function postRender() {
   if(AppState.view==="liveops"){
     // Load driver locations into AppState for the courier board map
     DB.loadDriverLocations().then(locs=>{ AppState.driverLocations=locs; }).catch(()=>{});
+    // Init map after DOM is ready
+    setTimeout(()=>App.initLiveOpsMap(), 50);
   }
   if(AppState.view==="liveops"){
     // Throttle: only auto-refresh if >10s since last refresh to prevent
@@ -2367,8 +2369,29 @@ function detailPanel(s) {
 // ── TASKS VIEW ────────────────────────────────────────────
 function viewTasks() {
   const list=visible().filter(s=>!["delivered","returned","cancelled"].includes(s.status));
-  if(!list.length) return `<div class="empty"><div class="empty-icon">✅</div><h3>لا توجد مهام معلقة</h3><p>كل الشحنات تم تسليمها أو لم يتم تعيينك بعد</p></div>`;
+  const broadcastBanner=`
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+      border-radius:var(--radius);margin-bottom:4px;font-size:13px;
+      background:${AppState.locationBroadcasting?"var(--success-bg)":"var(--gray-50)"};
+      border:1px solid ${AppState.locationBroadcasting?"var(--success-border,#bbf7d0)":"var(--gray-200)"};">
+      <span style="font-size:18px;">${AppState.locationBroadcasting?"🟢":"⚫"}</span>
+      <div style="flex:1;">
+        <div style="font-weight:600;">${AppState.locationBroadcasting?"بث الموقع نشط":"بث الموقع متوقف"}</div>
+        <div style="font-size:11px;color:var(--gray-500);">
+          ${AppState.locationBroadcasting?"يرى المدير موقعك على الخريطة الآن":"شغّل البث حتى يتمكن المدير من تتبع موقعك"}
+        </div>
+      </div>
+      <button class="btn btn-sm"
+        style="background:${AppState.locationBroadcasting?"var(--danger)":"var(--success)"};color:#fff;border:none;"
+        onclick="App.toggleLocationBroadcast()">
+        ${AppState.locationBroadcasting?"إيقاف البث":"تشغيل البث"}
+      </button>
+    </div>`;
+  if(!list.length) return `<div>${broadcastBanner}
+    <div class="empty"><div class="empty-icon">✅</div><h3>لا توجد مهام معلقة</h3><p>كل الشحنات تم تسليمها أو لم يتم تعيينك بعد</p></div>
+  </div>`;
   return `<div style="display:flex;flex-direction:column;gap:14px;">
+    ${broadcastBanner}
     ${list.map(s=>`
       <div class="card">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;">
@@ -4653,14 +4676,41 @@ function viewLiveOps() {
 
     <!-- Needs attention section -->
     ${needsAttention.length?`
-      <div class="card" style="margin-top:16px;border-right:4px solid var(--warning);">
-        <div class="card-header" style="margin-bottom:12px;">
-          <h3 class="card-title">⚠️ تحتاج مراجعة (${needsAttention.length})</h3>
+    <!-- Live driver map -->
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header" style="margin-bottom:0;">
+        <h3 class="card-title">🗺️ خريطة المناديب المباشرة</h3>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span style="font-size:12px;color:var(--gray-400);">
+            ${Object.values(AppState.driverLocations||{}).filter(l=>l.isOnline).length} متصل
+          </span>
+          <button class="btn btn-secondary btn-sm" onclick="App._renderLiveOpsMap()">🔄 تحديث</button>
         </div>
-        <div class="table-wrap">
-          ${shipTable(needsAttention.slice(0,15))}
+      </div>
+      <div id="liveOpsMap" style="height:300px;border-radius:0 0 var(--radius) var(--radius);background:var(--gray-100);"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px;border-right:4px solid var(--warning);">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">⚠️ تحتاج مراجعة (${needsAttention.length})</h3>
+      </div>
+      <div class="table-wrap">
+        ${shipTable(needsAttention.slice(0,15))}
+      </div>
+    </div>`:`
+    <!-- Live driver map (shown when nothing needs attention) -->
+    <div class="card" style="margin-top:16px;">
+      <div class="card-header" style="margin-bottom:0;">
+        <h3 class="card-title">🗺️ خريطة المناديب المباشرة</h3>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <span style="font-size:12px;color:var(--gray-400);">
+            ${Object.values(AppState.driverLocations||{}).filter(l=>l.isOnline).length} متصل
+          </span>
+          <button class="btn btn-secondary btn-sm" onclick="App._renderLiveOpsMap()">🔄 تحديث</button>
         </div>
-      </div>`:""}
+      </div>
+      <div id="liveOpsMap" style="height:300px;border-radius:0 0 var(--radius) var(--radius);background:var(--gray-100);"></div>
+    </div>`}
   </div>`;
 }
 
@@ -6881,6 +6931,200 @@ const App={
       errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
       btn.disabled=false; btn.textContent="📤 إرسال";
     }
+  },
+
+  // ── P2: Driver Location Tracking ─────────────────────────────
+  async startLocationBroadcast() {
+    if (!navigator.geolocation) {
+      toast("هذا الجهاز لا يدعم تحديد الموقع","warning"); return;
+    }
+    if (AppState.locationBroadcasting) {
+      toast("بث الموقع نشط بالفعل","info"); return;
+    }
+    toast("🛵 جاري تفعيل بث الموقع...","info");
+    AppState._locationWatchId = navigator.geolocation.watchPosition(
+      async pos => {
+        const { latitude:lat, longitude:lng, accuracy, speed, heading } = pos.coords;
+        let battery = null;
+        try {
+          if (navigator.getBattery) {
+            const b = await navigator.getBattery();
+            battery = Math.round(b.level * 100);
+          }
+        } catch {}
+        try {
+          await DB.updateMyLocation(lat, lng, accuracy, speed, heading, battery);
+          AppState.driverLocations[AppState.user.id] = {
+            courierId:   AppState.user.id,
+            courierName: AppState.user.name,
+            lat, lng, accuracy, speed, heading, battery,
+            isOnline:    true,
+            lastSeenAt:  new Date().toISOString(),
+          };
+        } catch(err) { console.warn("Location update failed:", err.message); }
+      },
+      err => console.warn("Geolocation error:", err.message),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+    );
+    AppState.locationBroadcasting = true;
+    rerenderContent();
+    toast("✅ بث الموقع نشط — سيرى المدير موقعك على الخريطة");
+    window.addEventListener("beforeunload", () => {
+      DB.markMyselfOffline();
+      if (AppState._locationWatchId !== null) {
+        navigator.geolocation.clearWatch(AppState._locationWatchId);
+      }
+    }, { once: true });
+  },
+
+  stopLocationBroadcast() {
+    if (AppState._locationWatchId !== null) {
+      navigator.geolocation.clearWatch(AppState._locationWatchId);
+      AppState._locationWatchId = null;
+    }
+    AppState.locationBroadcasting = false;
+    DB.markMyselfOffline();
+    rerenderContent();
+    toast("تم إيقاف بث الموقع","info");
+  },
+
+  async showCourierHistory(courierId, courierName) {
+    toast("جاري تحميل مسار اليوم...","info");
+    const trail = await DB.loadLocationHistory(courierId, 8);
+    if (!trail.length) {
+      toast("لا توجد بيانات موقع لهذا المندوب اليوم","info"); return;
+    }
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header">
+        <h3>🗺️ مسار ${esc(courierName)} — آخر 8 ساعات</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body" style="padding:0;">
+        <div id="historyMap" style="height:420px;width:100%;border-radius:0 0 var(--radius) var(--radius);"></div>
+        <div style="padding:12px 16px;font-size:12px;color:var(--gray-500);">
+          ${trail.length} نقطة تتبع · من ${fmtTime(trail[0]?.recordedAt)} إلى ${fmtTime(trail[trail.length-1]?.recordedAt)}
+        </div>
+      </div>
+    </div>`);
+    setTimeout(() => App._renderHistoryMap(trail), 150);
+  },
+
+  _renderHistoryMap(trail) {
+    App._ensureLeaflet(() => {
+      const mapEl = $("historyMap");
+      if (!mapEl) return;
+      const bounds = trail.map(p=>[p.lat, p.lng]);
+      const map    = L.map(mapEl).fitBounds(bounds, { padding:[20,20] });
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{
+        attribution:"© OpenStreetMap", maxZoom:19
+      }).addTo(map);
+      L.polyline(bounds, {color:"#6366f1", weight:3, opacity:.8}).addTo(map);
+      L.circleMarker(bounds[0],
+        {radius:8, color:"#22c55e", fillColor:"#22c55e", fillOpacity:1})
+        .bindPopup("بداية الجولة: "+fmtTime(trail[0].recordedAt)).addTo(map);
+      L.circleMarker(bounds[bounds.length-1],
+        {radius:8, color:"#ef4444", fillColor:"#ef4444", fillOpacity:1})
+        .bindPopup("آخر موقع: "+fmtTime(trail[trail.length-1].recordedAt)).addTo(map);
+    });
+  },
+
+  initLiveOpsMap() {
+    App._ensureLeaflet(() => App._renderLiveOpsMap());
+  },
+
+  _renderLiveOpsMap() {
+    const mapEl = $("liveOpsMap");
+    if (!mapEl || !window.L) return;
+    // Destroy existing instance to prevent duplicate map error
+    if (mapEl._leaflet_id) {
+      try { mapEl._leaflet_map?.remove(); } catch {}
+      mapEl.innerHTML = "";
+      delete mapEl._leaflet_id;
+    }
+    const locs = Object.values(AppState.driverLocations || {})
+      .filter(l => l.isOnline && l.lat && l.lng);
+
+    const center = locs.length
+      ? [locs.reduce((a,l)=>a+l.lat,0)/locs.length,
+         locs.reduce((a,l)=>a+l.lng,0)/locs.length]
+      : [30.0444, 31.2357]; // Cairo default
+
+    const map = L.map(mapEl, {zoomControl:true})
+      .setView(center, locs.length ? 11 : 9);
+    mapEl._leaflet_map = map;
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{
+      attribution:"© OpenStreetMap", maxZoom:19
+    }).addTo(map);
+
+    if (!locs.length) {
+      const info = L.control({position:"topright"});
+      info.onAdd = () => {
+        const d = document.createElement("div");
+        d.style.cssText = "background:#fff;padding:8px 12px;border-radius:6px;font-size:12px;color:#6b7280;";
+        d.textContent = "لا يوجد مناديب متصلون الآن";
+        return d;
+      };
+      info.addTo(map);
+      return;
+    }
+
+    locs.forEach(l => {
+      const markerIcon = L.divIcon({
+        className: "",
+        html: `<div style="width:36px;height:36px;border-radius:50%;
+          background:#6366f1;border:3px solid #fff;
+          box-shadow:0 2px 8px rgba(0,0,0,.3);
+          display:flex;align-items:center;justify-content:center;
+          color:#fff;font-size:12px;font-weight:700;">
+          ${initials(l.courierName)}
+        </div>`,
+        iconSize:[36,36], iconAnchor:[18,18], popupAnchor:[0,-20],
+      });
+      L.marker([l.lat, l.lng], {icon:markerIcon})
+        .addTo(map)
+        .bindPopup(`
+          <div style="min-width:160px;font-family:Arial;direction:rtl;text-align:right;">
+            <div style="font-weight:700;font-size:13px;margin-bottom:4px;">${esc(l.courierName)}</div>
+            ${l.speed!=null?`<div style="font-size:11px;color:#6b7280;">🚀 ${Math.round(l.speed||0)} كم/س</div>`:""}
+            ${l.battery!=null?`<div style="font-size:11px;color:#6b7280;">🔋 ${l.battery}%</div>`:""}
+            <div style="font-size:11px;color:#6b7280;">⏱️ ${fmtTime(l.lastSeenAt)}</div>
+            <button onclick="App.showCourierHistory('${esc(l.courierId)}','${esc(l.courierName)}')"
+              style="margin-top:8px;width:100%;padding:5px;border-radius:4px;
+                border:1px solid #6366f1;background:#fff;color:#6366f1;
+                cursor:pointer;font-size:11px;">
+              📍 عرض المسار
+            </button>
+          </div>`);
+    });
+  },
+
+  _ensureLeaflet(callback) {
+    if (window.L) { callback(); return; }
+    if (!document.querySelector('link[href*="leaflet"]')) {
+      const css = document.createElement("link");
+      css.rel = "stylesheet";
+      css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+      document.head.appendChild(css);
+    }
+    if (!document.querySelector('script[src*="leaflet"]')) {
+      const js = document.createElement("script");
+      js.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+      js.onload = callback;
+      js.onerror = () => toast("فشل تحميل مكتبة الخرائط","warning");
+      document.head.appendChild(js);
+    } else {
+      // Script tag exists but not yet loaded — poll
+      const poll = setInterval(() => {
+        if (window.L) { clearInterval(poll); callback(); }
+      }, 100);
+    }
+  },
+
+  // ── P2: Courier location broadcast toggle in viewTasks ────────
+  toggleLocationBroadcast() {
+    if (AppState.locationBroadcasting) App.stopLocationBroadcast();
+    else App.startLocationBroadcast();
   },
 
   // ── Auto-Dispatch Engine ──────────────────────────────────────
