@@ -1330,3 +1330,25 @@ body {
   .prog-circle { width: 24px; height: 24px; font-size: 9px; }
   .prog-line { margin-top: 11px; }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   P2 — DRIVER LOCATION TRACKING
+   ══════════════════════════════════════════════════════════════ */
+
+/* Prevent Leaflet marker icons from breaking */
+.leaflet-container { font-family: Arial, sans-serif; }
+
+/* Map container in liveops */
+#liveOpsMap {
+  z-index: 1;
+}
+
+/* History map in modal */
+#historyMap {
+  z-index: 1;
+}
+
+@media (max-width: 768px) {
+  #liveOpsMap  { height: 220px !important; }
+  #historyMap  { height: 300px !important; }
+}
