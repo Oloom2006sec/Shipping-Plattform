@@ -58,6 +58,19 @@ const SMS_CONFIG = {
   },
 };
 
+// ── SMS Trigger Configuration ─────────────────────────────────────
+// Controls which status changes send automatic SMS to the customer.
+// Set enabled:false for any status to suppress that notification.
+// Messages use template literals — available vars: name, code, status
+const SMS_TRIGGERS = {
+  picked_up:        { enabled:true,  template:(s)=>`مرحباً ${s.customerName}، تم استلام شحنتك رقم ${s.id} وهي في طريقها إليك. النخبة للشحن السريع.` },
+  out_for_delivery: { enabled:true,  template:(s)=>`مرحباً ${s.customerName}، شحنتك رقم ${s.id} خرجت للتسليم اليوم. يرجى الاستعداد لاستلامها. النخبة للشحن السريع.` },
+  delivered:        { enabled:true,  template:(s)=>`مرحباً ${s.customerName}، تم تسليم شحنتك رقم ${s.id} بنجاح. شكراً لثقتك بنا. النخبة للشحن السريع.` },
+  returned:         { enabled:true,  template:(s)=>`مرحباً ${s.customerName}، تعذّر تسليم شحنتك رقم ${s.id} وتم إرجاعها. للاستفسار تواصل مع التاجر. النخبة للشحن السريع.` },
+  rescheduled:      { enabled:false, template:(s)=>`مرحباً ${s.customerName}، تم إعادة جدولة تسليم شحنتك رقم ${s.id}. سنتواصل معك قريباً. النخبة للشحن السريع.` },
+  at_branch:        { enabled:false, template:(s)=>`مرحباً ${s.customerName}، شحنتك رقم ${s.id} وصلت إلى أقرب فرع وستُسلَّم قريباً. النخبة للشحن السريع.` },
+};
+
 const STATUS_MAP = {
   draft:            { label:"مسودة",             badge:"badge-gray",    step:0  },
   submitted:        { label:"تم الإرسال",        badge:"badge-info",    step:1  },
@@ -6915,6 +6928,27 @@ const App={
           ⚠️ <b>ملاحظة أمنية:</b> يتم حفظ الإعدادات في ذاكرة المتصفح فقط (لا يتم تخزينها في Supabase).
           للاستخدام الدائم، ضع الإعدادات في <code>SMS_CONFIG</code> في أول ملف <code>app.js</code>.
         </div>
+
+        <!-- P4: SMS Trigger settings -->
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--gray-200);">
+          <label style="font-weight:600;display:block;margin-bottom:10px;">
+            📲 إشعارات SMS التلقائية
+          </label>
+          <div style="font-size:12px;color:var(--gray-500);margin-bottom:10px;">
+            تُرسَل تلقائياً عند تغيير حالة الشحنة — تتطلب مزود SMS نشط (غير وضع الاختبار)
+          </div>
+          ${Object.entries(SMS_TRIGGERS).map(([status, cfg])=>`
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 0;
+              border-bottom:1px solid var(--gray-100);cursor:pointer;font-size:13px;">
+              <input type="checkbox" ${cfg.enabled?"checked":""}
+                onchange="SMS_TRIGGERS['${status}'].enabled=this.checked"/>
+              <span style="min-width:120px;">${STATUS_MAP[status]?.label||status}</span>
+              <span style="font-size:11px;color:var(--gray-400);flex:1;overflow:hidden;
+                text-overflow:ellipsis;white-space:nowrap;" title="${cfg.template({customerName:'العميل',id:'ANE-XXXXXX'})}">
+                ${cfg.template({customerName:"العميل",id:"ANE-XXXXXX"}).slice(0,50)}…
+              </span>
+            </label>`).join("")}
+        </div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="Modals.close()">إغلاق</button>
@@ -7204,6 +7238,29 @@ const App={
     } catch(err) {
       errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
       btn.disabled=false; btn.textContent="📤 إرسال";
+    }
+  },
+
+  // ── P4: Proactive SMS Notifications ──────────────────────────
+  async _sendStatusSMS(shipment, status) {
+    // Only fires when:
+    // 1. SMS provider is not stub
+    // 2. Trigger is enabled for this status
+    // 3. Customer has a phone number
+    const trigger = SMS_TRIGGERS[status];
+    if (!trigger?.enabled) return;
+    if (SMS_CONFIG.provider === "stub") return;
+    if (!shipment.customerPhone) return;
+
+    try {
+      const message = trigger.template(shipment);
+      await DB.sendSMS(shipment.customerPhone, message);
+      await DB.addAudit("SMS_SENT", shipment.id,
+        `Status:${status} Phone:${shipment.customerPhone} By:${AppState.user.name}`, "sms");
+      // Silent success — don't toast unless debugging
+    } catch(err) {
+      console.warn("SMS failed for", shipment.id, err.message);
+      // Don't block the UI — SMS failure is non-critical
     }
   },
 
@@ -8138,7 +8195,10 @@ const App={
         await DB.addTimeline(id, `تغيير جماعي إلى: ${label}`,
           AppState.user.name, AppState.user.primary_role||AppState.user.role, "status_change");
         const s = AppState.shipments.find(x=>x.id===id);
-        if (s) s.status = status;
+        if (s) {
+          s.status = status;
+          App._sendStatusSMS(s, status); // Proactive SMS — fire-and-forget
+        }
         done++;
       } catch { failed++; }
     }
@@ -9558,12 +9618,8 @@ const App={
       await DB.addTimeline(id,STATUS_MAP[status]?.label||status,AppState.user.name,(AppState.user.primary_role||AppState.user.role));
       await DB.addNotification(`شحنة ${id} → ${STATUS_MAP[status]?.label}`,"admin",id);
       await DB.addAudit("UPDATE_STATUS",id,`→ ${status} by ${AppState.user.name}`);
-      if(status==="delivered"||status==="returned"){
-        if(confirm("إرسال إشعار واتساب للعميل؟")){
-          const msg=`مرحباً ${s.customerName}\n\nشحنتك: ${s.id}\nالحالة: ${STATUS_MAP[status]?.label}\n\nالنخبة للشحن السريع`;
-          window.open(`https://wa.me/2${s.customerPhone}?text=${encodeURIComponent(msg)}`);
-        }
-      }
+      // Proactive SMS — fires automatically if provider is configured and trigger is enabled
+      App._sendStatusSMS(s, status);
       rerenderContent();toast(`تم تحديث الشحنة ${id}`);
     }catch(err){toast("خطأ في التحديث: "+err.message,"error");}
   },
