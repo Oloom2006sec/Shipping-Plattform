@@ -565,3 +565,105 @@ Completely rewrote `PROJECT_STATE.md` to reflect actual July 2026 state: 8,619 l
 
 ### Architecture note
 Customer data model: shipments are linked to customers by `customer_phone` field, not by `customer_id` (customers can track without an account via the public URL). Authenticated customers see all shipments matching their registered phone number.
+
+## Auto-Dispatch Engine (P1 Enterprise Roadmap)
+**Migration:** `phase_dispatch_migration.sql` — run before deploying app.js
+**Breaking:** No — new nav tab, new tables, no changes to existing logic.
+
+### New DB objects (migration)
+- `dispatch_rules` table — rule definitions with priority ordering, matching conditions, assignment strategy
+- `courier_configs` table — per-courier capacity, zone tags, service capabilities, availability toggle
+- `dispatch_log` table — append-only record of every dispatch decision
+- `get_courier_load_today(courier_id)` — SQL function for capacity check (called inside engine)
+- `auto_assign_shipment(shipment_code)` — PL/pgSQL dispatch engine: evaluates rules in priority order, assigns courier, writes to dispatch_log, returns JSON result
+- `auto_assign_batch(codes[])` — batch wrapper: calls engine per code, returns summary stats
+- 5 new permission codes: `dispatch.view_rules`, `dispatch.manage_rules`, `dispatch.run`, `dispatch.view_log`, `dispatch.manage_configs`
+
+### 4 assignment strategies (server-side in PL/pgSQL)
+- `specific_courier` — assign to one named courier if under capacity
+- `zone_pool` — assign to least-loaded courier in a zone (matched by zone_tag)
+- `least_loaded` — assign to whichever eligible courier has fewest active shipments today
+- `best_performer` — assign to courier with highest 30-day delivery rate
+
+### Admin nav — new tab "التوزيع التلقائي" (15th tab)
+### viewDispatch() — 4-tab dispatch management UI
+- **قواعد التوزيع** — rule list with priority, matching conditions, strategy, enable/disable toggle, edit/delete
+- **إعداد المناديب** — courier config table (capacity, zone tags, service capabilities, availability), auto-configure all button
+- **معاينة** — client-side simulation of dispatch results before committing (shows which courier would be assigned and why)
+- **سجل التوزيع** — full dispatch log with rule name and strategy per decision
+
+### New DB methods (8)
+`loadDispatchRules` · `saveDispatchRule` · `deleteDispatchRule` · `loadCourierConfigs` · `saveCourierConfig` · `runAutoDispatch` · `runBatchDispatch` · `loadDispatchLog`
+
+### New App methods (13)
+`setDispatchTab` · `loadDispatchData` · `openDispatchRuleModal` · `saveDispatchRule` · `deleteDispatchRule` · `toggleDispatchRule` · `openCourierConfigModal` · `saveCourierConfig` · `toggleCourierAvailability` · `autoCreateCourierConfigs` · `runDispatchPreview` · `confirmDispatch` · `runDispatchAll`
+
+## P2 — Driver Location Tracking
+**Migration:** `phase_driver_location_migration.sql` — run before deploying
+**Breaking:** No — purely additive.
+
+### New DB objects (migration)
+- `driver_locations` table — one row per courier, upserted on each GPS update (lat, lng, accuracy, speed, heading, battery, is_online, last_seen_at)
+- `driver_location_history` table — append-only trail (sampled on every update, indexed by courier + time)
+- `update_driver_location()` — upserts latest position + appends to history
+- `mark_driver_offline()` — sets is_online=false when courier closes app
+- 4 permissions: `location.view_all`, `location.view_own`, `location.broadcast`, `location.history`
+
+### New App methods (9)
+- `startLocationBroadcast()` — calls `navigator.geolocation.watchPosition`, sends updates via `DB.updateMyLocation()`, stores in `AppState.driverLocations`, registers beforeunload cleanup
+- `stopLocationBroadcast()` — clears watchPosition, calls `DB.markMyselfOffline()`
+- `toggleLocationBroadcast()` — start/stop toggle
+- `showCourierHistory(courierId, name)` — loads last 8h trail, opens modal with Leaflet polyline map
+- `_renderHistoryMap(trail)` — draws trail + start/end markers on Leaflet map
+- `initLiveOpsMap()` — loads Leaflet dynamically if needed, then renders
+- `_renderLiveOpsMap()` — renders all online couriers as avatar markers with speed/battery/time popups and "عرض المسار" button
+- `_ensureLeaflet(callback)` — loads Leaflet CSS+JS from CDN if not present, fires callback when ready
+
+### viewTasks() — courier GPS broadcast banner
+- Green/gray banner at top of courier task list showing broadcast status
+- "تشغيل البث" / "إيقاف البث" toggle button
+- Shown in both empty-state and task-list views
+
+### viewLiveOps() — live map panel
+- New map card below the 3-column grid: `id="liveOpsMap"`, height 300px
+- Shows all online couriers as circular avatar markers (initials + brand color)
+- Marker popups: name, speed, battery, last-seen time, "عرض المسار" button
+- Refresh button (re-renders markers from AppState)
+- Online courier count displayed in card header
+- Map initialised via postRender: `DB.loadDriverLocations()` → `AppState.driverLocations` → `setTimeout(App.initLiveOpsMap, 50)`
+
+### Leaflet integration
+- Loaded dynamically from CDN (unpkg.com/leaflet@1.9.4) — not bundled
+- Only loaded when liveops map or history map is actually rendered
+- Duplicate map instance prevention via `_leaflet_id` check + `remove()`
+- Default center: Cairo (30.0444, 31.2357) when no couriers are online
+
+## P3 — SLA Monitoring & Alerts
+**Migration:** `phase_sla_migration.sql` — run before deploying
+**Breaking:** No — purely additive.
+
+### New DB objects
+- `sla_configs` — SLA target definitions: delivery hours, warning hours, optional per-merchant and per-service-type scoping. Global config (merchant_id NULL) applies to all; merchant-specific takes priority.
+- `sla_breaches` — append-only breach log: shipment_id (FK to shipments.id), breach_type (delivery/warning), target_hours, actual_hours, status (open/acknowledged/resolved)
+- `check_sla_breaches()` — SQL function: scans active shipments, applies most-specific matching SLA config, returns new breach rows (deduplicates via NOT EXISTS), does not INSERT (app layer handles that)
+- `get_sla_summary()` — returns JSON counts: open_breaches, open_warnings, acknowledged, resolved_today, total_open
+- Default global SLA config: 48h delivery, 4h warning (inserted only if none exists)
+- 4 permissions: `sla.view`, `sla.manage`, `sla.acknowledge`, `sla.resolve`
+
+### Admin nav — new tab "مستوى الخدمة SLA" (16th tab, after reports)
+
+### viewSLA() — 4-tab SLA management UI
+- **الخروقات** — open delivery breaches table with acknowledge/resolve actions, "فحص الآن" button
+- **تحذيرات** — early warnings (shipments approaching SLA limit)
+- **السجل** — acknowledged + resolved breach history
+- **الإعدادات** — SLA config CRUD: label, target hours, warn hours, service type filter, merchant filter, active toggle
+
+### Admin overview — SLA breach banner
+- Red alert banner appears at top of admin overview when open delivery breaches exist
+- Shows count + "عرض التفاصيل" button navigating directly to SLA tab
+
+### New DB methods (8)
+`loadSLAConfigs` · `saveSLAConfig` · `deleteSLAConfig` · `loadSLABreaches` · `runSLACheck` · `acknowledgeSLABreach` · `resolveSLABreach` · `getSLASummary`
+
+### New App methods (9)
+`setSLATab` · `loadSLAData` · `runSLACheck` · `acknowledgeSLABreach` · `resolveSLABreach` · `openSLAConfigModal` · `saveSLAConfig` · `deleteSLAConfig` · `toggleSLAConfig`

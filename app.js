@@ -100,7 +100,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","users","merchants","import","audit","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","accounts"] }
@@ -110,7 +110,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -272,6 +272,8 @@ const AppState = {
   dispatchRules:[], courierConfigs:[], _dispatchDataLoaded:false,
   // Driver location tracking
   driverLocations:{}, locationBroadcasting:false, _locationWatchId:null,
+  // SLA monitoring
+  slaConfigs:[], slaBreaches:[], slaSummary:{}, _slaDataLoaded:false,
   // Advanced search filters
   advancedFilter: {
     dateFrom:"", dateTo:"", amountMin:"", amountMax:"",
@@ -861,6 +863,84 @@ const DB = {
       };
     });
     return map;
+  },
+
+  // ── SLA Monitoring ────────────────────────────────────────────
+  async loadSLAConfigs() {
+    const { data, error } = await db.from("sla_configs")
+      .select("*").order("merchant_id",{nullsFirst:true}).order("created_at");
+    if (error) { console.warn("loadSLAConfigs:", error.message); return []; }
+    return data || [];
+  },
+
+  async saveSLAConfig(payload) {
+    if (payload.id) {
+      const { error } = await db.from("sla_configs").update(payload).eq("id", payload.id);
+      if (error) throw error;
+    } else {
+      const { error } = await db.from("sla_configs")
+        .insert([{ ...payload, created_by: AppState.user.id }]);
+      if (error) throw error;
+    }
+  },
+
+  async deleteSLAConfig(id) {
+    const { error } = await db.from("sla_configs").delete().eq("id", id);
+    if (error) throw error;
+  },
+
+  async loadSLABreaches(statusFilter) {
+    let q = db.from("sla_breaches").select("*")
+      .order("created_at", { ascending: false }).limit(100);
+    if (statusFilter) q = q.eq("status", statusFilter);
+    const { data, error } = await q;
+    if (error) { console.warn("loadSLABreaches:", error.message); return []; }
+    return data || [];
+  },
+
+  async runSLACheck() {
+    // Call the DB function to detect breaches
+    const { data, error } = await db.rpc("check_sla_breaches");
+    if (error) throw error;
+    if (!data?.length) return { inserted: 0 };
+    // Insert newly detected breaches
+    const rows = data.map(r => ({
+      shipment_id:    r.shipment_id,
+      shipment_code:  r.shipment_code,
+      merchant_id:    r.merchant_id,
+      merchant_name:  r.merchant_name,
+      sla_config_id:  r.sla_config_id,
+      breach_type:    r.breach_type,
+      target_hours:   r.target_hours,
+      actual_hours:   r.actual_hours,
+      status:         "open",
+    }));
+    const { error: insErr } = await db.from("sla_breaches").insert(rows);
+    if (insErr) throw insErr;
+    return { inserted: rows.length };
+  },
+
+  async acknowledgeSLABreach(id) {
+    const { error } = await db.from("sla_breaches").update({
+      status:           "acknowledged",
+      acknowledged_by:  AppState.user.id,
+      acknowledged_at:  new Date().toISOString(),
+    }).eq("id", id);
+    if (error) throw error;
+  },
+
+  async resolveSLABreach(id) {
+    const { error } = await db.from("sla_breaches").update({
+      status:       "resolved",
+      resolved_at:  new Date().toISOString(),
+    }).eq("id", id);
+    if (error) throw error;
+  },
+
+  async getSLASummary() {
+    const { data, error } = await db.rpc("get_sla_summary");
+    if (error) { console.warn("getSLASummary:", error.message); return {}; }
+    return data || {};
   },
 
   async updateMyLocation(lat, lng, accuracy, speed, heading, battery) {
@@ -1701,6 +1781,7 @@ function renderView() {
     case"cshipments": return viewCustomerShipments();
     case"import":     return viewImport();
     case"dispatch":   return viewDispatch();
+    case"sla":        return viewSLA();
     case"liveops":    return viewLiveOps();
     default:
       if((AppState.user?.primary_role||AppState.user?.role)==="customer") return viewCustomerOverview();
@@ -1817,6 +1898,10 @@ function postRender() {
   if(AppState.view==="dispatch" && !AppState._dispatchDataLoaded){
     AppState._dispatchDataLoaded = true;
     App.loadDispatchData();
+  }
+  if(AppState.view==="sla" && !AppState._slaDataLoaded){
+    AppState._slaDataLoaded = true;
+    App.loadSLAData();
   }
   if(AppState.view==="liveops"){
     // Load driver locations into AppState for the courier board map
@@ -1984,6 +2069,14 @@ function viewOverview() {
   }
 
   return `
+    ${(AppState.slaBreaches||[]).filter(b=>b.status==="open"&&b.breach_type==="delivery").length>0?`
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:var(--radius);
+      background:var(--danger-bg);border:1px solid var(--danger-border);margin-bottom:12px;font-size:13px;">
+      🚨 <b>${(AppState.slaBreaches||[]).filter(b=>b.status==="open"&&b.breach_type==="delivery").length}</b>
+      شحنة تجاوزت مستوى الخدمة المتفق عليه
+      <button class="btn btn-secondary btn-sm" style="margin-right:auto;color:var(--danger);"
+        onclick="AppState.view='sla';AppState._slaDataLoaded=false;rerenderContent();">عرض التفاصيل</button>
+    </div>`:""}
     ${SMS_CONFIG.provider==="stub"?`
     <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-radius:var(--radius);
       background:var(--warning-bg);border:1px solid var(--warning-border);margin-bottom:16px;font-size:13px;">
@@ -5099,6 +5192,187 @@ function viewImport() {
 // ══════════════════════════════════════════════════════════════
 // AUTO-DISPATCH ENGINE VIEW
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// SLA MONITORING VIEW
+// ══════════════════════════════════════════════════════════════
+function viewSLA() {
+  const breaches = AppState.slaBreaches || [];
+  const configs  = AppState.slaConfigs  || [];
+  const summary  = AppState.slaSummary  || {};
+  const tab      = AppState.slaTab      || "breaches";
+
+  const openBreaches = breaches.filter(b=>b.status==="open"&&b.breach_type==="delivery");
+  const warnings     = breaches.filter(b=>b.status==="open"&&b.breach_type==="warning");
+  const acknowledged = breaches.filter(b=>b.status==="acknowledged");
+
+  const STATUS_LABEL = { open:"مفتوح", acknowledged:"تم الإقرار", resolved:"تم الحل" };
+  const TYPE_LABEL   = { delivery:"خرق SLA", warning:"تحذير مبكر" };
+  const TYPE_BADGE   = { delivery:"badge-danger", warning:"badge-warning" };
+
+  const tabBar = `<div style="display:flex;gap:0;overflow-x:auto;
+    border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+    ${[
+      {id:"breaches", label:`الخروقات (${openBreaches.length})`},
+      {id:"warnings", label:`تحذيرات (${warnings.length})`},
+      {id:"history",  label:"السجل"},
+      {id:"configs",  label:"الإعدادات"},
+    ].map(t=>`<button onclick="App.setSLATab('${t.id}')"
+      style="padding:10px 18px;border:none;background:none;font-size:13px;font-weight:500;
+        white-space:nowrap;cursor:pointer;
+        border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+        color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">${t.label}</button>`).join("")}
+  </div>`;
+
+  // ── Summary KPIs ──────────────────────────────────────────────
+  const kpiRow = `
+    <div class="kpi-grid" style="margin-bottom:20px;">
+      ${kpi("خروقات مفتوحة",   openBreaches.length, "log",     "var(--danger)",  "var(--danger-bg)")}
+      ${kpi("تحذيرات نشطة",   warnings.length,     "refresh",  "var(--warning)", "var(--warning-bg)")}
+      ${kpi("قيد الإقرار",    acknowledged.length, "chart",    "var(--info)",    "var(--info-bg)")}
+      ${kpi("إجمالي الإعدادات",configs.length,      "box",      "var(--brand)",   "var(--brand-light)")}
+    </div>`;
+
+  // ── Breach table helper ───────────────────────────────────────
+  const breachTable = (rows, showActions) => !rows.length
+    ? `<div class="empty"><div class="empty-icon">✅</div>
+        <h3>لا توجد ${tab==="warnings"?"تحذيرات":"خروقات"}</h3>
+        <p>كل الشحنات ضمن مستوى الخدمة المتفق عليه</p></div>`
+    : `<div class="table-wrap"><table>
+        <thead><tr>
+          <th>الشحنة</th><th>التاجر</th><th>النوع</th>
+          <th>الهدف</th><th>الفعلي</th><th>التأخير</th>
+          <th>الحالة</th>${showActions?"<th>إجراءات</th>":""}
+        </tr></thead>
+        <tbody>
+          ${rows.map(b=>{
+            const delayHrs = Math.max(0, b.actual_hours - b.target_hours);
+            return `<tr>
+              <td class="td-mono" style="cursor:pointer;"
+                onclick="AppState.selectedShipment='${esc(b.shipment_code)}';AppState.view='shipments';rerenderContent();">
+                ${esc(b.shipment_code)}
+              </td>
+              <td style="font-size:12px;">${esc(b.merchant_name||"—")}</td>
+              <td><span class="badge ${TYPE_BADGE[b.breach_type]||"badge-gray"}">
+                ${TYPE_LABEL[b.breach_type]||b.breach_type}</span></td>
+              <td style="font-size:12px;">${b.target_hours}س</td>
+              <td style="font-weight:600;color:${b.breach_type==="delivery"?"var(--danger)":"var(--warning)"};">
+                ${Math.round(b.actual_hours)}س</td>
+              <td style="font-weight:700;color:var(--danger);">
+                ${b.breach_type==="delivery"?`+${Math.round(delayHrs)}س`:"—"}</td>
+              <td><span class="badge ${
+                b.status==="open"?"badge-danger":
+                b.status==="acknowledged"?"badge-warning":"badge-success"}">
+                ${STATUS_LABEL[b.status]||b.status}</span></td>
+              ${showActions?`<td><div class="td-actions">
+                ${b.status==="open"?`
+                  <button class="btn btn-secondary btn-sm"
+                    onclick="App.acknowledgeSLABreach('${b.id}')">إقرار</button>`:""} 
+                ${b.status!=="resolved"?`
+                  <button class="btn btn-secondary btn-sm"
+                    onclick="App.resolveSLABreach('${b.id}')">حل</button>`:""}
+              </div></td>`:""}
+            </tr>`;
+          }).join("")}
+        </tbody>
+      </table></div>`;
+
+  // ── Tabs ──────────────────────────────────────────────────────
+  if (tab==="breaches") return `<div>
+    <div class="card-header" style="margin-bottom:16px;">
+      <h2 style="font-size:18px;font-weight:700;">مستوى الخدمة SLA</h2>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-secondary btn-sm" onclick="App.runSLACheck()">
+          🔍 فحص الآن
+        </button>
+        <button class="btn btn-secondary btn-sm" onclick="App.loadSLAData(true)">
+          🔄 تحديث
+        </button>
+      </div>
+    </div>
+    ${kpiRow}
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">${icon("log")} خروقات SLA المفتوحة</h3>
+      </div>
+      ${tabBar}
+      ${breachTable(openBreaches, true)}
+    </div></div>`;
+
+  if (tab==="warnings") return `<div>
+    ${kpiRow}
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">⚠️ تحذيرات مبكرة</h3>
+        <span style="font-size:12px;color:var(--gray-500);">
+          شحنات ستخرق SLA خلال ساعات — تصرف الآن
+        </span>
+      </div>
+      ${tabBar}
+      ${breachTable(warnings, true)}
+    </div></div>`;
+
+  if (tab==="history") {
+    const allHistory = breaches.filter(b=>b.status!=="open");
+    return `<div>
+      ${kpiRow}
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px;">
+          <h3 class="card-title">${icon("log")} سجل الخروقات</h3>
+          <button class="btn btn-secondary btn-sm"
+            onclick="App.loadSLAData(true)">🔄 تحديث</button>
+        </div>
+        ${tabBar}
+        ${breachTable([...acknowledged, ...breaches.filter(b=>b.status==="resolved")], false)}
+      </div></div>`;
+  }
+
+  if (tab==="configs") return `<div>
+    ${kpiRow}
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">${icon("chart")} إعدادات مستوى الخدمة</h3>
+        <button class="btn btn-primary btn-sm" onclick="App.openSLAConfigModal()">
+          ${icon("plus",13)} إضافة إعداد
+        </button>
+      </div>
+      ${tabBar}
+      ${!configs.length
+        ? `<div class="empty"><div class="empty-icon">⚙️</div>
+            <h3>لا توجد إعدادات SLA</h3>
+            <p>أضف إعداداً لتفعيل مراقبة مستوى الخدمة</p>
+            <button class="btn btn-primary" onclick="App.openSLAConfigModal()">إضافة إعداد</button>
+          </div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr>
+              <th>الاسم</th><th>التاجر</th><th>نوع الخدمة</th>
+              <th>الهدف</th><th>التحذير قبل</th><th>الحالة</th><th>إجراءات</th>
+            </tr></thead>
+            <tbody>
+              ${configs.map(c=>`<tr>
+                <td style="font-weight:600;">${esc(c.label||"—")}</td>
+                <td style="font-size:12px;">${c.merchant_id?"تاجر محدد":"عام (كل التجار)"}</td>
+                <td style="font-size:12px;">${c.service_type||"كل الخدمات"}</td>
+                <td style="font-weight:700;">${c.target_delivery_hours} ساعة</td>
+                <td style="font-size:12px;">${c.warn_before_hours} ساعة</td>
+                <td><label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                  <input type="checkbox" ${c.is_active?"checked":""}
+                    onchange="App.toggleSLAConfig('${c.id}',this.checked)"/>
+                  <span style="font-size:12px;">${c.is_active?"مفعّل":"معطّل"}</span>
+                </label></td>
+                <td><div class="td-actions">
+                  <button class="btn btn-secondary btn-sm"
+                    onclick="App.openSLAConfigModal('${c.id}')">تعديل</button>
+                  <button class="btn btn-secondary btn-sm" style="color:var(--danger);"
+                    onclick="App.deleteSLAConfig('${c.id}','${esc(c.label||"")}')">حذف</button>
+                </div></td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+    </div></div>`;
+
+  return "";
+}
+
 function viewDispatch() {
   const rules   = AppState.dispatchRules  || [];
   const configs = AppState.courierConfigs || [];
@@ -6931,6 +7205,191 @@ const App={
       errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
       btn.disabled=false; btn.textContent="📤 إرسال";
     }
+  },
+
+  // ── P3: SLA Monitoring ───────────────────────────────────────
+  setSLATab(tab) {
+    AppState.slaTab = tab;
+    rerenderContent();
+  },
+
+  async loadSLAData(forceReload) {
+    if (!forceReload && AppState._slaDataLoaded) return;
+    try {
+      const [configs, breaches, summary] = await Promise.all([
+        DB.loadSLAConfigs(),
+        DB.loadSLABreaches(),
+        DB.getSLASummary(),
+      ]);
+      AppState.slaConfigs      = configs;
+      AppState.slaBreaches     = breaches;
+      AppState.slaSummary      = summary;
+      AppState._slaDataLoaded  = true;
+      rerenderContent();
+    } catch(err) { toast("فشل تحميل بيانات SLA: "+err.message,"error"); }
+  },
+
+  async runSLACheck() {
+    const btn = document.querySelector('[onclick="App.runSLACheck()"]');
+    if (btn) { btn.disabled=true; btn.innerHTML=`<span class="spinner"></span> جاري الفحص...`; }
+    try {
+      const result = await DB.runSLACheck();
+      AppState.slaBreaches    = await DB.loadSLABreaches();
+      AppState.slaSummary     = await DB.getSLASummary();
+      AppState._slaDataLoaded = true;
+      rerenderContent();
+      toast(result.inserted>0
+        ? `🚨 تم اكتشاف ${result.inserted} خرق جديد`
+        : "✅ كل الشحنات ضمن مستوى الخدمة المتفق عليه");
+    } catch(err) { toast("فشل فحص SLA: "+err.message,"error"); }
+  },
+
+  async acknowledgeSLABreach(id) {
+    try {
+      await DB.acknowledgeSLABreach(id);
+      const b = AppState.slaBreaches.find(x=>x.id===id);
+      if (b) { b.status="acknowledged"; b.acknowledged_at=new Date().toISOString(); }
+      await DB.addAudit("SLA_BREACH_ACK", id,
+        `Acknowledged by ${AppState.user.name}`, "sla");
+      rerenderContent();
+      toast("✅ تم الإقرار بالخرق");
+    } catch(err) { toast("فشل الإقرار: "+err.message,"error"); }
+  },
+
+  async resolveSLABreach(id) {
+    try {
+      await DB.resolveSLABreach(id);
+      const b = AppState.slaBreaches.find(x=>x.id===id);
+      if (b) { b.status="resolved"; b.resolved_at=new Date().toISOString(); }
+      await DB.addAudit("SLA_BREACH_RESOLVE", id,
+        `Resolved by ${AppState.user.name}`, "sla");
+      rerenderContent();
+      toast("✅ تم حل الخرق");
+    } catch(err) { toast("فشل الحل: "+err.message,"error"); }
+  },
+
+  openSLAConfigModal(configId) {
+    const existing = configId
+      ? AppState.slaConfigs.find(c=>c.id===configId)
+      : null;
+    const merchants = AppState.allMerchants || [];
+    Modals.open(`<div class="modal" style="max-width:440px;">
+      <div class="modal-header">
+        <h3>⚙️ ${existing?"تعديل":"إضافة"} إعداد SLA</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>اسم الإعداد *</label>
+          <input id="slaCfgLabel" value="${esc(existing?.label||"")}"
+            placeholder="مثال: SLA القاهرة السريع"/>
+        </div>
+        <div class="form-row">
+          <div class="field">
+            <label>هدف التسليم (ساعات) *</label>
+            <input id="slaCfgHours" type="number" min="1" max="720"
+              value="${existing?.target_delivery_hours||48}"/>
+          </div>
+          <div class="field">
+            <label>تحذير قبل (ساعات)</label>
+            <input id="slaCfgWarn" type="number" min="0" max="48"
+              value="${existing?.warn_before_hours||4}"/>
+          </div>
+        </div>
+        <div class="field">
+          <label>نوع الخدمة (اتركه فارغاً للكل)</label>
+          <select id="slaCfgSvc"
+            style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            <option value="">كل الخدمات</option>
+            ${Object.entries(SERVICE_MAP||{}).map(([k,v])=>
+              `<option value="${k}" ${existing?.service_type===k?"selected":""}>${v.label||k}</option>`
+            ).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>تطبيق على تاجر محدد (اتركه فارغاً للكل)</label>
+          <select id="slaCfgMerchant"
+            style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            <option value="">كل التجار (عام)</option>
+            ${merchants.map(m=>
+              `<option value="${m.id}" ${existing?.merchant_id===m.id?"selected":""}>${esc(m.full_name)}</option>`
+            ).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="slaCfgActive"
+              ${existing?.is_active!==false?"checked":""}/>
+            مفعّل
+          </label>
+        </div>
+        <div id="slaCfgErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="slaCfgSaveBtn" class="btn btn-primary"
+          onclick="App.saveSLAConfig('${configId||""}')">💾 حفظ</button>
+      </div>
+    </div>`);
+    setTimeout(()=>$("slaCfgLabel")?.focus(), 80);
+  },
+
+  async saveSLAConfig(configId) {
+    const label   = $("slaCfgLabel")?.value?.trim();
+    const hours   = parseInt($("slaCfgHours")?.value)||48;
+    const warn    = parseInt($("slaCfgWarn")?.value)||4;
+    const svc     = $("slaCfgSvc")?.value||null;
+    const merch   = $("slaCfgMerchant")?.value||null;
+    const active  = $("slaCfgActive")?.checked!==false;
+    const errEl   = $("slaCfgErr");
+    const btn     = $("slaCfgSaveBtn");
+
+    if (!label) { errEl.style.display="block"; errEl.textContent="اسم الإعداد مطلوب"; return; }
+    if (hours<1) { errEl.style.display="block"; errEl.textContent="يجب أن يكون الهدف أكبر من 0"; return; }
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      await DB.saveSLAConfig({
+        id:                     configId||undefined,
+        label,
+        target_delivery_hours:  hours,
+        warn_before_hours:      warn,
+        service_type:           svc||null,
+        merchant_id:            merch||null,
+        is_active:              active,
+      });
+      await DB.addAudit(configId?"SLA_CONFIG_UPDATE":"SLA_CONFIG_CREATE",
+        configId||"", `Label:${label} Hours:${hours} By:${AppState.user.name}`, "sla");
+      AppState.slaConfigs     = await DB.loadSLAConfigs();
+      AppState._slaDataLoaded = true;
+      Modals.close();
+      rerenderContent();
+      toast(`✅ تم ${configId?"تحديث":"إضافة"} إعداد SLA "${label}"`);
+    } catch(err) {
+      errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
+      btn.disabled=false; btn.textContent="💾 حفظ";
+    }
+  },
+
+  async deleteSLAConfig(id, label) {
+    if (!confirm(`حذف إعداد "${label}"؟`)) return;
+    try {
+      await DB.deleteSLAConfig(id);
+      await DB.addAudit("SLA_CONFIG_DELETE", id,
+        `Deleted: ${label} By: ${AppState.user.name}`, "sla");
+      AppState.slaConfigs = await DB.loadSLAConfigs();
+      rerenderContent();
+      toast(`تم حذف إعداد "${label}"`, "info");
+    } catch(err) { toast("فشل الحذف: "+err.message,"error"); }
+  },
+
+  async toggleSLAConfig(id, isActive) {
+    try {
+      await db.from("sla_configs").update({is_active:isActive}).eq("id",id);
+      const c = AppState.slaConfigs.find(x=>x.id===id);
+      if (c) c.is_active = isActive;
+      toast(isActive?"تم تفعيل الإعداد":"تم تعطيل الإعداد","info");
+    } catch(err) { toast("فشل التحديث: "+err.message,"error"); }
   },
 
   // ── P2: Driver Location Tracking ─────────────────────────────
