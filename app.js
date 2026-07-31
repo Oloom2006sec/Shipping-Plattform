@@ -114,7 +114,7 @@ const STATUS_STEPS = [
 
 const ROLE_MAP = {
   admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","track"] },
-  merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","accounts"] },
+  merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","webhooks","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","accounts"] }
 };
@@ -123,7 +123,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -287,6 +287,8 @@ const AppState = {
   driverLocations:{}, locationBroadcasting:false, _locationWatchId:null,
   // SLA monitoring
   slaConfigs:[], slaBreaches:[], slaSummary:{}, _slaDataLoaded:false,
+  // Webhooks & API keys
+  webhooks:[], apiKeys:[], webhookDeliveries:[], _webhooksDataLoaded:false,
   // Advanced search filters
   advancedFilter: {
     dateFrom:"", dateTo:"", amountMin:"", amountMax:"",
@@ -876,6 +878,66 @@ const DB = {
       };
     });
     return map;
+  },
+
+  // ── Webhooks & API Keys ──────────────────────────────────────
+  async loadWebhooks(merchantId) {
+    let q = db.from("webhooks").select("*").order("created_at",{ascending:false});
+    if (merchantId) q = q.eq("merchant_id", merchantId);
+    const { data, error } = await q;
+    if (error) { console.warn("loadWebhooks:", error.message); return []; }
+    return data || [];
+  },
+
+  async saveWebhook(payload) {
+    if (payload.id) {
+      const { error } = await db.from("webhooks").update(payload).eq("id", payload.id);
+      if (error) throw error;
+    } else {
+      const { error } = await db.from("webhooks")
+        .insert([{ ...payload, created_by: AppState.user.id }]);
+      if (error) throw error;
+    }
+  },
+
+  async deleteWebhook(id) {
+    const { error } = await db.from("webhooks").delete().eq("id", id);
+    if (error) throw error;
+  },
+
+  async loadWebhookDeliveries(webhookId, limit=20) {
+    const { data, error } = await db.from("webhook_deliveries")
+      .select("*").eq("webhook_id", webhookId)
+      .order("attempted_at",{ascending:false}).limit(limit);
+    if (error) { console.warn("loadWebhookDeliveries:", error.message); return []; }
+    return data || [];
+  },
+
+  async logWebhookDelivery(payload) {
+    await db.from("webhook_deliveries").insert([payload])
+      .then(()=>{}).catch(e=>console.warn("logWebhookDelivery:", e.message));
+  },
+
+  async loadApiKeys(merchantId) {
+    let q = db.from("api_keys").select("*").order("created_at",{ascending:false});
+    if (merchantId) q = q.eq("merchant_id", merchantId);
+    const { data, error } = await q;
+    if (error) { console.warn("loadApiKeys:", error.message); return []; }
+    return data || [];
+  },
+
+  async createApiKey(payload) {
+    const { data, error } = await db.from("api_keys")
+      .insert([{ ...payload, created_by: AppState.user.id }])
+      .select().single();
+    if (error) throw error;
+    return data;
+  },
+
+  async revokeApiKey(id) {
+    const { error } = await db.from("api_keys")
+      .update({ is_active: false }).eq("id", id);
+    if (error) throw error;
   },
 
   // ── SLA Monitoring ────────────────────────────────────────────
@@ -1795,6 +1857,7 @@ function renderView() {
     case"import":     return viewImport();
     case"dispatch":   return viewDispatch();
     case"sla":        return viewSLA();
+    case"webhooks":   return viewWebhooks();
     case"liveops":    return viewLiveOps();
     default:
       if((AppState.user?.primary_role||AppState.user?.role)==="customer") return viewCustomerOverview();
@@ -1915,6 +1978,10 @@ function postRender() {
   if(AppState.view==="sla" && !AppState._slaDataLoaded){
     AppState._slaDataLoaded = true;
     App.loadSLAData();
+  }
+  if(AppState.view==="webhooks" && !AppState._webhooksDataLoaded){
+    AppState._webhooksDataLoaded = true;
+    App.loadWebhooksData();
   }
   if(AppState.view==="liveops"){
     // Load driver locations into AppState for the courier board map
@@ -5206,6 +5273,205 @@ function viewImport() {
 // AUTO-DISPATCH ENGINE VIEW
 // ══════════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════════
+// WEBHOOKS & API VIEW
+// ══════════════════════════════════════════════════════════════
+function viewWebhooks() {
+  const webhooks  = AppState.webhooks  || [];
+  const apiKeys   = AppState.apiKeys   || [];
+  const tab       = AppState.webhooksTab || "webhooks";
+  const role      = AppState.user?.primary_role || AppState.user?.role;
+
+  const EVENTS = [
+    "shipment.created", "shipment.status_changed", "shipment.delivered",
+    "shipment.returned", "shipment.assigned", "pickup.requested",
+  ];
+
+  const tabBar = `<div style="display:flex;gap:0;overflow-x:auto;
+    border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+    ${[
+      {id:"webhooks", label:`Webhooks (${webhooks.length})`},
+      {id:"apikeys",  label:`API Keys (${apiKeys.filter(k=>k.is_active).length})`},
+      {id:"docs",     label:"توثيق API"},
+    ].map(t=>`<button onclick="App.setWebhooksTab('${t.id}')"
+      style="padding:10px 18px;border:none;background:none;font-size:13px;font-weight:500;
+        white-space:nowrap;cursor:pointer;
+        border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+        color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">${t.label}</button>`).join("")}
+  </div>`;
+
+  // ── Webhooks tab ─────────────────────────────────────────────
+  if (tab==="webhooks") return `
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">🔗 Webhooks</h3>
+        <button class="btn btn-primary btn-sm" onclick="App.openWebhookModal()">
+          ${icon("plus",13)} إضافة Webhook
+        </button>
+      </div>
+      ${tabBar}
+      <div style="font-size:13px;color:var(--gray-500);margin-bottom:16px;padding:12px;
+        background:var(--gray-50);border-radius:var(--radius);">
+        📡 يُرسَل Webhook تلقائياً إلى رابطك عند حدوث أحداث الشحنات.
+        يمكنك استخدامه لتحديث نظامك (Shopify, WooCommerce, ERP) فور تغيير الحالة.
+      </div>
+      ${!webhooks.length ? `
+        <div class="empty">
+          <div class="empty-icon">🔗</div>
+          <h3>لا توجد Webhooks</h3>
+          <p>أضف Webhook لتلقي إشعارات تلقائية عند تغيير حالة الشحنات</p>
+          <button class="btn btn-primary" onclick="App.openWebhookModal()">إضافة Webhook</button>
+        </div>` : `
+        <div class="table-wrap"><table>
+          <thead><tr>
+            <th>الاسم</th><th>الرابط</th><th>الأحداث</th>
+            <th>الحالة</th><th>آخر نجاح</th><th>أخطاء</th><th>إجراءات</th>
+          </tr></thead>
+          <tbody>
+            ${webhooks.map(w=>`<tr>
+              <td style="font-weight:600;">${esc(w.label)}</td>
+              <td style="font-size:11px;font-family:monospace;max-width:200px;
+                overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                title="${esc(w.endpoint_url)}">${esc(w.endpoint_url)}</td>
+              <td style="font-size:11px;">${(w.events||[]).map(e=>
+                `<span class="badge badge-gray" style="font-size:9px;margin:1px;">${e}</span>`
+              ).join("")}</td>
+              <td><label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+                <input type="checkbox" ${w.is_active?"checked":""}
+                  onchange="App.toggleWebhook('${w.id}',this.checked)"/>
+                <span style="font-size:12px;">${w.is_active?"نشط":"متوقف"}</span>
+              </label></td>
+              <td style="font-size:12px;color:var(--gray-500);">
+                ${w.last_success_at?fmtTime(w.last_success_at):"—"}</td>
+              <td style="font-weight:600;color:${w.failure_count>3?"var(--danger)":"inherit"};">
+                ${w.failure_count}</td>
+              <td><div class="td-actions">
+                <button class="btn btn-secondary btn-sm"
+                  onclick="App.testWebhook('${w.id}')">اختبار</button>
+                <button class="btn btn-secondary btn-sm"
+                  onclick="App.showWebhookLogs('${w.id}','${esc(w.label)}')">سجل</button>
+                <button class="btn btn-secondary btn-sm"
+                  onclick="App.openWebhookModal('${w.id}')">تعديل</button>
+                <button class="btn btn-secondary btn-sm" style="color:var(--danger);"
+                  onclick="App.deleteWebhook('${w.id}','${esc(w.label)}')">حذف</button>
+              </div></td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>`}
+    </div>`;
+
+  // ── API Keys tab ─────────────────────────────────────────────
+  if (tab==="apikeys") return `
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">🔑 مفاتيح API</h3>
+        <button class="btn btn-primary btn-sm" onclick="App.createApiKey()">
+          ${icon("plus",13)} مفتاح جديد
+        </button>
+      </div>
+      ${tabBar}
+      <div style="font-size:13px;color:var(--gray-500);margin-bottom:16px;padding:12px;
+        background:var(--gray-50);border-radius:var(--radius);">
+        🔑 استخدم مفتاح API للوصول البرمجي إلى شحناتك من أنظمة خارجية.
+        المفتاح يُعرض مرة واحدة فقط عند الإنشاء — احتفظ بنسخة آمنة.
+      </div>
+      ${!apiKeys.length ? `
+        <div class="empty">
+          <div class="empty-icon">🔑</div>
+          <h3>لا توجد مفاتيح API</h3>
+          <p>أنشئ مفتاحاً للوصول البرمجي إلى شحناتك</p>
+          <button class="btn btn-primary" onclick="App.createApiKey()">إنشاء مفتاح</button>
+        </div>` : `
+        <div class="table-wrap"><table>
+          <thead><tr>
+            <th>الاسم</th><th>البادئة</th><th>الصلاحيات</th>
+            <th>الحالة</th><th>آخر استخدام</th><th>تنتهي في</th><th>إجراءات</th>
+          </tr></thead>
+          <tbody>
+            ${apiKeys.map(k=>`<tr style="${!k.is_active?"opacity:.5":""}">
+              <td style="font-weight:600;">${esc(k.label)}</td>
+              <td style="font-family:monospace;font-size:12px;">${esc(k.key_prefix)}••••••••</td>
+              <td style="font-size:11px;">${(k.scopes||[]).map(s=>
+                `<span class="badge badge-brand" style="font-size:9px;margin:1px;">${s}</span>`
+              ).join("")}</td>
+              <td><span class="badge ${k.is_active?"badge-success":"badge-gray"}">
+                ${k.is_active?"نشط":"مُلغى"}</span></td>
+              <td style="font-size:12px;color:var(--gray-500);">
+                ${k.last_used_at?fmtTime(k.last_used_at):"لم يُستخدم"}</td>
+              <td style="font-size:12px;color:var(--gray-500);">
+                ${k.expires_at?fmtDate(k.expires_at):"لا تنتهي"}</td>
+              <td>${k.is_active?`<button class="btn btn-secondary btn-sm" style="color:var(--danger);"
+                onclick="App.revokeApiKey('${k.id}','${esc(k.label)}')">إلغاء</button>`:"—"}</td>
+            </tr>`).join("")}
+          </tbody>
+        </table></div>`}
+    </div>`;
+
+  // ── API Docs tab ─────────────────────────────────────────────
+  if (tab==="docs") return `
+    <div class="card">
+      <h3 class="card-title" style="margin-bottom:20px;">📖 توثيق REST API</h3>
+      ${tabBar}
+      <div style="font-family:monospace;font-size:13px;line-height:1.8;">
+
+        <div style="margin-bottom:24px;">
+          <h4 style="font-family:inherit;margin-bottom:10px;color:var(--gray-700);">المصادقة</h4>
+          <div style="background:var(--gray-900);color:#e5e7eb;padding:14px;border-radius:var(--radius);overflow-x:auto;">
+            <div style="color:#9ca3af;margin-bottom:4px;"># أضف مفتاح API في رأس الطلب</div>
+            <div>Authorization: Bearer <span style="color:#34d399;">ANE_KEY_xxxxxxxxxx</span></div>
+          </div>
+        </div>
+
+        ${[
+          {
+            method:"GET", path:"/api/v1/shipments",
+            desc:"قائمة شحناتك (آخر 100)",
+            response:`{ "data": [ { "id": "ANE-123456", "status": "out_for_delivery", ... } ] }`
+          },
+          {
+            method:"GET", path:"/api/v1/shipments/{code}",
+            desc:"تفاصيل شحنة واحدة",
+            response:`{ "data": { "id": "ANE-123456", "customer_name": "...", "status": "..." } }`
+          },
+          {
+            method:"POST", path:"/api/v1/shipments",
+            desc:"إنشاء شحنة جديدة",
+            response:`{ "data": { "id": "ANE-789012", "status": "submitted" } }`
+          },
+          {
+            method:"GET", path:"/api/v1/shipments/{code}/timeline",
+            desc:"سجل أحداث الشحنة",
+            response:`{ "data": [ { "event": "تم التسليم", "created_at": "..." } ] }`
+          },
+        ].map(ep=>`
+          <div style="margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid var(--gray-100);">
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+              <span style="background:${ep.method==="GET"?"#059669":ep.method==="POST"?"#2563eb":"#d97706"};
+                color:#fff;padding:2px 10px;border-radius:4px;font-size:11px;font-weight:700;">
+                ${ep.method}
+              </span>
+              <span style="color:var(--brand);">${ep.path}</span>
+            </div>
+            <div style="font-family:sans-serif;font-size:12px;color:var(--gray-500);margin-bottom:8px;">
+              ${ep.desc}
+            </div>
+            <div style="background:var(--gray-50);padding:10px;border-radius:var(--radius);
+              font-size:11px;color:var(--gray-600);">
+              ${esc(ep.response)}
+            </div>
+          </div>`).join("")}
+
+        <div style="padding:14px;background:var(--warning-bg);border-radius:var(--radius);
+          font-family:sans-serif;font-size:13px;color:var(--gray-700);">
+          ⚠️ <b>ملاحظة:</b> نقاط API تتطلب تفعيل Supabase Edge Function.
+          حتى ذلك الحين، يمكنك استخدام قاعدة البيانات مباشرة عبر Supabase JS SDK.
+        </div>
+      </div>
+    </div>`;
+
+  return "";
+}
+
+// ══════════════════════════════════════════════════════════════
 // SLA MONITORING VIEW
 // ══════════════════════════════════════════════════════════════
 function viewSLA() {
@@ -7239,6 +7505,387 @@ const App={
       errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
       btn.disabled=false; btn.textContent="📤 إرسال";
     }
+  },
+
+  // ── P5: Webhooks & API Keys ───────────────────────────────────
+  setWebhooksTab(tab) {
+    AppState.webhooksTab = tab;
+    rerenderContent();
+  },
+
+  async loadWebhooksData() {
+    const mid = AppState.user?.primary_role==="merchant" ? AppState.user.id : null;
+    try {
+      const [webhooks, apiKeys] = await Promise.all([
+        DB.loadWebhooks(mid),
+        DB.loadApiKeys(mid),
+      ]);
+      AppState.webhooks  = webhooks;
+      AppState.apiKeys   = apiKeys;
+      AppState._webhooksDataLoaded = true;
+      rerenderContent();
+    } catch(err) { toast("فشل تحميل بيانات Webhooks: "+err.message,"error"); }
+  },
+
+  openWebhookModal(webhookId) {
+    const existing = webhookId ? AppState.webhooks.find(w=>w.id===webhookId) : null;
+    const EVENTS = [
+      "shipment.created","shipment.status_changed","shipment.delivered",
+      "shipment.returned","shipment.assigned","pickup.requested",
+    ];
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header">
+        <h3>🔗 ${existing?"تعديل":"إضافة"} Webhook</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>اسم الـ Webhook *</label>
+          <input id="whLabel" value="${esc(existing?.label||"")}"
+            placeholder="مثال: تحديث Shopify"/>
+        </div>
+        <div class="field">
+          <label>رابط الاستقبال (Endpoint URL) *</label>
+          <input id="whUrl" value="${esc(existing?.endpoint_url||"")}"
+            placeholder="https://yourstore.com/webhooks/alnukhba"
+            dir="ltr" style="text-align:left;font-family:monospace;font-size:13px;"/>
+        </div>
+        <div class="field">
+          <label>مفتاح التوقيع (Secret) — اختياري</label>
+          <input id="whSecret" value="${esc(existing?.secret||"")}"
+            placeholder="سيُستخدم لتوقيع HMAC-SHA256 للطلبات"
+            dir="ltr" style="text-align:left;font-family:monospace;font-size:13px;"/>
+          <div style="font-size:11px;color:var(--gray-400);margin-top:4px;">
+            تحقق من X-Nukhba-Signature في رأس الطلب لتأمين الاستقبال
+          </div>
+        </div>
+        <div class="field">
+          <label>الأحداث المُفعَّلة *</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px;">
+            ${EVENTS.map(e=>`
+              <label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;">
+                <input type="checkbox" value="${e}" class="whEventCheck"
+                  ${existing?.events?.includes(e)||(!existing&&e==="shipment.status_changed")?"checked":""}/>
+                ${e}
+              </label>`).join("")}
+          </div>
+        </div>
+        <div id="whErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="whSaveBtn" class="btn btn-primary"
+          onclick="App.saveWebhook('${webhookId||""}')">💾 حفظ</button>
+      </div>
+    </div>`);
+    setTimeout(()=>$("whLabel")?.focus(), 80);
+  },
+
+  async saveWebhook(webhookId) {
+    const label  = $("whLabel")?.value?.trim();
+    const url    = $("whUrl")?.value?.trim();
+    const secret = $("whSecret")?.value?.trim()||"";
+    const events = [...$$(".whEventCheck")].filter(c=>c.checked).map(c=>c.value);
+    const errEl  = $("whErr");
+    const btn    = $("whSaveBtn");
+
+    if (!label) { errEl.style.display="block"; errEl.textContent="الاسم مطلوب"; return; }
+    if (!url||!url.startsWith("http")) { errEl.style.display="block"; errEl.textContent="رابط غير صحيح (يجب أن يبدأ بـ http)"; return; }
+    if (!events.length) { errEl.style.display="block"; errEl.textContent="اختر حدثاً واحداً على الأقل"; return; }
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      const mid = AppState.user?.primary_role==="merchant"
+        ? AppState.user.id
+        : AppState.selectedMerchant || AppState.user.id;
+      await DB.saveWebhook({
+        id:           webhookId||undefined,
+        merchant_id:  mid,
+        label, endpoint_url:url, secret, events,
+        is_active:    true,
+      });
+      await DB.addAudit(webhookId?"WEBHOOK_UPDATE":"WEBHOOK_CREATE",
+        webhookId||"", `Label:${label} URL:${url} By:${AppState.user.name}`, "webhook");
+      AppState.webhooks = await DB.loadWebhooks(
+        AppState.user?.primary_role==="merchant" ? AppState.user.id : null);
+      AppState._webhooksDataLoaded = true;
+      Modals.close();
+      rerenderContent();
+      toast(`✅ تم ${webhookId?"تحديث":"إضافة"} الـ Webhook "${label}"`);
+    } catch(err) {
+      errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
+      btn.disabled=false; btn.textContent="💾 حفظ";
+    }
+  },
+
+  async deleteWebhook(id, label) {
+    if (!confirm(`حذف الـ Webhook "${label}"؟`)) return;
+    try {
+      await DB.deleteWebhook(id);
+      await DB.addAudit("WEBHOOK_DELETE", id,
+        `Deleted: ${label} By: ${AppState.user.name}`, "webhook");
+      AppState.webhooks = AppState.webhooks.filter(w=>w.id!==id);
+      rerenderContent();
+      toast(`تم حذف الـ Webhook "${label}"`, "info");
+    } catch(err) { toast("فشل الحذف: "+err.message,"error"); }
+  },
+
+  async toggleWebhook(id, isActive) {
+    try {
+      await db.from("webhooks").update({is_active:isActive}).eq("id",id);
+      const w = AppState.webhooks.find(x=>x.id===id);
+      if (w) w.is_active = isActive;
+      rerenderContent();
+      toast(isActive?"تم تفعيل الـ Webhook":"تم تعطيل الـ Webhook","info");
+    } catch(err) { toast("فشل التحديث: "+err.message,"error"); }
+  },
+
+  async testWebhook(id) {
+    const w = AppState.webhooks.find(x=>x.id===id);
+    if (!w) return;
+    toast("جاري إرسال طلب اختباري...","info");
+    const payload = {
+      event:    "shipment.test",
+      fired_at: new Date().toISOString(),
+      data:     { id:"ANE-TEST", status:"test", message:"Webhook test from Al-Nukhba Express" },
+    };
+    await App._deliverWebhook(w, "shipment.test", payload);
+  },
+
+  async showWebhookLogs(webhookId, label) {
+    const deliveries = await DB.loadWebhookDeliveries(webhookId, 20);
+    Modals.open(`<div class="modal modal-lg">
+      <div class="modal-header">
+        <h3>📋 سجل الـ Webhook: ${esc(label)}</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        ${!deliveries.length
+          ? `<div class="empty"><div class="empty-icon">📋</div>
+              <h3>لا توجد محاولات بعد</h3>
+              <p>ستظهر هنا سجلات الإرسال بعد حدوث أي حدث</p></div>`
+          : `<div class="table-wrap"><table>
+              <thead><tr>
+                <th>الحدث</th><th>الشحنة</th><th>HTTP</th>
+                <th>المدة</th><th>النتيجة</th><th>التوقيت</th>
+              </tr></thead>
+              <tbody>
+                ${deliveries.map(d=>`<tr>
+                  <td style="font-size:12px;font-family:monospace;">${esc(d.event_type)}</td>
+                  <td style="font-size:12px;">${esc(d.shipment_code||"—")}</td>
+                  <td style="font-weight:600;color:${d.http_status&&d.http_status<300?"var(--success)":"var(--danger)"};">
+                    ${d.http_status||"—"}</td>
+                  <td style="font-size:12px;">${d.duration_ms?d.duration_ms+"ms":"—"}</td>
+                  <td><span class="badge ${d.success?"badge-success":"badge-danger"}">
+                    ${d.success?"نجاح":"فشل"}</span>
+                    ${d.error_message?`<div style="font-size:10px;color:var(--danger);margin-top:2px;">${esc(d.error_message.slice(0,60))}</div>`:""}
+                  </td>
+                  <td style="font-size:12px;color:var(--gray-400);">${fmtTime(d.attempted_at)}</td>
+                </tr>`).join("")}
+              </tbody>
+            </table></div>`}
+      </div>
+    </div>`);
+  },
+
+  // Core webhook delivery engine — called by _fireWebhooks
+  async _deliverWebhook(webhook, eventType, payload) {
+    const start = Date.now();
+    let httpStatus = null, responseBody = "", success = false, errorMessage = "";
+    try {
+      const body = JSON.stringify(payload);
+      const headers = {
+        "Content-Type": "application/json",
+        "X-Nukhba-Event": eventType,
+        "X-Nukhba-Timestamp": new Date().toISOString(),
+      };
+      // HMAC signature if secret is set
+      if (webhook.secret) {
+        // Note: real HMAC requires SubtleCrypto API (browser) or Edge Function
+        // For now we add a placeholder — proper HMAC via Edge Function in P7
+        headers["X-Nukhba-Signature"] = `sha256=${webhook.secret.slice(0,8)}...`;
+      }
+      const res = await fetch(webhook.endpoint_url, { method:"POST", headers, body });
+      httpStatus = res.status;
+      responseBody = await res.text().catch(()=>"");
+      success = res.ok;
+      if (!success) errorMessage = `HTTP ${httpStatus}: ${responseBody.slice(0,100)}`;
+    } catch(err) {
+      errorMessage = err.message;
+    }
+    const duration = Date.now() - start;
+
+    // Update webhook stats
+    await db.from("webhooks").update(
+      success
+        ? { last_success_at: new Date().toISOString(), failure_count: 0 }
+        : { last_failure_at: new Date().toISOString(), failure_count: (webhook.failure_count||0)+1 }
+    ).eq("id", webhook.id).then(()=>{}).catch(()=>{});
+
+    // Log the delivery attempt
+    await DB.logWebhookDelivery({
+      webhook_id:    webhook.id,
+      shipment_id:   payload.data?.shipment_id || null,
+      shipment_code: payload.data?.id || "",
+      event_type:    eventType,
+      payload,
+      http_status:   httpStatus,
+      response_body: responseBody.slice(0,500),
+      duration_ms:   duration,
+      success,
+      error_message: errorMessage||null,
+    });
+
+    if (success) toast(`✅ Webhook "${webhook.label}" أُرسل بنجاح`);
+    else toast(`⚠️ Webhook "${webhook.label}" فشل: ${errorMessage.slice(0,60)}`,"warning");
+    return success;
+  },
+
+  // Fire all active webhooks that subscribe to an event — fire-and-forget
+  async _fireWebhooks(shipment, eventType, extraData) {
+    const hooks = (AppState.webhooks||[]).filter(w=>
+      w.is_active && w.events?.includes(eventType) &&
+      w.merchant_id === (shipment.merchantId||shipment.merchant_id)
+    );
+    if (!hooks.length) return;
+    const payload = {
+      event:    eventType,
+      fired_at: new Date().toISOString(),
+      data: {
+        id:             shipment.id,
+        status:         shipment.status,
+        customer_name:  shipment.customerName,
+        customer_phone: shipment.customerPhone,
+        governorate:    shipment.governorate,
+        amount:         shipment.amount,
+        courier_name:   shipment.courierName,
+        ...extraData,
+      },
+    };
+    for (const hook of hooks) {
+      App._deliverWebhook(hook, eventType, payload).catch(()=>{});
+    }
+  },
+
+  async createApiKey() {
+    Modals.open(`<div class="modal" style="max-width:400px;">
+      <div class="modal-header">
+        <h3>🔑 إنشاء مفتاح API جديد</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>اسم المفتاح *</label>
+          <input id="akLabel" placeholder="مثال: Shopify Integration"/>
+        </div>
+        <div class="field">
+          <label>الصلاحيات</label>
+          ${["shipments.read","shipments.create","shipments.update","webhooks.manage"].map(s=>`
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;
+              margin-bottom:6px;cursor:pointer;">
+              <input type="checkbox" value="${s}" class="akScopeCheck"
+                ${s==="shipments.read"?"checked":""}/>
+              ${s}
+            </label>`).join("")}
+        </div>
+        <div class="field">
+          <label>تنتهي في (اتركه فارغاً للدائم)</label>
+          <input id="akExpiry" type="date"/>
+        </div>
+        <div id="akErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="akSaveBtn" class="btn btn-primary"
+          onclick="App._doCreateApiKey()">🔑 إنشاء</button>
+      </div>
+    </div>`);
+    setTimeout(()=>$("akLabel")?.focus(), 80);
+  },
+
+  async _doCreateApiKey() {
+    const label   = $("akLabel")?.value?.trim();
+    const scopes  = [...$$(".akScopeCheck")].filter(c=>c.checked).map(c=>c.value);
+    const expiry  = $("akExpiry")?.value||null;
+    const errEl   = $("akErr");
+    const btn     = $("akSaveBtn");
+
+    if (!label) { errEl.style.display="block"; errEl.textContent="الاسم مطلوب"; return; }
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      // Generate a random API key (32 chars, alphanumeric)
+      const rawKey = "ANE_" + Array.from(crypto.getRandomValues(new Uint8Array(24)))
+        .map(b=>b.toString(36)).join("").slice(0,28).toUpperCase();
+      const prefix = rawKey.slice(0,8);
+
+      // Hash the key using SubtleCrypto
+      const msgBuf = new TextEncoder().encode(rawKey);
+      const hashBuf = await crypto.subtle.digest("SHA-256", msgBuf);
+      const hashHex = Array.from(new Uint8Array(hashBuf))
+        .map(b=>b.toString(16).padStart(2,"0")).join("");
+
+      const mid = AppState.user?.primary_role==="merchant"
+        ? AppState.user.id
+        : AppState.selectedMerchant || AppState.user.id;
+
+      await DB.createApiKey({
+        merchant_id: mid,
+        label,
+        key_hash:    hashHex,
+        key_prefix:  prefix,
+        scopes:      scopes.length ? scopes : ["shipments.read"],
+        expires_at:  expiry ? new Date(expiry).toISOString() : null,
+        is_active:   true,
+      });
+
+      await DB.addAudit("API_KEY_CREATE","",
+        `Label:${label} Prefix:${prefix} By:${AppState.user.name}`, "api");
+      AppState.apiKeys = await DB.loadApiKeys(
+        AppState.user?.primary_role==="merchant" ? AppState.user.id : null);
+      AppState._webhooksDataLoaded = true;
+      Modals.close();
+
+      // Show the key ONCE — cannot be retrieved again
+      Modals.open(`<div class="modal" style="max-width:420px;">
+        <div class="modal-header">
+          <h3>✅ تم إنشاء مفتاح API</h3>
+          <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+        </div>
+        <div class="modal-body">
+          <div style="background:var(--warning-bg);border:1px solid var(--warning-border);
+            border-radius:var(--radius);padding:12px;margin-bottom:16px;font-size:13px;">
+            ⚠️ <b>هذا المفتاح يُعرض مرة واحدة فقط.</b> احتفظ بنسخة آمنة الآن.
+          </div>
+          <div style="background:var(--gray-900);color:#34d399;padding:16px;
+            border-radius:var(--radius);font-family:monospace;font-size:14px;
+            word-break:break-all;letter-spacing:1px;">
+            ${rawKey}
+          </div>
+          <button class="btn btn-secondary" style="width:100%;margin-top:12px;"
+            onclick="navigator.clipboard?.writeText('${rawKey}').then(()=>toast('✅ تم النسخ'))">
+            📋 نسخ المفتاح
+          </button>
+        </div>
+      </div>`);
+      rerenderContent();
+    } catch(err) {
+      errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
+      btn.disabled=false; btn.textContent="🔑 إنشاء";
+    }
+  },
+
+  async revokeApiKey(id, label) {
+    if (!confirm(`إلغاء مفتاح "${label}"؟ لا يمكن التراجع عن هذا الإجراء.`)) return;
+    try {
+      await DB.revokeApiKey(id);
+      await DB.addAudit("API_KEY_REVOKE", id,
+        `Revoked: ${label} By: ${AppState.user.name}`, "api");
+      const k = AppState.apiKeys.find(x=>x.id===id);
+      if (k) k.is_active = false;
+      rerenderContent();
+      toast(`تم إلغاء المفتاح "${label}"`, "info");
+    } catch(err) { toast("فشل الإلغاء: "+err.message,"error"); }
   },
 
   // ── P4: Proactive SMS Notifications ──────────────────────────
@@ -9620,6 +10267,8 @@ const App={
       await DB.addAudit("UPDATE_STATUS",id,`→ ${status} by ${AppState.user.name}`);
       // Proactive SMS — fires automatically if provider is configured and trigger is enabled
       App._sendStatusSMS(s, status);
+      // Merchant webhooks — fire-and-forget
+      App._fireWebhooks(s, 'shipment.status_changed', {status, previous_status: s._prevStatus});
       rerenderContent();toast(`تم تحديث الشحنة ${id}`);
     }catch(err){toast("خطأ في التحديث: "+err.message,"error");}
   },

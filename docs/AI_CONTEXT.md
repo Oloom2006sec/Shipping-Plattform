@@ -1,6 +1,6 @@
 # AI_CONTEXT.md — Al-Nukhba Express
 **Compact bootstrap for new AI sessions. Read this first. Consult other docs only for detail.**
-Last updated: Customer Portal + progress report bug fixes (July 2026)
+Last updated: P5 Merchant Webhooks + REST API
 
 ---
 
@@ -16,7 +16,7 @@ Al-Nukhba Express is an Arabic RTL enterprise logistics SaaS (comparable to Bost
 |---|---|
 | **Current phase** | Post-roadmap stabilization — all phases shipped + 8 extra features |
 | **Last completed** | SMS Provider — Twilio/Vonage/HTTP Gateway + admin settings modal + test button |
-| **Next action** | Supabase Edge Function for SMS credentials — or Driver Location Tracking |
+| **Next action** | P6: Scalability — cursor-based pagination in loadShipments, virtual scroll, AppState memory management |
 | **Live URL** | `https://oloom2006sec.github.io/Shipping-Plattform/` |
 | **Supabase project** | `urktddxiyzwsilddamci` (London) |
 | **Local path** | `C:\Users\AMY\shipping-platform\Shipping-Plattform` |
@@ -40,6 +40,11 @@ Al-Nukhba Express is an Arabic RTL enterprise logistics SaaS (comparable to Bost
 | 9 | Reporting — 5-tab analytics, period picker, bar charts, courier/merchant perf tables, Excel+PDF export |
 | 4 | Realtime Ops — live pipeline, courier board, activity feed, RT status dot, enhanced Realtime channels |
 | Customer | Customer Portal — overview, shipment history, DB-scoped loadShipments, customer nav 4 tabs |
+| P1 | Auto-Dispatch Engine — dispatch_rules, courier_configs, dispatch_log, PL/pgSQL engine (4 strategies), preview, 15th admin nav tab |
+| P2 | Driver Location Tracking — GPS broadcast, Leaflet map in liveops, courier trail history, dynamic CDN loading |
+| P3 | SLA Monitoring — sla_configs, sla_breaches, SQL breach detection engine, 4-tab admin view, overview breach banner |
+| P4 | Proactive SMS — SMS_TRIGGERS config, _sendStatusSMS(), auto-fires on status change, trigger toggles in SMS modal |
+| P5 | Webhooks + API — api_keys, webhooks, webhook_deliveries, delivery engine, merchant 3-tab UI, API key gen with SHA-256 |
 | Import | Bulk Shipment Import — 6-step wizard, validation, Excel template, error reports, auto-create |
 | Stabilization | Fixed 8 regressions — see KNOWN_BUGS.md for full list |
 
@@ -109,7 +114,7 @@ Shipping-Plattform/
 
 ---
 
-## Admin Nav Tabs (14) · Customer Nav Tabs (4)
+## Admin Nav Tabs (16) · Customer Nav Tabs (4)
 
 `overview` · `shipments` · `tasks` · `accounts` · `finance` · `pricing` · `branches` · `liveops` · `reports` · `users` · `merchants` · `import` · `audit` · `track`
 
