@@ -297,6 +297,8 @@ const AppState = {
   // Phase 4 live ops
   liveActivityFeed:[], rtStatus:"CONNECTING", rtEventCount:0,
   _liveopsLastRefresh:0,
+  // BUG 8 FIX: presence tracking
+  onlineCouriers:[], presenceChannel:null,
 };
 
 // ── UTILS ─────────────────────────────────────────────────
@@ -410,9 +412,92 @@ function toast(msg, type="success", duration=3500) {
 }
 
 // ── SESSION ───────────────────────────────────────────────
-function getSession()   { try{return JSON.parse(localStorage.getItem("nukhba_v6")||"null");}catch(e){return null;} }
-function saveSession(u) { localStorage.setItem("nukhba_v6",JSON.stringify(u)); }
-function clearSession() { ["nukhba_v6","nukhba_v5","nukhba_session"].forEach(k=>localStorage.removeItem(k)); }
+// BUG 1 FIX: Session expiry — configurable inactivity + max lifetime
+const SESSION_MAX_MS       = 12 * 60 * 60 * 1000;  // 12 hours absolute max
+const SESSION_INACTIVITY_MS =  2 * 60 * 60 * 1000;  // 2 hours inactivity
+const SESSION_KEY           = "nukhba_v6";
+const SESSION_NAV_KEY       = "nukhba_nav";           // BUG 2: nav state key
+const SESSION_BCAST_KEY     = "nukhba_bcast";         // BUG 3: broadcast key
+
+function getSession() {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    const sess = JSON.parse(raw);
+    const now  = Date.now();
+    // Check max lifetime
+    if (sess.createdAt && now - sess.createdAt > SESSION_MAX_MS) {
+      clearSession(); return null;
+    }
+    // Check inactivity timeout
+    if (sess.lastActive && now - sess.lastActive > SESSION_INACTIVITY_MS) {
+      clearSession(); return null;
+    }
+    return sess;
+  } catch(e) { return null; }
+}
+
+function saveSession(u) {
+  const existing = (() => { try { return JSON.parse(localStorage.getItem(SESSION_KEY)||"{}"); } catch { return {}; } })();
+  localStorage.setItem(SESSION_KEY, JSON.stringify({
+    ...u,
+    createdAt:  existing.createdAt || Date.now(),
+    lastActive: Date.now(),
+  }));
+}
+
+function touchSession() {
+  // Called on user activity — updates lastActive to prevent inactivity timeout
+  const raw = localStorage.getItem(SESSION_KEY);
+  if (!raw) return;
+  try {
+    const sess = JSON.parse(raw);
+    sess.lastActive = Date.now();
+    localStorage.setItem(SESSION_KEY, JSON.stringify(sess));
+  } catch {}
+}
+
+function clearSession() {
+  ["nukhba_v6","nukhba_v5","nukhba_session"].forEach(k=>localStorage.removeItem(k));
+  localStorage.removeItem(SESSION_NAV_KEY);
+  localStorage.removeItem(SESSION_BCAST_KEY);
+}
+
+// BUG 2 FIX: nav state persistence
+function saveNavState(view) {
+  try { localStorage.setItem(SESSION_NAV_KEY, view); } catch {}
+}
+function getNavState() {
+  try { return localStorage.getItem(SESSION_NAV_KEY) || "overview"; } catch { return "overview"; }
+}
+
+// BUG 3 FIX: broadcast state persistence
+function saveBroadcastState(on) {
+  try { localStorage.setItem(SESSION_BCAST_KEY, on?"1":"0"); } catch {}
+}
+function getBroadcastState() {
+  try { return localStorage.getItem(SESSION_BCAST_KEY)==="1"; } catch { return false; }
+}
+
+// Activity tracking — resets inactivity timer on any user interaction
+let _activityThrottle = 0;
+function _onUserActivity() {
+  const now = Date.now();
+  if (now - _activityThrottle < 60000) return; // max once per minute
+  _activityThrottle = now;
+  touchSession();
+}
+["click","keydown","mousemove","touchstart"].forEach(evt =>
+  document.addEventListener(evt, _onUserActivity, { passive:true })
+);
+
+// Periodic session validity check — redirects to login if expired
+setInterval(() => {
+  if (AppState.user && !getSession()) {
+    toast("انتهت جلستك — يرجى تسجيل الدخول مجدداً","warning");
+    setTimeout(() => App.logout(), 1500);
+  }
+}, 60000); // check every minute
 
 // ── DATABASE SERVICES ─────────────────────────────────────
 const DB = {
@@ -802,11 +887,15 @@ const DB = {
 
   async saveDispatchRule(payload) {
     if (payload.id) {
-      const { error } = await db.from("dispatch_rules").update(payload).eq("id", payload.id);
+      // UPDATE — exclude id from the SET clause
+      const { id, ...rest } = payload;
+      const { error } = await db.from("dispatch_rules").update(rest).eq("id", id);
       if (error) throw error;
     } else {
+      // INSERT — never send id field; let Postgres generate via gen_random_uuid()
+      const { id: _drop, ...rest } = payload;
       const { error } = await db.from("dispatch_rules")
-        .insert([{ ...payload, created_by: AppState.user.id }]);
+        .insert([{ ...rest, created_by: AppState.user.id }]);
       if (error) throw error;
     }
   },
@@ -891,11 +980,13 @@ const DB = {
 
   async saveWebhook(payload) {
     if (payload.id) {
-      const { error } = await db.from("webhooks").update(payload).eq("id", payload.id);
+      const { id, ...rest } = payload;
+      const { error } = await db.from("webhooks").update(rest).eq("id", id);
       if (error) throw error;
     } else {
+      const { id: _drop, ...rest } = payload;
       const { error } = await db.from("webhooks")
-        .insert([{ ...payload, created_by: AppState.user.id }]);
+        .insert([{ ...rest, created_by: AppState.user.id }]);
       if (error) throw error;
     }
   },
@@ -950,11 +1041,13 @@ const DB = {
 
   async saveSLAConfig(payload) {
     if (payload.id) {
-      const { error } = await db.from("sla_configs").update(payload).eq("id", payload.id);
+      const { id, ...rest } = payload;
+      const { error } = await db.from("sla_configs").update(rest).eq("id", id);
       if (error) throw error;
     } else {
+      const { id: _drop, ...rest } = payload;
       const { error } = await db.from("sla_configs")
-        .insert([{ ...payload, created_by: AppState.user.id }]);
+        .insert([{ ...rest, created_by: AppState.user.id }]);
       if (error) throw error;
     }
   },
@@ -1316,6 +1409,43 @@ function rtStatusConfig(status) {
 function startRealtime() {
   if(AppState.realtimeChannel) return;
 
+  // BUG 8 FIX: Presence channel — tracks real browser sessions per role.
+  // Only couriers join presence; admins observe. This prevents admin sessions
+  // from being counted in the "connected couriers" display.
+  const role = AppState.user?.primary_role||AppState.user?.role||"";
+  AppState.presenceChannel = db.channel("presence_v1", {
+    config: { presence: { key: AppState.user?.id || "anon" } }
+  });
+
+  if (role === "courier") {
+    // Courier joins presence with their identity
+    AppState.presenceChannel.on("presence",{event:"sync"}, ()=>{
+      const state = AppState.presenceChannel.presenceState();
+      AppState.onlineCouriers = Object.values(state)
+        .flat()
+        .filter(p=>p.role==="courier")
+        .map(p=>p.courierId);
+    }).subscribe(async status=>{
+      if (status === "SUBSCRIBED") {
+        await AppState.presenceChannel.track({
+          courierId:   AppState.user.id,
+          courierName: AppState.user.name,
+          role:        "courier",
+          joinedAt:    new Date().toISOString(),
+        });
+      }
+    });
+  } else {
+    // Admin/merchant observe only — no track() call so not counted
+    AppState.presenceChannel.on("presence",{event:"sync"}, ()=>{
+      const state = AppState.presenceChannel.presenceState();
+      AppState.onlineCouriers = Object.values(state)
+        .flat()
+        .filter(p=>p.role==="courier")
+        .map(p=>p.courierId);
+    }).subscribe();
+  }
+
   AppState.realtimeChannel = db.channel("rt_v6")
     // Shipments — new shipment created
     .on("postgres_changes",{event:"INSERT",schema:"public",table:"shipments"}, p=>{
@@ -1364,17 +1494,18 @@ function startRealtime() {
     })
     .subscribe(status=>{
       AppState.rtStatus = status; // SUBSCRIBED|TIMED_OUT|CLOSED|CHANNEL_ERROR
-      const dot  = document.getElementById("rtStatusDot");
-      const text = document.getElementById("rtStatusText");
-      const cfg  = rtStatusConfig(status);
-      if(dot)  { dot.style.background = cfg.color; dot.title = cfg.label; }
-      if(text) { text.textContent = cfg.label; text.style.color = cfg.textColor; }
+      const dot       = document.getElementById("rtStatusDot");
+      const text      = document.getElementById("rtStatusText");
+      const container = document.querySelector(".rt-status");
+      const cfg       = rtStatusConfig(status);
+      // BUG 7 FIX: update ALL three elements from the same cfg object
+      if(dot)       { dot.style.background = cfg.color; dot.title = cfg.label; }
+      if(text)      { text.textContent = cfg.label; text.style.color = cfg.textColor; }
+      if(container) { container.title = cfg.label; } // sync tooltip on container
     });
 }
 
 // ── SESSION ───────────────────────────────────────────────
-function clearSession() { ["nukhba_v6","nukhba_v5","nukhba_session"].forEach(k=>localStorage.removeItem(k)); }
-
 // ══════════════════════════════════════════════════════════
 // HOMEPAGE
 // ══════════════════════════════════════════════════════════
@@ -1885,7 +2016,13 @@ function bindContentEvents() {
   });
   // Filter buttons (onclick= in HTML, no binding needed)
   // New shipment button
-  $("newShipBtn")?.addEventListener("click", () => Modals.newShipment());
+  // BUG 9 FIX: use event delegation so button always works regardless of
+  // which view rendered it and when postRender fires relative to DOM paint.
+  // Handles: #newShipBtn, #newShipBtn2 (merchant overview), and any future instances.
+  document.getElementById("viewContent")?.addEventListener("click", function(e) {
+    const btn = e.target.closest("#newShipBtn, #newShipBtn2, [data-action='newShipment']");
+    if (btn) { e.stopPropagation(); App.newShipment(); }
+  }, { once: true }); // replaced on each postRender cycle
   $("addUserBtn")?.addEventListener("click", Modals.addUser);
   $("openScanner")?.addEventListener("click", Modals.scanner);
   // Search inputs
@@ -2459,12 +2596,36 @@ function viewShipments() {
 function detailPanel(s) {
   const meta=STATUS_MAP[s.status]||{label:s.status,badge:"badge-gray"};
   const steps=STATUS_STEPS;const curIdx=steps.indexOf(s.status);
+
+  // UX#2: Determine settlement status for this shipment
+  const settlBadge = (() => {
+    if (s.status!=="delivered") return null;
+    const settlements = AppState.settlements||[];
+    // Check if this shipment's COD is covered by a settlement
+    const linked = settlements.find(st=>
+      st.merchant_id===(s.merchantId||AppState.user?.id) &&
+      ["pending","approved","paid"].includes(st.status)
+    );
+    if (!linked) return {label:"مؤهل للتسوية", badge:"badge-success", icon:"✅"};
+    const statusMap = {
+      pending:  {label:"طلب تسوية مُقدَّم", badge:"badge-warning", icon:"⏳"},
+      approved: {label:"تسوية معتمدة",      badge:"badge-brand",   icon:"✔️"},
+      paid:     {label:"تم الدفع",           badge:"badge-success", icon:"💰"},
+    };
+    return statusMap[linked.status]||null;
+  })();
+
   return `
     <div class="card" id="detailPanel">
       <div class="card-header">
         <div><div class="td-mono" style="font-size:16px;font-weight:700;">${esc(s.id)}</div>
           <div style="font-size:12px;color:var(--gray-400);margin-top:3px;">أُنشئت ${fmtDate(s.createdAt)}</div></div>
-        <span class="badge ${meta.badge}">${meta.label}</span>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+          <span class="badge ${meta.badge}">${meta.label}</span>
+          ${settlBadge?`<span class="badge ${settlBadge.badge}" style="font-size:10px;">
+            ${settlBadge.icon} ${settlBadge.label}
+          </span>`:""}
+        </div>
       </div>
       <div class="prog-track" style="margin-bottom:20px;">
         ${steps.map((st,i)=>`
@@ -3358,16 +3519,127 @@ function viewUsers() {
 // ── AUDIT VIEW ────────────────────────────────────────────
 function viewAudit() {
   if(!can("view_audit")) return `<div class="empty"><h3>غير مصرح</h3></div>`;
+  const logs    = AppState.auditLogs || [];
+  const filter  = AppState.auditFilter || "";
+  const catFilter = AppState.auditCatFilter || "";
+
+  // Human-readable action descriptions
+  const ACTION_META = {
+    LOGIN:                 {label:"تسجيل دخول",       icon:"🔑", cat:"auth",     color:"var(--success)"},
+    LOGOUT:                {label:"تسجيل خروج",        icon:"🚪", cat:"auth",     color:"var(--gray-400)"},
+    UPDATE_STATUS:         {label:"تغيير حالة شحنة",   icon:"🔄", cat:"shipment", color:"var(--brand)"},
+    BULK_STATUS_UPDATE:    {label:"تغيير جماعي للحالة",icon:"📦", cat:"shipment", color:"var(--brand)"},
+    BULK_ASSIGN_COURIER:   {label:"تعيين جماعي مندوب", icon:"🚚", cat:"shipment", color:"var(--info)"},
+    BULK_EXPORT:           {label:"تصدير بيانات",       icon:"📊", cat:"data",     color:"var(--gray-600)"},
+    PRINT_SHIPMENT:        {label:"طباعة شحنة",         icon:"🖨️", cat:"shipment", color:"var(--gray-600)"},
+    REQUEST_SETTLEMENT:    {label:"طلب تسوية",          icon:"💸", cat:"finance",  color:"var(--success)"},
+    DISPATCH_RULE_CREATE:  {label:"إنشاء قاعدة توزيع", icon:"⚡", cat:"dispatch", color:"var(--brand)"},
+    DISPATCH_RULE_UPDATE:  {label:"تعديل قاعدة توزيع", icon:"⚡", cat:"dispatch", color:"var(--warning)"},
+    DISPATCH_RULE_DELETE:  {label:"حذف قاعدة توزيع",   icon:"❌", cat:"dispatch", color:"var(--danger)"},
+    AUTO_DISPATCH_RUN:     {label:"تشغيل التوزيع التلقائي",icon:"🚀",cat:"dispatch",color:"var(--brand)"},
+    SLA_BREACH_ACK:        {label:"إقرار خرق SLA",      icon:"⚠️", cat:"sla",      color:"var(--warning)"},
+    SLA_BREACH_RESOLVE:    {label:"حل خرق SLA",          icon:"✅", cat:"sla",      color:"var(--success)"},
+    SLA_CONFIG_CREATE:     {label:"إنشاء إعداد SLA",    icon:"⚙️", cat:"sla",      color:"var(--brand)"},
+    SMS_SENT:              {label:"إرسال SMS",           icon:"📱", cat:"sms",      color:"var(--info)"},
+    PROFILE_UPDATE:        {label:"تعديل الملف الشخصي", icon:"👤", cat:"auth",     color:"var(--gray-600)"},
+    PASSWORD_CHANGE:       {label:"تغيير كلمة المرور",  icon:"🔐", cat:"auth",     color:"var(--warning)"},
+    BROADCAST_NOTIFICATION:{label:"إشعار جماعي",        icon:"📢", cat:"notif",    color:"var(--brand)"},
+    WEBHOOK_CREATE:        {label:"إنشاء Webhook",      icon:"🔗", cat:"api",      color:"var(--brand)"},
+    WEBHOOK_DELETE:        {label:"حذف Webhook",         icon:"🔗", cat:"api",      color:"var(--danger)"},
+    API_KEY_CREATE:        {label:"إنشاء مفتاح API",    icon:"🔑", cat:"api",      color:"var(--brand)"},
+    API_KEY_REVOKE:        {label:"إلغاء مفتاح API",    icon:"🔑", cat:"api",      color:"var(--danger)"},
+    COURIER_CONFIG_SAVE:   {label:"حفظ إعداد مندوب",   icon:"🚚", cat:"dispatch", color:"var(--info)"},
+  };
+
+  const CATS = {all:"الكل", auth:"المصادقة", shipment:"الشحنات", finance:"المالية",
+                dispatch:"التوزيع", sla:"SLA", api:"API", data:"البيانات", sms:"SMS"};
+
+  const filtered = logs.filter(l=>{
+    const txt = `${l.action} ${l.entity_id} ${l.description} ${l.performed_by}`.toLowerCase();
+    const matchQ   = !filter || txt.includes(filter.toLowerCase());
+    const meta     = ACTION_META[l.action];
+    const matchCat = !catFilter || catFilter==="all" || (meta?.cat||"other")===catFilter;
+    return matchQ && matchCat;
+  });
+
   return `
     <div class="card">
-      <div class="card-header">
-        <h3 class="card-title">${icon("shield")} سجل النشاط</h3>
-        <button class="btn btn-secondary btn-sm" onclick="App.loadAudit()">${icon("refresh",13)} تحديث</button>
+      <div class="card-header" style="margin-bottom:16px;">
+        <h3 class="card-title">${icon("shield")} سجل الأعمال التدقيقي</h3>
+        <button class="btn btn-secondary btn-sm" onclick="App.loadAudit()">
+          ${icon("refresh",13)} تحديث
+        </button>
       </div>
-      <div style="margin-bottom:14px;"><input id="auditSearch" value="${esc(AppState.auditFilter)}"
-        placeholder="ابحث بالمستخدم أو الإجراء..."
-        style="width:100%;padding:9px 14px;border-radius:var(--radius);border:1.5px solid var(--gray-300);font-size:13px;"/></div>
-      <div id="auditContent"><div class="page-loader"><span class="spinner"></span> جاري تحميل السجل...</div></div>
+
+      <!-- Filters -->
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
+        <input id="auditSearch" value="${esc(filter)}"
+          placeholder="ابحث بالمستخدم أو الإجراء أو المعرّف..."
+          style="flex:1;min-width:200px;padding:8px 12px;border-radius:var(--radius);
+            border:1.5px solid var(--gray-300);font-size:13px;"/>
+        <select id="auditCatFilter"
+          style="padding:8px 12px;border-radius:var(--radius);border:1.5px solid var(--gray-300);font-size:13px;"
+          onchange="AppState.auditCatFilter=this.value;rerenderContent();">
+          ${Object.entries(CATS).map(([v,l])=>
+            `<option value="${v}" ${catFilter===v?"selected":""}>${l}</option>`).join("")}
+        </select>
+      </div>
+
+      <!-- Stats row -->
+      <div style="display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap;">
+        <span style="font-size:12px;color:var(--gray-500);">${filtered.length} إجراء</span>
+        ${Object.entries(CATS).filter(([v])=>v!=="all").map(([v,l])=>{
+          const cnt = logs.filter(log=>(ACTION_META[log.action]?.cat||"other")===v).length;
+          if(!cnt) return "";
+          return `<span class="badge badge-gray" style="font-size:11px;cursor:pointer;"
+            onclick="AppState.auditCatFilter='${v}';rerenderContent();">${l} (${cnt})</span>`;
+        }).join("")}
+      </div>
+
+      <!-- Table -->
+      ${!filtered.length
+        ? `<div class="empty"><div class="empty-icon">🔍</div>
+            <h3>لا توجد نتائج</h3><p>جرّب تغيير معايير البحث</p></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr>
+              <th>الإجراء</th><th>المستخدم</th><th>الدور</th>
+              <th>التفاصيل</th><th>الكيان</th><th>التوقيت</th>
+            </tr></thead>
+            <tbody>
+              ${filtered.slice(0,200).map(l=>{
+                const meta = ACTION_META[l.action] || {label:l.action, icon:"📋", color:"var(--gray-500)"};
+                return `<tr>
+                  <td>
+                    <div style="display:flex;align-items:center;gap:8px;">
+                      <span style="font-size:16px;">${meta.icon}</span>
+                      <div>
+                        <div style="font-weight:600;font-size:13px;color:${meta.color};">
+                          ${meta.label}
+                        </div>
+                        <div style="font-size:10px;color:var(--gray-400);font-family:monospace;">
+                          ${esc(l.action)}
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                  <td style="font-weight:600;font-size:12px;">${esc(l.performed_by||l.user||"النظام")}</td>
+                  <td><span class="badge badge-gray" style="font-size:10px;">${esc(l.role||meta.cat||"—")}</span></td>
+                  <td style="font-size:12px;color:var(--gray-600);max-width:300px;
+                    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+                    title="${esc(l.description||"")}">
+                    ${esc((l.description||"").slice(0,80))}
+                  </td>
+                  <td style="font-size:11px;font-family:monospace;color:var(--gray-500);">
+                    ${l.entity_id?`<span onclick="navigator.clipboard?.writeText('${esc(l.entity_id)}')"
+                      style="cursor:pointer;" title="نسخ">${esc(l.entity_id.slice(0,16))}…</span>`:"—"}
+                  </td>
+                  <td style="font-size:11px;color:var(--gray-400);white-space:nowrap;">
+                    ${fmtTime(l.created_at||l.timestamp)}
+                  </td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table></div>`}
     </div>`;
 }
 
@@ -3378,6 +3650,7 @@ function bindDashboardEvents() {
   $$("[data-view]").forEach(btn=>{
     btn.addEventListener("click",()=>{
       AppState.view=btn.dataset.view;
+      saveNavState(btn.dataset.view); // BUG 2 FIX: persist nav state
       AppState.statusFilter="all";
       if(AppState.advancedFilter) AppState.advancedFilter.showAdvanced=false;
       // rerenderContent() only replaces #viewContent — it never
@@ -8054,7 +8327,7 @@ const App={
     btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
     try {
       await DB.saveSLAConfig({
-        id:                     configId||undefined,
+        id:                     configId||null,
         label,
         target_delivery_hours:  hours,
         warn_before_hours:      warn,
@@ -8130,6 +8403,7 @@ const App={
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
     );
     AppState.locationBroadcasting = true;
+    saveBroadcastState(true); // BUG 3 FIX: persist broadcast state
     rerenderContent();
     toast("✅ بث الموقع نشط — سيرى المدير موقعك على الخريطة");
     window.addEventListener("beforeunload", () => {
@@ -8146,6 +8420,7 @@ const App={
       AppState._locationWatchId = null;
     }
     AppState.locationBroadcasting = false;
+    saveBroadcastState(false); // BUG 3 FIX: clear persisted broadcast state
     DB.markMyselfOffline();
     rerenderContent();
     toast("تم إيقاف بث الموقع","info");
@@ -8317,8 +8592,11 @@ const App={
   // ── Rule management ───────────────────────────────────────────
   openDispatchRuleModal(ruleId) {
     const existing = ruleId ? AppState.dispatchRules.find(r=>r.id===ruleId) : null;
-    const couriers = AppState.courierConfigs || [];
-    const GOVS     = Object.keys(EGYPT_GOV || {});
+    // BUG 4 FIX: use AppState.couriers (all active couriers) not courierConfigs
+    // courierConfigs only contains couriers that have been explicitly configured,
+    // leaving unconfigured couriers invisible in the dropdown.
+    const allCouriers = (AppState.couriers || []).filter(c=>c.is_active!==false);
+    const GOVS        = Object.keys(EGYPT_GOV || {});
 
     Modals.open(`<div class="modal modal-lg">
       <div class="modal-header">
@@ -8352,9 +8630,11 @@ const App={
             <label>المندوب المحدد</label>
             <select id="drCourierId" style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
               <option value="">-- اختر مندوباً --</option>
-              ${couriers.map(c=>`<option value="${c.courier_id}" ${existing?.target_courier_id===c.courier_id?"selected":""}>
-                ${esc(c.courierName)}
-              </option>`).join("")}
+              ${allCouriers.length
+                ? allCouriers.map(c=>`<option value="${esc(c.id)}" ${existing?.target_courier_id===c.id?"selected":""}>
+                    ${esc(c.full_name||c.name||"—")}
+                  </option>`).join("")
+                : `<option disabled>لا يوجد مناديب نشطون — تأكد من تحميل البيانات</option>`}
             </select>
           </div>
         </div>
@@ -8433,8 +8713,9 @@ const App={
 
     btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
     try {
+      // Never include id in the payload object — DB.saveDispatchRule handles it
       await DB.saveDispatchRule({
-        id:                   ruleId||undefined,
+        id:                   ruleId||null,
         name, priority,       strategy,
         target_courier_id:    strategy==="specific_courier"?courierId:null,
         zone_tag:             strategy==="zone_pool"?zoneTag:null,
@@ -9921,24 +10202,131 @@ const App={
   },
 
   async requestSettlement() {
-    const bal = AppState.merchantBalance;
-    if (bal <= 0) { toast("لا يوجد رصيد متاح للتسوية","warning"); return; }
-    const amount = prompt(`الرصيد المتاح: ${money(bal)}\nالمبلغ المطلوب تحصيله:`);
-    if (!amount || isNaN(Number(amount))) return;
-    const req = Number(amount);
-    if (req <= 0 || req > bal) { toast("مبلغ غير صحيح","error"); return; }
+    // BUG 10 FIX: Recalculate balance directly from loaded shipments instead
+    // of relying solely on AppState.merchantBalance which may be stale or 0
+    // if the RPC call failed or returned before shipments were loaded.
+    const ships     = AppState.shipments || [];
+    const delivered = ships.filter(s=>s.status==="delivered");
+    const cod       = delivered.reduce((a,s)=>a+(s.amount||0),0);
+    const fees      = delivered.reduce((a,s)=>a+(s.deliveryFee||0),0);
+    const retFees   = ships.filter(s=>s.status==="returned").reduce((a,s)=>a+(s.returnFee||0),0);
+    // Subtract any already-settled amounts
+    const settled   = (AppState.settlements||[])
+      .filter(s=>["pending","approved","paid"].includes(s.status))
+      .reduce((a,s)=>a+(s.amount||0),0);
+    const available = cod - fees - retFees - settled;
+
+    // Use the higher of the two calculations (RPC vs local)
+    const bal = Math.max(AppState.merchantBalance||0, available);
+
+    if (bal <= 0) {
+      // Show a diagnostic instead of just "no balance"
+      Modals.open(`<div class="modal" style="max-width:440px;">
+        <div class="modal-header">
+          <h3>💸 طلب تسوية</h3>
+          <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+        </div>
+        <div class="modal-body">
+          <div style="background:var(--warning-bg);border:1px solid var(--warning-border);
+            border-radius:var(--radius);padding:14px;font-size:13px;">
+            <div style="font-weight:700;margin-bottom:10px;">لا يوجد رصيد متاح للتسوية</div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <span>COD المحصل (${delivered.length} شحنة مُسلَّمة)</span>
+              <span style="font-weight:600;">${money(cod)}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;color:var(--danger);">
+              <span>رسوم الشحن</span><span>- ${money(fees)}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;color:var(--danger);">
+              <span>رسوم الإرجاع</span><span>- ${money(retFees)}</span>
+            </div>
+            ${settled>0?`<div style="display:flex;justify-content:space-between;margin-bottom:6px;color:var(--warning);">
+              <span>تسويات سابقة معلقة/مدفوعة</span><span>- ${money(settled)}</span>
+            </div>`:""}
+            <div style="display:flex;justify-content:space-between;font-weight:700;
+              padding-top:8px;border-top:1px solid var(--gray-200);">
+              <span>الرصيد المتاح</span>
+              <span style="color:${bal>0?"var(--success)":"var(--danger)"};">${money(bal)}</span>
+            </div>
+            <div style="margin-top:10px;font-size:12px;color:var(--gray-500);">
+              ${delivered.length===0?"لا توجد شحنات مُسلَّمة بعد.":
+                bal<=0?"جميع المبالغ تم تسويتها أو تغطيها رسوم الشحن.":
+                "يرجى الانتظار حتى تتم معالجة الشحنات."}
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" onclick="Modals.close()">إغلاق</button>
+        </div>
+      </div>`);
+      return;
+    }
+
+    // Replace prompt() with a proper modal
+    Modals.open(`<div class="modal" style="max-width:420px;">
+      <div class="modal-header">
+        <h3>💸 طلب تسوية</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div style="background:var(--success-bg);border:1px solid var(--success-border,#bbf7d0);
+          border-radius:var(--radius);padding:12px;margin-bottom:16px;text-align:center;">
+          <div style="font-size:12px;color:var(--gray-500);">الرصيد المتاح</div>
+          <div style="font-size:24px;font-weight:800;color:var(--success);">${money(bal)}</div>
+        </div>
+        <div class="field">
+          <label>المبلغ المطلوب *</label>
+          <input id="settlAmt" type="number" step="0.01" min="1" max="${bal}"
+            value="${bal}" style="font-size:18px;font-weight:700;text-align:center;"/>
+        </div>
+        <div class="field">
+          <label>طريقة الدفع</label>
+          <select id="settlMethod" style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            <option value="bank_transfer">🏦 تحويل بنكي</option>
+            <option value="instapay">📱 InstaPay</option>
+            <option value="cash">💵 نقدي</option>
+          </select>
+        </div>
+        <div id="settlErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="settlBtn" class="btn btn-primary" onclick="App._doRequestSettlement(${bal})">إرسال الطلب</button>
+      </div>
+    </div>`);
+    setTimeout(()=>$("settlAmt")?.select(), 80);
+  },
+
+  async _doRequestSettlement(maxBal) {
+    const amt    = parseFloat($("settlAmt")?.value)||0;
+    const method = $("settlMethod")?.value||"bank_transfer";
+    const errEl  = $("settlErr");
+    const btn    = $("settlBtn");
+    if (amt<=0||amt>maxBal) {
+      errEl.style.display="block";
+      errEl.textContent=`المبلغ يجب أن يكون بين 1 و ${money(maxBal)}`;
+      return;
+    }
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
     try {
       const { error } = await db.from("settlements").insert([{
         merchant_id:    AppState.user.id,
-        amount:         req,
+        amount:         amt,
         status:         "pending",
-        payment_method: "bank_transfer",
+        payment_method: method,
       }]);
       if (error) throw error;
       await DB.addAudit("REQUEST_SETTLEMENT", AppState.user.id,
-        `Merchant ${AppState.user.name} requested settlement of ${money(req)}`, "shipment");
-      toast(`✅ تم إرسال طلب التسوية بمبلغ ${money(req)}`);
-    } catch(err) { toast("خطأ: "+err.message,"error"); }
+        `Merchant ${AppState.user.name} requested ${money(amt)} via ${method}`, "finance");
+      // Refresh settlements list
+      AppState.settlements = await DB.loadSettlements(AppState.user.id).catch(()=>[]);
+      Modals.close();
+      rerenderContent();
+      toast(`✅ تم إرسال طلب التسوية بمبلغ ${money(amt)}`);
+    } catch(err) {
+      errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
+      btn.disabled=false; btn.textContent="إرسال الطلب";
+    }
   },
 
   // ── Phase 2A: Address Book ────────────────────────────────
@@ -10966,10 +11354,12 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
         phone:         profile?.phone     || session.phone || ""
       };
       AppState.page = "dashboard";
-      AppState.view = role === "customer" ? "track"
+      // BUG 2 FIX: restore last active view from localStorage
+      const savedNav = getNavState();
+      AppState.view = role === "customer" ? "overview"
                     : role === "courier"  ? "tasks"
-                    : role === "merchant" ? "shipments"
-                    : "overview";
+                    : role === "merchant" ? (savedNav || "shipments")
+                    : (savedNav || "overview");
 
       // Load permissions + all data in parallel — render AFTER all settle
       const [, ships, notifs, users, couriers] = await Promise.all([
@@ -11008,6 +11398,10 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
       if (role === "merchant") await App.loadMerchantData();
       if (role === "courier")  await App.loadMyWallet();
       if (role === "customer") AppState.shipments = await DB.loadShipments();
+      // BUG 3 FIX: restore GPS broadcast state for couriers
+      if (role === "courier" && getBroadcastState()) {
+        App.startLocationBroadcast();
+      }
 
       // Single render — everything ready
       render();
