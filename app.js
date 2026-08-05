@@ -2113,7 +2113,8 @@ function postRender() {
     App.loadDispatchData();
   }
   if(AppState.view==="sla" && !AppState._slaDataLoaded){
-    AppState._slaDataLoaded = true;
+    // BUG#3 FIX: do NOT set _slaDataLoaded=true here — only loadSLAData() sets it
+    // after data arrives. This prevents the empty-page flash on first open.
     App.loadSLAData();
   }
   if(AppState.view==="webhooks" && !AppState._webhooksDataLoaded){
@@ -4969,6 +4970,13 @@ function viewLiveOps() {
   const activeCouriers = allCouriers.filter(c=>activeCourierIds.has(c.id));
   const idleCouriers   = allCouriers.filter(c=>!activeCourierIds.has(c.id));
   const needsAttention = [...suspended,...rescheduled];
+  // BUG#2 FIX: connected couriers from PRESENCE (real browser sessions)
+  // AppState.onlineCouriers is populated by startRealtime() presence channel
+  // Falls back to driverLocations (GPS-reported online) if presence not yet ready
+  const presenceOnline = AppState.onlineCouriers?.length > 0
+    ? AppState.onlineCouriers
+    : Object.values(AppState.driverLocations||{}).filter(l=>l.isOnline).map(l=>l.courierId);
+  const connectedCount = presenceOnline.length;
 
   return `<div>
     <!-- Connection + refresh header -->
@@ -4993,7 +5001,8 @@ function viewLiveOps() {
       ${kpi("تسليمات اليوم",todayDel.length,"chart","var(--success)","var(--success-bg)")}
       ${kpi("مرتجعات اليوم",todayRet.length,"refresh","var(--danger)","var(--danger-bg)")}
       ${kpi("خارج للتسليم الآن",outForDelivery.length,"truck","var(--purple,#7c3aed)","var(--purple-bg,#ede9fe)")}
-      ${kpi("مناديب مشغولون",activeCouriers.length,"users","var(--success)","var(--success-bg)")}
+      ${kpi("مناديب متصلون",connectedCount,"users","var(--success)","var(--success-bg)")}
+      ${kpi("مناديب مشغولون",activeCouriers.length,"truck","var(--brand)","var(--brand-light)")}
       ${kpi("متاحون للتعيين",idleCouriers.length,"users","var(--info)","var(--info-bg)")}
       ${kpi("تحتاج مراجعة",needsAttention.length,"log","var(--warning)","var(--warning-bg)")}
     </div>
@@ -5748,14 +5757,27 @@ function viewWebhooks() {
 // SLA MONITORING VIEW
 // ══════════════════════════════════════════════════════════════
 function viewSLA() {
+  // BUG#3 FIX: show loading spinner while data loads — prevents empty page
+  if (!AppState._slaDataLoaded) {
+    return `<div class="card" style="text-align:center;padding:60px 20px;">
+      <div class="spinner" style="margin:0 auto 16px;"></div>
+      <div style="color:var(--gray-500);">جاري تحميل بيانات SLA...</div>
+    </div>`;
+  }
   const breaches = AppState.slaBreaches || [];
   const configs  = AppState.slaConfigs  || [];
   const summary  = AppState.slaSummary  || {};
   const tab      = AppState.slaTab      || "breaches";
 
-  const openBreaches = breaches.filter(b=>b.status==="open"&&b.breach_type==="delivery");
-  const warnings     = breaches.filter(b=>b.status==="open"&&b.breach_type==="warning");
-  const acknowledged = breaches.filter(b=>b.status==="acknowledged");
+  // BUG#5 FIX: All KPIs computed from AppState.slaBreaches — single source of truth.
+  // Previously slaSummary (from RPC) and local breaches array could diverge after
+  // acknowledge/resolve actions that updated local state but not slaSummary.
+  const openBreaches   = breaches.filter(b=>b.status==="open"&&b.breach_type==="delivery");
+  const warnings       = breaches.filter(b=>b.status==="open"&&b.breach_type==="warning");
+  const acknowledged   = breaches.filter(b=>b.status==="acknowledged");
+  const resolvedToday  = breaches.filter(b=>b.status==="resolved"&&
+    b.resolved_at && new Date(b.resolved_at).toDateString()===new Date().toDateString());
+  const allOpen        = breaches.filter(b=>b.status==="open");
 
   const STATUS_LABEL = { open:"مفتوح", acknowledged:"تم الإقرار", resolved:"تم الحل" };
   const TYPE_LABEL   = { delivery:"خرق SLA", warning:"تحذير مبكر" };
@@ -5781,7 +5803,7 @@ function viewSLA() {
       ${kpi("خروقات مفتوحة",   openBreaches.length, "log",     "var(--danger)",  "var(--danger-bg)")}
       ${kpi("تحذيرات نشطة",   warnings.length,     "refresh",  "var(--warning)", "var(--warning-bg)")}
       ${kpi("قيد الإقرار",    acknowledged.length, "chart",    "var(--info)",    "var(--info-bg)")}
-      ${kpi("إجمالي الإعدادات",configs.length,      "box",      "var(--brand)",   "var(--brand-light)")}
+      ${kpi("حُلَّت اليوم",    resolvedToday.length,"chart",    "var(--success)", "var(--success-bg)")}
     </div>`;
 
   // ── Breach table helper ───────────────────────────────────────
@@ -6461,6 +6483,12 @@ function viewPickupRequests() {
 }
 
 const App={
+  // ── BUG 6 FIX: Shipment creation proxies ─────────────────────
+  // newShipment() and editShipment() live in the Modals object (historical).
+  // All onclick="App.newShipment()" references proxy through here.
+  newShipment()    { return Modals.newShipment(); },
+  editShipment(id) { return Modals.editShipment ? Modals.editShipment(id) : null; },
+
   setFilter(f)       { AppState.statusFilter  = f; AppState.selectedShipments=new Set(); rerenderContent(); },
   setServiceFilter(f){ AppState.serviceFilter = f; AppState.selectedShipments=new Set(); rerenderContent(); },
   setOrderFilter(f)  { AppState.orderFilter   = f; AppState.selectedShipments=new Set(); rerenderContent(); },
@@ -8224,11 +8252,14 @@ const App={
   async acknowledgeSLABreach(id) {
     try {
       await DB.acknowledgeSLABreach(id);
+      // BUG#5 FIX: update local state AND reload to ensure KPIs/tabs stay in sync
       const b = AppState.slaBreaches.find(x=>x.id===id);
       if (b) { b.status="acknowledged"; b.acknowledged_at=new Date().toISOString(); }
       await DB.addAudit("SLA_BREACH_ACK", id,
         `Acknowledged by ${AppState.user.name}`, "sla");
-      rerenderContent();
+      // Force full SLA data reload so slaSummary and breaches stay in sync
+      AppState._slaDataLoaded = false;
+      App.loadSLAData();
       toast("✅ تم الإقرار بالخرق");
     } catch(err) { toast("فشل الإقرار: "+err.message,"error"); }
   },
@@ -8240,7 +8271,9 @@ const App={
       if (b) { b.status="resolved"; b.resolved_at=new Date().toISOString(); }
       await DB.addAudit("SLA_BREACH_RESOLVE", id,
         `Resolved by ${AppState.user.name}`, "sla");
-      rerenderContent();
+      // BUG#5 FIX: force reload for consistency
+      AppState._slaDataLoaded = false;
+      App.loadSLAData();
       toast("✅ تم حل الخرق");
     } catch(err) { toast("فشل الحل: "+err.message,"error"); }
   },
@@ -11398,9 +11431,11 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
       if (role === "merchant") await App.loadMerchantData();
       if (role === "courier")  await App.loadMyWallet();
       if (role === "customer") AppState.shipments = await DB.loadShipments();
-      // BUG 3 FIX: restore GPS broadcast state for couriers
+      // BUG 3 FIX: restore GPS broadcast state — set flag BEFORE render so UI
+      // shows correct state immediately; startLocationBroadcast resumes the watch
       if (role === "courier" && getBroadcastState()) {
-        App.startLocationBroadcast();
+        AppState.locationBroadcasting = true; // set flag first so UI renders correctly
+        setTimeout(() => App.startLocationBroadcast(), 500); // defer until after render
       }
 
       // Single render — everything ready

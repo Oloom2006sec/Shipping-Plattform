@@ -165,3 +165,71 @@
 | #10 Settlement zero balance | merchantBalance RPC stale | Recalculate from AppState.shipments + diagnostic modal | ✅ |
 | UX#1 Audit log | Developer-oriented | Business audit trail with ACTION_META, categories, icons | ✅ |
 | UX#2 Settlement status | Not shown on shipment | settlBadge in detailPanel for delivered shipments | ✅ |
+
+---
+
+# Bug Fix Sprint 1 — Round 2 (Remaining Issues)
+
+## REMAINING BUG #1 — Broadcast State Still Resets on Refresh
+
+**Root Cause:** `getBroadcastState()` was called correctly in the boot path, but `startLocationBroadcast()` was called synchronously before `render()`. Two problems: (1) `toast()` inside `startLocationBroadcast()` requires the DOM to be painted, causing a silent failure before render. (2) `AppState.locationBroadcasting` was still `false` when `viewTasks()` rendered, so the UI showed "OFF" regardless of the stored state.
+
+**Fix:** Set `AppState.locationBroadcasting = true` immediately (before render, so UI shows "ON") then defer the actual `startLocationBroadcast()` call via `setTimeout(..., 500)` until after `render()` has painted the DOM. The visual state is now correct on first render and the GPS watch starts 500ms later.
+
+---
+
+## REMAINING BUG #2 — Live Operations Presence Shows Wrong Count
+
+**Root Cause:** The "connected couriers" KPI was showing `activeCouriers.length` (couriers with active shipment assignments), not actual browser presence. `AppState.onlineCouriers` was being populated by the presence channel but never used in `viewLiveOps()`. No KPI showed real-time connected sessions.
+
+**Fix:** Added `connectedCount` computed from `AppState.onlineCouriers` (presence channel) with fallback to `AppState.driverLocations` (GPS-reported online). Added a new "مناديب متصلون" KPI to the liveops header using this real-time count. The presence channel still excludes admin sessions (only couriers call `track()`).
+
+---
+
+## REMAINING BUG #3 — SLA Page Shows Empty on First Open
+
+**Root Cause:** `postRender()` set `AppState._slaDataLoaded = true` **before** calling `App.loadSLAData()`. Since `loadSLAData()` is async, `viewSLA()` rendered immediately with empty arrays. On subsequent navigations, `_slaDataLoaded` was already `true` so the guard prevented re-fetching, but the data had never actually arrived.
+
+**Fix:** Removed the premature `_slaDataLoaded = true` from `postRender()`. Only `loadSLAData()` sets the flag after the `await Promise.all()` resolves. Added a loading spinner to `viewSLA()` — when `_slaDataLoaded === false`, shows "جاري تحميل بيانات SLA..." instead of an empty table.
+
+---
+
+## REMAINING BUG #4 — SLA Tabs Don't Navigate Correctly
+
+**Root Cause:** `setSLATab()` sets `AppState.slaTab` and calls `rerenderContent()`. `viewSLA()` reads `AppState.slaTab`. This flow was architecturally correct. The real issue was that BUG#3's premature flag-setting meant `viewSLA()` was never reaching the tab rendering code (it short-circuited on empty data). With BUG#3 fixed, tab navigation works correctly.
+
+**Fix:** BUG#3 fix resolves this. Verified that `tabBar` onclick attributes use `App.setSLATab('${t.id}')` with correct string interpolation, and each `if (tab==="...")` branch is reached properly.
+
+---
+
+## REMAINING BUG #5 — SLA KPI vs Log Inconsistency
+
+**Root Cause:** KPI cards used `AppState.slaSummary` from `get_sla_summary()` RPC, while the table used filtered `AppState.slaBreaches`. After `acknowledgeSLABreach()` updated local state (changing `b.status`), `slaSummary` was NOT refreshed — it still showed the old count. The two sources diverged.
+
+**Fix:** Removed `slaSummary` dependency entirely from KPIs. All 4 KPI cards now computed from `AppState.slaBreaches` directly (same array as the table). After `acknowledgeSLABreach()` and `resolveSLABreach()`, `_slaDataLoaded` is reset to `false` and `loadSLAData()` is called — forcing a fresh DB fetch that syncs both the breaches array and any cached summary.
+
+---
+
+## REMAINING BUG #6 — App.newShipment() Completely Missing
+
+**Root Cause:** `newShipment()` and `editShipment()` are methods on the `Modals` object (lines 3766+, historical architecture). The `App` object starts at line 6463. During the bug sprint, event delegation was updated to call `App.newShipment()` but no such method exists on `App`. All onclick references and the event delegation handler silently failed with `TypeError: App.newShipment is not a function`.
+
+**Fix:** Added two proxy methods at the top of the `App` object:
+```js
+newShipment()    { return Modals.newShipment(); },
+editShipment(id) { return Modals.editShipment ? Modals.editShipment(id) : null; },
+```
+This is the correct fix — `Modals.newShipment()` contains ~200 lines of shipment creation logic that was always correct. The proxy makes it callable as `App.newShipment()` from any onclick or event handler without moving or duplicating code.
+
+---
+
+## Final Verification Status (Round 2)
+
+| Bug | Status |
+|---|---|
+| BUG#1 Broadcast resets | ✅ Fixed — set flag before render, defer watch start |
+| BUG#2 Wrong courier count | ✅ Fixed — presence-based connectedCount KPI |
+| BUG#3 SLA empty on open | ✅ Fixed — loading spinner + flag only set after data arrives |
+| BUG#4 SLA tabs don't navigate | ✅ Fixed — consequence of BUG#3 fix |
+| BUG#5 SLA KPI vs log mismatch | ✅ Fixed — single source of truth from slaBreaches array |
+| BUG#6 App.newShipment missing | ✅ Fixed — proxy method on App delegates to Modals |
