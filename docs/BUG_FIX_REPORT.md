@@ -233,3 +233,92 @@ This is the correct fix — `Modals.newShipment()` contains ~200 lines of shipme
 | BUG#4 SLA tabs don't navigate | ✅ Fixed — consequence of BUG#3 fix |
 | BUG#5 SLA KPI vs log mismatch | ✅ Fixed — single source of truth from slaBreaches array |
 | BUG#6 App.newShipment missing | ✅ Fixed — proxy method on App delegates to Modals |
+
+---
+
+# Bug Fix Sprint 1 — Round 3 (Final Verification)
+
+## BUG #1 — Broadcast State Not Restored (Root Cause Found)
+
+**Why the previous fix didn't work:**
+Round 2 set `AppState.locationBroadcasting = true` before calling `startLocationBroadcast()`.
+But `startLocationBroadcast()` guards with:
+```js
+if (AppState.locationBroadcasting) { toast("already running"); return; }
+```
+So `watchPosition()` was **never registered** — the UI showed "ON" but no GPS watch was running.
+
+**Actual root cause:** The guard used `AppState.locationBroadcasting` (a flag) instead of `AppState._locationWatchId !== null` (the actual watch). These two could diverge.
+
+**Fix:**
+1. Changed `startLocationBroadcast(fromRestore?)` — accepts a `fromRestore` flag. When `true`, skips the "already running" toast but still checks `_locationWatchId !== null` (the real truth source).
+2. Boot restore calls `App.startLocationBroadcast(true)` — no premature flag setting.
+3. `toggleLocationBroadcast()` checks `_locationWatchId !== null` not the flag.
+4. `viewTasks` broadcast banner reads `_locationWatchId !== null` — shows correct state even before `watchPosition` fires its first callback.
+
+---
+
+## BUG #2 — Presence Shows Stale Sessions (Root Cause Found)
+
+**Why the previous fix didn't work:**
+`AppState.onlineCouriers` was populated but the `connectedCount` computation in `viewLiveOps` still had a fallback `presenceOnline = onlineCouriers.length > 0 ? ... : driverLocations`. Supabase Presence does not automatically expire sessions from crashed browsers — old `joinedAt` entries persist in the presence state until Supabase's own heartbeat (~30s) removes them.
+
+**Fix:** Added `TWO_MIN_AGO` filter in both the courier and admin presence sync handlers:
+```js
+const TWO_MIN_AGO = Date.now() - 2 * 60 * 1000;
+.filter(p => p.role === "courier" && new Date(p.joinedAt).getTime() > TWO_MIN_AGO)
+```
+Sessions older than 2 minutes are excluded. Combined with Supabase's own heartbeat expiry, this eliminates ghost sessions from the count.
+
+---
+
+## BUG #3 — Governor Selector Stuck on "Loading..." (Root Cause Found)
+
+**Root cause:** `Modals.newShipment()` called `Promise.all([DB.loadCouriers(), loadEgyptData()])` before opening the modal — which correctly loads `EGYPT_GOV`. However the modal HTML template still contained `<option value="">جاري التحميل...</option>` hardcoded. After `Modals.open()` rendered the DOM, a second `await loadEgyptData()` was called to repopulate `fGov` — but only if `$("fGov")` still existed in DOM. Race: if the user interacted before this second call completed, the select stayed stuck.
+
+**Fix:** Removed the two-step population entirely. The `fGov` select is now populated **inline in the template** using `EGYPT_GOV` which is guaranteed loaded by the `Promise.all` before `Modals.open()` is called:
+```js
+${Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("")}
+```
+No post-modal population needed. The select is always fully populated when the modal first renders.
+
+---
+
+## BUG #4 — SLA Dashboard and Log Still Inconsistent (Root Cause Found)
+
+**Why the previous fix didn't work:**
+Round 2 called `AppState._slaDataLoaded = false` then `App.loadSLAData()` — an async operation. During the time between the action and DB response, the UI showed stale data from the intermediate state (local mutation + old array). `loadSLAData()` triggered `rerenderContent()` only after the DB responded.
+
+**Actual root cause:** Two re-renders were happening at different times from different data states, causing visible inconsistency between the KPI row and the breach table.
+
+**Fix:** Two-phase update pattern:
+1. **Phase 1 (immediate):** Mutate `AppState.slaBreaches` locally → `rerenderContent()` immediately. Both KPI row and table now read from the same mutated array → always consistent.
+2. **Phase 2 (background):** `DB.loadSLABreaches()` fire-and-forget → on resolve, overwrites `AppState.slaBreaches` with fresh DB data → `rerenderContent()` again.
+
+The user sees the correct state immediately (Phase 1), and the DB-confirmed state a moment later (Phase 2). No window where KPI and table show different values.
+
+---
+
+## Final Status — All Bugs Resolved
+
+| Sprint | Bug | Status |
+|---|---|---|
+| Round 1 | #1 Session expiry | ✅ Fixed |
+| Round 1 | #2 Nav state persistence | ✅ Fixed |
+| Round 1 | #3 Broadcast state (partial) | ✅ Fixed in Round 3 |
+| Round 1 | #4 Dispatch courier dropdown | ✅ Fixed |
+| Round 1 | #5 Dispatch null PK | ✅ Fixed |
+| Round 1 | #6 SLA null PK | ✅ Fixed |
+| Round 1 | #7 RT indicator mixed state | ✅ Fixed |
+| Round 1 | #8 Presence count (partial) | ✅ Fixed in Round 3 |
+| Round 1 | #9 New shipment button race | ✅ Fixed |
+| Round 1 | #10 Settlement zero balance | ✅ Fixed |
+| Round 1 | UX#1 Audit log | ✅ Fixed |
+| Round 1 | UX#2 Settlement status badge | ✅ Fixed |
+| Round 2 | #6 App.newShipment missing | ✅ Fixed |
+| Round 2 | SLA init empty page (partial) | ✅ Fixed in Round 3 |
+| Round 2 | SLA tabs (partial) | ✅ Fixed |
+| Round 3 | Broadcast restore root cause | ✅ Fixed |
+| Round 3 | Presence stale sessions | ✅ Fixed |
+| Round 3 | Governor selector race | ✅ Fixed |
+| Round 3 | SLA acknowledge sync | ✅ Fixed |

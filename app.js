@@ -1421,11 +1421,14 @@ function startRealtime() {
     // Courier joins presence with their identity
     AppState.presenceChannel.on("presence",{event:"sync"}, ()=>{
       const state = AppState.presenceChannel.presenceState();
+      const TWO_MIN_AGO = Date.now() - 2 * 60 * 1000;
       AppState.onlineCouriers = Object.values(state)
         .flat()
-        .filter(p=>p.role==="courier")
-        .map(p=>p.courierId);
-    }).subscribe(async status=>{
+        .filter(p => p.role === "courier" &&
+          // BUG#2 FIX: remove stale sessions older than 2 minutes
+          new Date(p.joinedAt).getTime() > TWO_MIN_AGO)
+        .map(p => p.courierId);
+    }).subscribe(async status => {
       if (status === "SUBSCRIBED") {
         await AppState.presenceChannel.track({
           courierId:   AppState.user.id,
@@ -1439,10 +1442,12 @@ function startRealtime() {
     // Admin/merchant observe only — no track() call so not counted
     AppState.presenceChannel.on("presence",{event:"sync"}, ()=>{
       const state = AppState.presenceChannel.presenceState();
+      const TWO_MIN_AGO = Date.now() - 2 * 60 * 1000;
       AppState.onlineCouriers = Object.values(state)
         .flat()
-        .filter(p=>p.role==="courier")
-        .map(p=>p.courierId);
+        .filter(p => p.role === "courier" &&
+          new Date(p.joinedAt).getTime() > TWO_MIN_AGO)
+        .map(p => p.courierId);
     }).subscribe();
   }
 
@@ -2707,19 +2712,19 @@ function viewTasks() {
   const broadcastBanner=`
     <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
       border-radius:var(--radius);margin-bottom:4px;font-size:13px;
-      background:${AppState.locationBroadcasting?"var(--success-bg)":"var(--gray-50)"};
-      border:1px solid ${AppState.locationBroadcasting?"var(--success-border,#bbf7d0)":"var(--gray-200)"};">
-      <span style="font-size:18px;">${AppState.locationBroadcasting?"🟢":"⚫"}</span>
+      background:${AppState._locationWatchId!==null?"var(--success-bg)":"var(--gray-50)"};
+      border:1px solid ${AppState._locationWatchId!==null?"var(--success-border,#bbf7d0)":"var(--gray-200)"};">
+      <span style="font-size:18px;">${AppState._locationWatchId!==null?"🟢":"⚫"}</span>
       <div style="flex:1;">
-        <div style="font-weight:600;">${AppState.locationBroadcasting?"بث الموقع نشط":"بث الموقع متوقف"}</div>
+        <div style="font-weight:600;">${AppState._locationWatchId!==null?"بث الموقع نشط":"بث الموقع متوقف"}</div>
         <div style="font-size:11px;color:var(--gray-500);">
-          ${AppState.locationBroadcasting?"يرى المدير موقعك على الخريطة الآن":"شغّل البث حتى يتمكن المدير من تتبع موقعك"}
+          ${AppState._locationWatchId!==null?"يرى المدير موقعك على الخريطة الآن":"شغّل البث حتى يتمكن المدير من تتبع موقعك"}
         </div>
       </div>
       <button class="btn btn-sm"
-        style="background:${AppState.locationBroadcasting?"var(--danger)":"var(--success)"};color:#fff;border:none;"
+        style="background:${AppState._locationWatchId!==null?"var(--danger)":"var(--success)"};color:#fff;border:none;"
         onclick="App.toggleLocationBroadcast()">
-        ${AppState.locationBroadcasting?"إيقاف البث":"تشغيل البث"}
+        ${AppState._locationWatchId!==null?"إيقاف البث":"تشغيل البث"}
       </button>
     </div>`;
   if(!list.length) return `<div>${broadcastBanner}
@@ -3860,7 +3865,10 @@ const Modals={
         </div>
         <div class="form-section-label">العنوان</div>
         <div class="form-row">
-          <div class="field"><label>المحافظة *</label><select id="fGov"><option value="">جاري التحميل...</option></select></div>
+          <div class="field"><label>المحافظة *</label><select id="fGov">
+            <option value="">اختر المحافظة</option>
+            ${Object.keys(EGYPT_GOV).sort().map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join("")}
+          </select></div>
           <div class="field"><label>المدينة / المركز</label><select id="fCity"><option value="">اختر المدينة</option></select></div>
         </div>
         <div class="form-row three">
@@ -3890,13 +3898,6 @@ const Modals={
       </div>
     </div>`);
 
-    // Populate governorate dropdown after loading full dataset
-    await loadEgyptData();
-    const govOpts2 = Object.keys(EGYPT_GOV).sort()
-      .map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join("");
-    $("fGov").innerHTML = `<option value="">اختر المحافظة</option>` + govOpts2;
-
-    // Show/hide scheduled date field
     // Auto-calculate fee when key fields change
     const recalcFee = async () => {
       const gov = $("fGov")?.value;
@@ -8252,29 +8253,37 @@ const App={
   async acknowledgeSLABreach(id) {
     try {
       await DB.acknowledgeSLABreach(id);
-      // BUG#5 FIX: update local state AND reload to ensure KPIs/tabs stay in sync
+      // BUG#4 FIX: mutate local state FIRST for instant UI update,
+      // then reload from DB in background to ensure full consistency
       const b = AppState.slaBreaches.find(x=>x.id===id);
-      if (b) { b.status="acknowledged"; b.acknowledged_at=new Date().toISOString(); }
+      if (b) {
+        b.status          = "acknowledged";
+        b.acknowledged_at = new Date().toISOString();
+      }
       await DB.addAudit("SLA_BREACH_ACK", id,
         `Acknowledged by ${AppState.user.name}`, "sla");
-      // Force full SLA data reload so slaSummary and breaches stay in sync
-      AppState._slaDataLoaded = false;
-      App.loadSLAData();
+      // Immediate re-render from updated local state (KPIs + table both consistent)
+      rerenderContent();
       toast("✅ تم الإقرار بالخرق");
+      // Background reload to sync with DB (does not block the UI)
+      DB.loadSLABreaches().then(b=>{ AppState.slaBreaches=b; rerenderContent(); }).catch(()=>{});
     } catch(err) { toast("فشل الإقرار: "+err.message,"error"); }
   },
 
   async resolveSLABreach(id) {
     try {
       await DB.resolveSLABreach(id);
+      // BUG#4 FIX: same pattern — immediate local update + background DB sync
       const b = AppState.slaBreaches.find(x=>x.id===id);
-      if (b) { b.status="resolved"; b.resolved_at=new Date().toISOString(); }
+      if (b) {
+        b.status      = "resolved";
+        b.resolved_at = new Date().toISOString();
+      }
       await DB.addAudit("SLA_BREACH_RESOLVE", id,
         `Resolved by ${AppState.user.name}`, "sla");
-      // BUG#5 FIX: force reload for consistency
-      AppState._slaDataLoaded = false;
-      App.loadSLAData();
+      rerenderContent();
       toast("✅ تم حل الخرق");
+      DB.loadSLABreaches().then(b=>{ AppState.slaBreaches=b; rerenderContent(); }).catch(()=>{});
     } catch(err) { toast("فشل الحل: "+err.message,"error"); }
   },
 
@@ -8403,14 +8412,16 @@ const App={
   },
 
   // ── P2: Driver Location Tracking ─────────────────────────────
-  async startLocationBroadcast() {
+  async startLocationBroadcast(fromRestore) {
     if (!navigator.geolocation) {
       toast("هذا الجهاز لا يدعم تحديد الموقع","warning"); return;
     }
-    if (AppState.locationBroadcasting) {
-      toast("بث الموقع نشط بالفعل","info"); return;
+    // If already watching (watchId exists) — truly already running, skip
+    if (AppState._locationWatchId !== null) {
+      if (!fromRestore) toast("بث الموقع نشط بالفعل","info");
+      return;
     }
-    toast("🛵 جاري تفعيل بث الموقع...","info");
+    if (!fromRestore) toast("🛵 جاري تفعيل بث الموقع...","info");
     AppState._locationWatchId = navigator.geolocation.watchPosition(
       async pos => {
         const { latitude:lat, longitude:lng, accuracy, speed, heading } = pos.coords;
@@ -8436,7 +8447,7 @@ const App={
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
     );
     AppState.locationBroadcasting = true;
-    saveBroadcastState(true); // BUG 3 FIX: persist broadcast state
+    saveBroadcastState(true); // persist: survive page refresh
     rerenderContent();
     toast("✅ بث الموقع نشط — سيرى المدير موقعك على الخريطة");
     window.addEventListener("beforeunload", () => {
@@ -8594,7 +8605,7 @@ const App={
 
   // ── P2: Courier location broadcast toggle in viewTasks ────────
   toggleLocationBroadcast() {
-    if (AppState.locationBroadcasting) App.stopLocationBroadcast();
+    if (AppState._locationWatchId !== null) App.stopLocationBroadcast();
     else App.startLocationBroadcast();
   },
 
@@ -11431,11 +11442,11 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
       if (role === "merchant") await App.loadMerchantData();
       if (role === "courier")  await App.loadMyWallet();
       if (role === "customer") AppState.shipments = await DB.loadShipments();
-      // BUG 3 FIX: restore GPS broadcast state — set flag BEFORE render so UI
-      // shows correct state immediately; startLocationBroadcast resumes the watch
+      // BUG#1 FIX: restore GPS broadcast — do NOT pre-set locationBroadcasting=true
+      // because startLocationBroadcast() guards against it and returns early.
+      // Let startLocationBroadcast() set the flag after watchPosition() is registered.
       if (role === "courier" && getBroadcastState()) {
-        AppState.locationBroadcasting = true; // set flag first so UI renders correctly
-        setTimeout(() => App.startLocationBroadcast(), 500); // defer until after render
+        setTimeout(() => App.startLocationBroadcast(true), 800); // true = fromRestore
       }
 
       // Single render — everything ready
