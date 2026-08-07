@@ -1413,42 +1413,47 @@ function startRealtime() {
   // Only couriers join presence; admins observe. This prevents admin sessions
   // from being counted in the "connected couriers" display.
   const role = AppState.user?.primary_role||AppState.user?.role||"";
-  AppState.presenceChannel = db.channel("presence_v1", {
-    config: { presence: { key: AppState.user?.id || "anon" } }
+  // FIX: unsubscribe stale presence channel before creating a new one
+  // Prevents "cannot add presence callbacks after subscribe" error on refresh
+  if (AppState.presenceChannel) {
+    try { AppState.presenceChannel.unsubscribe(); } catch {}
+    AppState.presenceChannel = null;
+  }
+
+  // Unique per-session key prevents stale entries accumulating under same key
+  const _presenceKey = (AppState.user?.id||"anon") + "_" + Date.now();
+
+  const _presenceSyncHandler = () => {
+    const state = AppState.presenceChannel?.presenceState() || {};
+    const TWO_MIN_AGO = Date.now() - 2 * 60 * 1000;
+    AppState.onlineCouriers = Object.values(state)
+      .flat()
+      .filter(p => p.role === "courier" &&
+        new Date(p.joinedAt).getTime() > TWO_MIN_AGO)
+      .map(p => p.courierId);
+  };
+
+  // CRITICAL: .on() MUST be called BEFORE .subscribe() per Supabase spec
+  AppState.presenceChannel = db.channel("presence_v2", {
+    config: { presence: { key: _presenceKey } }
   });
+  AppState.presenceChannel.on("presence", { event: "sync" }, _presenceSyncHandler);
 
   if (role === "courier") {
-    // Courier joins presence with their identity
-    AppState.presenceChannel.on("presence",{event:"sync"}, ()=>{
-      const state = AppState.presenceChannel.presenceState();
-      const TWO_MIN_AGO = Date.now() - 2 * 60 * 1000;
-      AppState.onlineCouriers = Object.values(state)
-        .flat()
-        .filter(p => p.role === "courier" &&
-          // BUG#2 FIX: remove stale sessions older than 2 minutes
-          new Date(p.joinedAt).getTime() > TWO_MIN_AGO)
-        .map(p => p.courierId);
-    }).subscribe(async status => {
+    AppState.presenceChannel.subscribe(async status => {
       if (status === "SUBSCRIBED") {
-        await AppState.presenceChannel.track({
-          courierId:   AppState.user.id,
-          courierName: AppState.user.name,
-          role:        "courier",
-          joinedAt:    new Date().toISOString(),
-        });
+        try {
+          await AppState.presenceChannel.track({
+            courierId:   AppState.user.id,
+            courierName: AppState.user.name,
+            role:        "courier",
+            joinedAt:    new Date().toISOString(),
+          });
+        } catch {}
       }
     });
   } else {
-    // Admin/merchant observe only — no track() call so not counted
-    AppState.presenceChannel.on("presence",{event:"sync"}, ()=>{
-      const state = AppState.presenceChannel.presenceState();
-      const TWO_MIN_AGO = Date.now() - 2 * 60 * 1000;
-      AppState.onlineCouriers = Object.values(state)
-        .flat()
-        .filter(p => p.role === "courier" &&
-          new Date(p.joinedAt).getTime() > TWO_MIN_AGO)
-        .map(p => p.courierId);
-    }).subscribe();
+    AppState.presenceChannel.subscribe();
   }
 
   AppState.realtimeChannel = db.channel("rt_v6")
@@ -11446,7 +11451,13 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
       // because startLocationBroadcast() guards against it and returns early.
       // Let startLocationBroadcast() set the flag after watchPosition() is registered.
       if (role === "courier" && getBroadcastState()) {
-        setTimeout(() => App.startLocationBroadcast(true), 800); // true = fromRestore
+        // Show "ON" immediately in UI, then start actual GPS watch after render
+        AppState.locationBroadcasting = true;
+        setTimeout(() => {
+          // Reset flag so startLocationBroadcast can proceed normally
+          AppState.locationBroadcasting = false;
+          App.startLocationBroadcast(true);
+        }, 300);
       }
 
       // Single render — everything ready
