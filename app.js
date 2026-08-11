@@ -256,7 +256,7 @@ const AppState = {
   page:"home", authMode:"login", user:null, view:"overview",
   query:"", statusFilter:"all", serviceFilter:"", orderFilter:"",
   selectedShipment:null,
-  userFilter:"", auditFilter:"",
+  userFilter:"", auditFilter:"", auditCatFilter:"all", _auditLoaded:false,
   shipments:[], users:[], couriers:[], notifications:[],
   realtimeChannel:null,
   // Phase 2A — merchant portal (own data)
@@ -2026,13 +2026,40 @@ function bindContentEvents() {
   });
   // Filter buttons (onclick= in HTML, no binding needed)
   // New shipment button
-  // BUG 9 FIX: use event delegation so button always works regardless of
-  // which view rendered it and when postRender fires relative to DOM paint.
-  // Handles: #newShipBtn, #newShipBtn2 (merchant overview), and any future instances.
-  document.getElementById("viewContent")?.addEventListener("click", function(e) {
-    const btn = e.target.closest("#newShipBtn, #newShipBtn2, [data-action='newShipment']");
-    if (btn) { e.stopPropagation(); App.newShipment(); }
-  }, { once: true }); // replaced on each postRender cycle
+  // Audit search — filter without full reload
+  if (AppState.view === "audit") {
+    const auditInput = document.getElementById("auditSearch");
+    if (auditInput && !auditInput._bound) {
+      auditInput._bound = true;
+      let _auditTimer;
+      auditInput.addEventListener("input", e => {
+        clearTimeout(_auditTimer);
+        _auditTimer = setTimeout(() => {
+          AppState.auditFilter = e.target.value;
+          rerenderContent();
+        }, 250);
+      });
+    }
+    const auditCatSel = document.getElementById("auditCatFilter");
+    if (auditCatSel && !auditCatSel._bound) {
+      auditCatSel._bound = true;
+      auditCatSel.addEventListener("change", e => {
+        AppState.auditCatFilter = e.target.value;
+        rerenderContent();
+      });
+    }
+  }
+
+  // BUG 9 FIX: persistent document-level delegation for new shipment button.
+  // Uses a flag to ensure only one listener exists at a time.
+  // Delegates on document (not #viewContent) so it works before DOM is ready.
+  if (!window._newShipBtnDelegated) {
+    window._newShipBtnDelegated = true;
+    document.addEventListener("click", function(e) {
+      const btn = e.target.closest("#newShipBtn, #newShipBtn2, [data-action='newShipment']");
+      if (btn) { e.stopPropagation(); App.newShipment(); }
+    });
+  }
   $("addUserBtn")?.addEventListener("click", Modals.addUser);
   $("openScanner")?.addEventListener("click", Modals.scanner);
   // Search inputs
@@ -2126,6 +2153,10 @@ function postRender() {
     // BUG#3 FIX: do NOT set _slaDataLoaded=true here — only loadSLAData() sets it
     // after data arrives. This prevents the empty-page flash on first open.
     App.loadSLAData();
+  }
+  if(AppState.view==="audit"){
+    AppState._auditLoaded = true;
+    App.loadAudit();
   }
   if(AppState.view==="webhooks" && !AppState._webhooksDataLoaded){
     AppState._webhooksDataLoaded = true;
@@ -10381,13 +10412,26 @@ const App={
   // ── Phase 2A: Address Book ────────────────────────────────
   async loadMerchantData() {
     const uid = AppState.user.id;
-    const [addrs, recs, prods, reqs, bal] = await Promise.all([
+    const [addrs, recs, prods, reqs, rpcBal] = await Promise.all([
       DB.loadMerchantAddresses(uid),
       DB.loadMerchantRecipients(uid),
       DB.loadMerchantProducts(uid),
       DB.loadPickupRequests(uid),
-      DB.loadMerchantBalance(uid),
+      DB.loadMerchantBalance(uid).catch(()=>0),
     ]);
+    // FIX 3: If RPC returns 0 (missing function or no data), compute from shipments
+    // This ensures balance always shows correctly even without the RPC function.
+    const computeLocalBal = () => {
+      const ships = AppState.shipments || [];
+      const delivered = ships.filter(s=>s.merchantId===uid&&s.status==="delivered");
+      const returned  = ships.filter(s=>s.merchantId===uid&&s.status==="returned");
+      const cod     = delivered.reduce((a,s)=>a+(s.amount||0),0);
+      const fees    = delivered.reduce((a,s)=>a+(s.deliveryFee||0),0);
+      const retFees = returned.reduce((a,s)=>a+(s.returnFee||0),0);
+      return cod - fees - retFees;
+    };
+    const localBal = computeLocalBal();
+    AppState.merchantBalance = rpcBal > 0 ? rpcBal : localBal;
     AppState.merchantAddresses  = addrs;
     AppState.merchantRecipients = recs;
     AppState.merchantProducts   = prods;
@@ -11317,155 +11361,163 @@ const App={
   },
 
   async loadAudit(){
-    const el=$("auditContent");if(!el)return;
-    el.innerHTML=`<div class="page-loader"><span class="spinner"></span></div>`;
+    // FIX: store in AppState.auditLogs then rerenderContent — not innerHTML
+    // This makes viewAudit() render correctly from AppState data
     try{
-      const logs=await DB.loadAuditLogs(AppState.auditFilter);
-      if(!logs.length){el.innerHTML=`<div class="empty"><div class="empty-icon">📋</div><h3>لا يوجد سجل بعد</h3></div>`;return;}
-      el.innerHTML=`<div class="table-wrap"><table>
-        <thead><tr><th>الوقت</th><th>المستخدم</th><th>الدور</th><th>الإجراء</th><th>الهدف</th><th>التفاصيل</th></tr></thead>
-        <tbody>
-          ${logs.map(l=>`<tr>
-            <td style="font-size:11px;color:var(--gray-400);white-space:nowrap;">${fmtTime(l.created_at)}</td>
-            <td class="td-primary">${esc(l.actor_name||"—")}</td>
-            <td><span class="badge ${ROLE_MAP[l.actor_role]?.badge||"badge-gray"}">${ROLE_MAP[l.actor_role]?.label||l.actor_role||"—"}</span></td>
-            <td><span class="action-chip">${esc(l.action)}</span></td>
-            <td class="td-mono">${esc(l.entity_id||"—")}</td>
-            <td style="font-size:12px;color:var(--gray-500);">${esc(l.details||"—")}</td>
-          </tr>`).join("")}
-        </tbody>
-      </table></div>`;
-    }catch(err){el.innerHTML=`<p style="color:var(--danger);padding:1rem;">تعذر تحميل السجل: ${err.message}</p>`;}
-  }
+      const logs = await DB.loadAuditLogs(AppState.auditFilter);
+      AppState.auditLogs   = logs;
+      AppState.auditFilter = AppState.auditFilter || "";
+      AppState._auditLoaded = true;
+      rerenderContent();
+    }catch(err){
+      console.warn("loadAudit:", err.message);
+      AppState.auditLogs = [];
+      AppState._auditLoaded = true;
+      rerenderContent();
+    }
+  },
+
+  logout(){
+    const role = AppState.user?.primary_role||AppState.user?.role||"";
+    // Clear broadcast state on logout so it doesn't restore on next login
+    if (role === "courier") saveBroadcastState(false);
+    if (AppState._locationWatchId !== null) {
+      navigator.geolocation.clearWatch(AppState._locationWatchId);
+      AppState._locationWatchId = null;
+    }
+    if (AppState.presenceChannel) {
+      try { AppState.presenceChannel.unsubscribe(); } catch {}
+      AppState.presenceChannel = null;
+    }
+    if (AppState.realtimeChannel) {
+      try { AppState.realtimeChannel.unsubscribe(); } catch {}
+      AppState.realtimeChannel = null;
+    }
+    db.auth.signOut().catch(()=>{});
+    clearSession();
+    Object.assign(AppState,{
+      page:"home",user:null,shipments:[],notifications:[],
+      auditLogs:[],_auditLoaded:false, auditFilter:"", auditCatFilter:"all",
+      selectedShipment:null,view:"overview",
+      rtStatus:"CONNECTING",rtEventCount:0,
+      locationBroadcasting:false,_locationWatchId:null,
+      onlineCouriers:[],presenceChannel:null,
+      dispatchRules:[],courierConfigs:[],_dispatchDataLoaded:false,
+      slaConfigs:[],slaBreaches:[],slaSummary:{},_slaDataLoaded:false,
+      webhooks:[],apiKeys:[],_webhooksDataLoaded:false,
+    });
+    AppPerms.clear();
+    render();
+  },
+
+  _dummy(){},
 };
 
-// ══════════════════════════════════════════════════════════
-// TIMELINE LOADER
-// ══════════════════════════════════════════════════════════
-async function loadTimeline(shipmentCode){
-  const el=document.querySelector(`#tlBox-${shipmentCode}`);if(!el)return;
-  try{
-    const items=await DB.loadTimeline(shipmentCode);
-    if(!items.length){el.innerHTML=`<h4>${icon("log",13)} سجل الشحنة</h4><p style="color:var(--gray-400);font-size:13px;margin-top:8px;">لا يوجد سجل بعد</p>`;return;}
-    el.innerHTML=`<h4>${icon("log",13)} سجل الشحنة</h4>
-      <div class="tl-list">
-        ${items.map((e,i)=>`<div class="tl-item">
-          <div class="tl-dot ${i<items.length-1?"past":""}"></div>
-          <div class="tl-content">
-            <b>${esc(e.event)}</b>
-            <small>${fmtTime(e.created_at)}</small>
-            ${e.actor_name?`<div class="tl-actor">${esc(e.actor_name)} (${esc(e.actor_role)})</div>`:""}
-          </div>
-        </div>`).join("")}
-      </div>`;
-  }catch(err){el.innerHTML=`<h4>${icon("log",13)} سجل الشحنة</h4><p style="color:var(--danger);font-size:13px;">تعذر التحميل</p>`;}
-}
-
-// ══════════════════════════════════════════════════════════
-// BOOT
-// ══════════════════════════════════════════════════════════
-if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch(()=>{});
-
+// ── Boot ─────────────────────────────────────────────────────
 (async()=>{
-  const params=new URLSearchParams(window.location.search);
-  const trackId=params.get("track");
-  if(trackId){
-    AppState.selectedShipment=trackId;AppState.view="track";
-    AppState.user={role:"customer",primary_role:"customer",id:"guest",name:"زائر"};
-    AppState.shipments=await DB.loadShipments().catch(()=>[]);
-    render();return;
+  // Attach global error handler
+  window.addEventListener("error", e=>{
+    console.error("Uncaught:", e.message, e.filename, e.lineno);
+    if (typeof toast === "function") toast("خطأ غير متوقع: "+e.message,"error");
+  });
+  window.addEventListener("unhandledrejection", e=>{
+    console.error("Unhandled promise rejection:", e.reason);
+  });
+
+  // Handle ?track= URL param for public tracking
+  const params = new URLSearchParams(location.search);
+  const trackCode = params.get("track");
+  if (trackCode) {
+    AppState.selectedShipment = trackCode;
+    AppState.view = "track";
+    AppState.page = "dashboard";
+    render();
+    return;
   }
-  const session=getSession();
-  if(session?.id){
-    const{data:{session:supa}}=await db.auth.getSession();
-    if(supa?.user?.id===session.id){
-      const profile = await DB.getProfile(session.id);
-      if (profile?.is_suspended || profile?.is_deleted) {
-        clearSession();
-        AppState.page = "auth";
-        AppState.authMode = "login";
-        render();
-        toast("هذا الحساب موقوف أو غير موجود. تواصل مع الإدارة.", "error");
-        return;
-      }
-      // primary_role is the production column name
-      // Resolve role from primary_role (production schema column)
-      const role = profile?.primary_role
-                || session.primary_role
-                || session.role
-                || "customer";
 
-      AppState.user = {
-        ...session,
-        role,           // kept for legacy compatibility
-        primary_role:  role,
-        name:          profile?.full_name || session.name,
-        phone:         profile?.phone     || session.phone || ""
-      };
-      AppState.page = "dashboard";
-      // BUG 2 FIX: restore last active view from localStorage
-      const savedNav = getNavState();
-      AppState.view = role === "customer" ? "overview"
-                    : role === "courier"  ? "tasks"
-                    : role === "merchant" ? (savedNav || "shipments")
-                    : (savedNav || "overview");
-
-      // Load permissions + all data in parallel — render AFTER all settle
-      const [, ships, notifs, users, couriers] = await Promise.all([
-        loadUserPermissions(session.id),       // fills AppPerms before render
-        DB.loadShipments().catch(()=>[]),
-        DB.loadNotifications(role).catch(()=>[]),
-        (role === "admin" || role === "merchant")
-          ? DB.loadUsers().catch(()=>[])
-          : Promise.resolve([]),
-        DB.loadCouriers().catch(()=>[])
-      ]);
-
-      // Commit atomically
-      AppState.shipments     = ships;
-      AppState.notifications = notifs;
-      AppState.users         = users;
-      AppState.couriers      = couriers;
-
-      // Persist refreshed session
-      saveSession(AppState.user);
-
-      if (role === "admin") {
-        startRealtime();
-        const [merchants, branches, warehouses] = await Promise.all([
-          DB.loadAllMerchants(),
-          DB.loadBranches(),
-          DB.loadWarehouses(),
-        ]);
-        AppState.allMerchants = merchants;
-        AppState.branches     = branches;
-        AppState.warehouses   = warehouses;
-        // Mark as loaded so postRender()'s lazy-load guards don't
-        // redundantly re-fetch the moment the user opens those tabs.
-        AppState._branchDataLoaded = true;
-      }
-      if (role === "merchant") await App.loadMerchantData();
-      if (role === "courier")  await App.loadMyWallet();
-      if (role === "customer") AppState.shipments = await DB.loadShipments();
-      // BUG#1 FIX: restore GPS broadcast — do NOT pre-set locationBroadcasting=true
-      // because startLocationBroadcast() guards against it and returns early.
-      // Let startLocationBroadcast() set the flag after watchPosition() is registered.
-      if (role === "courier" && getBroadcastState()) {
-        // Show "ON" immediately in UI, then start actual GPS watch after render
-        AppState.locationBroadcasting = true;
-        setTimeout(() => {
-          // Reset flag so startLocationBroadcast can proceed normally
-          AppState.locationBroadcasting = false;
-          App.startLocationBroadcast(true);
-        }, 300);
-      }
-
-      // Single render — everything ready
-      render();
-      return;
-    }
-    clearSession();
+  // Session restore
+  const session = getSession();
+  if (!session) {
+    render(); return;
   }
-  AppState.shipments=await DB.loadShipments().catch(()=>[]);
-  AppState.page="home";render();
+
+  // Validate session with Supabase
+  const { data:{ session: supaSession } } = await db.auth.getSession().catch(()=>({data:{session:null}}));
+  if (!supaSession) {
+    clearSession(); render(); return;
+  }
+
+  // Restore user
+  const role = session.primary_role || session.role || "admin";
+  AppState.user = {
+    id:           supaSession.user.id,
+    email:        supaSession.user.email || session.email || "",
+    primary_role: role,
+    role:         role,
+    name:         session.name || supaSession.user.email || "",
+    phone:        session.phone || "",
+  };
+
+  // Load permissions
+  await loadUserPermissions(supaSession.user.id).catch(()=>{});
+
+  // Load all base data in parallel
+  const [ships, notifs, couriers] = await Promise.all([
+    DB.loadShipments().catch(()=>[]),
+    DB.loadNotifications(role).catch(()=>[]),
+    DB.loadCouriers().catch(()=>[]),
+  ]);
+  AppState.shipments     = ships;
+  AppState.notifications = notifs;
+  AppState.couriers      = couriers;
+
+  // Load branch/pricing data for admin
+  if (role === "admin" || role === "operations_manager") {
+    const [users, merchants, branches, warehouses, pricing, pricingZones, allM] = await Promise.all([
+      DB.loadUsers().catch(()=>[]),
+      DB.loadMerchants().catch(()=>[]),
+      DB.loadBranches().catch(()=>[]),
+      DB.loadWarehouses().catch(()=>[]),
+      DB.loadPricingRules().catch(()=>[]),
+      DB.loadPricingZones().catch(()=>[]),
+      DB.loadAllMerchants ? DB.loadAllMerchants().catch(()=>[]) : Promise.resolve([]),
+    ]);
+    AppState.users         = users;
+    AppState.merchants     = merchants;
+    AppState.allMerchants  = allM;
+    AppState.branches      = branches;
+    AppState.warehouses    = warehouses;
+    AppState.pricingRules  = pricing;
+    AppState.pricingZones  = pricingZones;
+    AppState._branchDataLoaded = true;
+  }
+
+  if (role === "merchant") await App.loadMerchantData().catch(()=>{});
+  if (role === "courier")  await App.loadMyWallet().catch(()=>{});
+  if (role === "customer") AppState.shipments = await DB.loadShipments().catch(()=>[]);
+
+  // Broadcast restore for couriers
+  if (role === "courier" && getBroadcastState()) {
+    AppState.locationBroadcasting = true;
+    setTimeout(() => {
+      AppState.locationBroadcasting = false;
+      App.startLocationBroadcast(true);
+    }, 300);
+  } else if (role !== "courier") {
+    saveBroadcastState(false);
+    AppState.locationBroadcasting = false;
+  }
+
+  // Restore nav state
+  const savedNav = getNavState();
+  AppState.page = "dashboard";
+  AppState.view = role === "customer" ? "overview"
+                : role === "courier"  ? "tasks"
+                : savedNav || "overview";
+
+  // Start realtime
+  startRealtime();
+
+  // Render
+  render();
 })();
