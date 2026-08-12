@@ -1352,3 +1352,46 @@ body {
   #liveOpsMap  { height: 220px !important; }
   #historyMap  { height: 300px !important; }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   MOBILE PERFORMANCE — reduce render weight on small screens
+   ══════════════════════════════════════════════════════════════ */
+
+/* Disable heavy animations on mobile */
+@media (max-width: 768px) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.1ms !important;
+  }
+
+  /* Reduce table columns on mobile */
+  .table-wrap { font-size: 12px; }
+  .table-wrap th:nth-child(n+5),
+  .table-wrap td:nth-child(n+5) { display: none; }
+
+  /* Stack KPI grid on mobile */
+  .kpi-grid {
+    grid-template-columns: repeat(2, 1fr) !important;
+    gap: 8px !important;
+  }
+
+  /* Simplify cards on mobile */
+  .card { padding: 12px !important; margin-bottom: 10px !important; }
+
+  /* Hide heavy decorative elements */
+  .rt-status span:first-child { display: none; }
+
+  /* Reduce nav size */
+  .sidebar { width: 100% !important; }
+
+  /* Prevent horizontal overflow */
+  body { overflow-x: hidden; }
+  #app { overflow-x: hidden; }
+}
+
+/* Improve touch targets */
+@media (hover: none) {
+  button, .btn { min-height: 40px; }
+  .nav-btn { min-height: 44px; }
+  input, select, textarea { font-size: 16px !important; } /* prevent iOS zoom */
+}
