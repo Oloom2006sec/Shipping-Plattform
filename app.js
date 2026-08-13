@@ -1164,6 +1164,11 @@ const DB = {
     if (error) throw error;
   },
 
+  // loadMerchants = loadAllMerchants (kept for boot IIFE compatibility)
+  async loadMerchants() {
+    return DB.loadAllMerchants();
+  },
+
   async loadAllMerchants() {
     const { data, error } = await db.from("profiles")
       .select("id,full_name,email,phone,primary_role,is_active,is_suspended,created_at")
@@ -11414,39 +11419,38 @@ const App={
 
 // ── Boot ─────────────────────────────────────────────────────
 (async()=>{
-  // Attach global error handler
+  // ── Global error handlers ────────────────────────────────────
   window.addEventListener("error", e=>{
-    console.error("Uncaught:", e.message, e.filename, e.lineno);
-    if (typeof toast === "function") toast("خطأ غير متوقع: "+e.message,"error");
+    console.error("Global error:", e.message, "line:", e.lineno);
+    if(AppState.page==="dashboard") toast("خطأ: "+e.message,"error");
   });
   window.addEventListener("unhandledrejection", e=>{
-    console.error("Unhandled promise rejection:", e.reason);
+    console.error("Unhandled rejection:", e.reason);
   });
 
-  // Handle ?track= URL param for public tracking
-  const params = new URLSearchParams(location.search);
-  const trackCode = params.get("track");
-  if (trackCode) {
+  // ── Public tracking URL ──────────────────────────────────────
+  const trackCode = new URLSearchParams(location.search).get("track");
+  if(trackCode){
     AppState.selectedShipment = trackCode;
     AppState.view = "track";
     AppState.page = "dashboard";
-    render();
-    return;
-  }
-
-  // Session restore
-  const session = getSession();
-  if (!session) {
     render(); return;
   }
 
-  // Validate session with Supabase
-  const { data:{ session: supaSession } } = await db.auth.getSession().catch(()=>({data:{session:null}}));
-  if (!supaSession) {
-    clearSession(); render(); return;
-  }
+  // ── Session restore ──────────────────────────────────────────
+  const session = getSession();
+  if(!session){ render(); return; }
 
-  // Restore user
+  // ── Validate with Supabase ───────────────────────────────────
+  let supaSession = null;
+  try {
+    const res = await db.auth.getSession();
+    supaSession = res.data?.session;
+  } catch(e) { console.warn("getSession failed:", e.message); }
+
+  if(!supaSession){ clearSession(); render(); return; }
+
+  // ── Restore user from session ────────────────────────────────
   const role = session.primary_role || session.role || "admin";
   AppState.user = {
     id:           supaSession.user.id,
@@ -11457,12 +11461,13 @@ const App={
     phone:        session.phone || "",
   };
 
-  // Load permissions
-  await loadUserPermissions(supaSession.user.id).catch(()=>{});
+  // ── Load permissions (non-fatal) ─────────────────────────────
+  await loadUserPermissions(supaSession.user.id).catch(e=>
+    console.warn("Permissions load failed:", e.message));
 
-  // Load all base data in parallel
+  // ── Load base data — each failure is isolated ────────────────
   const [ships, notifs, couriers] = await Promise.all([
-    DB.loadShipments().catch(()=>[]),
+    DB.loadShipments().catch(e=>{console.warn("loadShipments:",e.message);return[];}),
     DB.loadNotifications(role).catch(()=>[]),
     DB.loadCouriers().catch(()=>[]),
   ]);
@@ -11470,53 +11475,57 @@ const App={
   AppState.notifications = notifs;
   AppState.couriers      = couriers;
 
-  // Load branch/pricing data for admin
-  if (role === "admin" || role === "operations_manager") {
-    const [users, merchants, branches, warehouses, pricing, pricingZones, allM] = await Promise.all([
-      DB.loadUsers().catch(()=>[]),
-      DB.loadMerchants().catch(()=>[]),
-      DB.loadBranches().catch(()=>[]),
-      DB.loadWarehouses().catch(()=>[]),
-      DB.loadPricingRules().catch(()=>[]),
-      DB.loadPricingZones().catch(()=>[]),
-      DB.loadAllMerchants ? DB.loadAllMerchants().catch(()=>[]) : Promise.resolve([]),
-    ]);
-    AppState.users         = users;
-    AppState.merchants     = merchants;
-    AppState.allMerchants  = allM;
-    AppState.branches      = branches;
-    AppState.warehouses    = warehouses;
-    AppState.pricingRules  = pricing;
-    AppState.pricingZones  = pricingZones;
-    AppState._branchDataLoaded = true;
+  // ── Admin/ops: load management data ─────────────────────────
+  if(role==="admin"||role==="operations_manager"){
+    try {
+      const [users, merchants, branches, warehouses, pricing, pricingZones] =
+        await Promise.all([
+          DB.loadUsers().catch(()=>[]),
+          DB.loadAllMerchants().catch(()=>[]),  // use loadAllMerchants directly
+          DB.loadBranches().catch(()=>[]),
+          DB.loadWarehouses().catch(()=>[]),
+          DB.loadPricingRules().catch(()=>[]),
+          DB.loadPricingZones().catch(()=>[]),
+        ]);
+      AppState.users          = users;
+      AppState.merchants      = merchants;
+      AppState.allMerchants   = merchants;
+      AppState.branches       = branches;
+      AppState.warehouses     = warehouses;
+      AppState.pricingRules   = pricing;
+      AppState.pricingZones   = pricingZones;
+      AppState._branchDataLoaded = true;
+    } catch(e){ console.warn("Admin data load error:", e.message); }
   }
 
-  if (role === "merchant") await App.loadMerchantData().catch(()=>{});
-  if (role === "courier")  await App.loadMyWallet().catch(()=>{});
-  if (role === "customer") AppState.shipments = await DB.loadShipments().catch(()=>[]);
+  // ── Role-specific data ───────────────────────────────────────
+  if(role==="merchant") await App.loadMerchantData().catch(e=>
+    console.warn("loadMerchantData:", e.message));
+  if(role==="courier")  await App.loadMyWallet().catch(e=>
+    console.warn("loadMyWallet:", e.message));
 
-  // Broadcast restore for couriers
-  if (role === "courier" && getBroadcastState()) {
+  // ── Courier broadcast restore ────────────────────────────────
+  if(role==="courier" && getBroadcastState()){
     AppState.locationBroadcasting = true;
-    setTimeout(() => {
+    setTimeout(()=>{
       AppState.locationBroadcasting = false;
       App.startLocationBroadcast(true);
     }, 300);
-  } else if (role !== "courier") {
+  } else if(role!=="courier"){
     saveBroadcastState(false);
     AppState.locationBroadcasting = false;
   }
 
-  // Restore nav state
+  // ── Restore nav state ────────────────────────────────────────
   const savedNav = getNavState();
   AppState.page = "dashboard";
-  AppState.view = role === "customer" ? "overview"
-                : role === "courier"  ? "tasks"
+  AppState.view = role==="customer" ? "overview"
+                : role==="courier"  ? "tasks"
                 : savedNav || "overview";
 
-  // Start realtime
+  // ── Start realtime once ──────────────────────────────────────
   startRealtime();
 
-  // Render
+  // ── Single render ────────────────────────────────────────────
   render();
 })();
