@@ -2251,7 +2251,7 @@ function viewOverview() {
     return `
       <!-- Quick actions bar -->
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;">
-        ${can("create_shipment")?`<button class="btn btn-primary" id="newShipBtn">${icon("plus",14)} شحنة جديدة</button>`:""}
+        ${can("create_shipment")?`<button class="btn btn-primary" id="newShipBtn" onclick="App.newShipment()">${icon("plus",14)} شحنة جديدة</button>`:""}
         <button class="btn btn-secondary" onclick="AppState.view='pickup';rerenderContent();">📬 طلب استلام</button>
         <button class="btn btn-secondary" onclick="AppState.view='recipients';rerenderContent();">👥 العملاء</button>
         <button class="btn btn-secondary" onclick="AppState.view='accounts';rerenderContent();">💰 حسابي</button>
@@ -2326,7 +2326,7 @@ function viewOverview() {
       <div class="card">
         <div class="card-header">
           <h3 class="card-title">${icon("box")} آخر شحناتي</h3>
-          ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn2">${icon("plus",13)} شحنة جديدة</button>`:""}
+          ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn2" onclick="App.newShipment()">${icon("plus",13)} شحنة جديدة</button>`:""}
         </div>
         ${shipTable(list.slice(0,8))}
       </div>`;
@@ -8564,8 +8564,13 @@ const App={
       mapEl.innerHTML = "";
       delete mapEl._leaflet_id;
     }
-    const locs = Object.values(AppState.driverLocations || {})
-      .filter(l => l.isOnline && l.lat && l.lng);
+    // FIX: presence = truth for who is online; driverLocations = source of lat/lng
+  // This makes map markers count === connectedCount KPI (both from presence)
+  const presenceIds = new Set(AppState.onlineCouriers || []);
+  const allLocs     = Object.values(AppState.driverLocations || {});
+  const locs = presenceIds.size > 0
+    ? allLocs.filter(l => presenceIds.has(l.courierId) && l.lat && l.lng)
+    : allLocs.filter(l => l.isOnline && l.lat && l.lng);
 
     const center = locs.length
       ? [locs.reduce((a,l)=>a+l.lat,0)/locs.length,
@@ -11390,6 +11395,10 @@ const App={
       AppState._locationWatchId = null;
     }
     if (AppState.presenceChannel) {
+      try {
+        // Untrack first so Supabase removes this session from presence immediately
+        AppState.presenceChannel.untrack();
+      } catch {}
       try { AppState.presenceChannel.unsubscribe(); } catch {}
       AppState.presenceChannel = null;
     }
