@@ -6525,6 +6525,151 @@ function viewPickupRequests() {
 }
 
 const App={
+  // ── Missing edit functions (were referenced in UI but never implemented) ──
+  async editAddress(id) {
+    const addr = (AppState.merchantAddresses||[]).find(a=>a.id===id);
+    if (!addr) { toast("العنوان غير موجود","error"); return; }
+    const govOpts = Object.keys(EGYPT_GOV).sort()
+      .map(g=>`<option value="${esc(g)}" ${addr.governorate===g?"selected":""}>${esc(g)}</option>`).join("");
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>📍 تعديل عنوان</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>اسم العنوان *</label>
+          <input id="eaLabel" value="${esc(addr.label||"")}"/></div>
+        <div class="field"><label>المحافظة *</label>
+          <select id="eaGov" style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            <option value="">اختر المحافظة</option>${govOpts}</select></div>
+        <div class="field"><label>العنوان التفصيلي</label>
+          <input id="eaStreet" value="${esc(addr.street||"")}"/></div>
+        <div class="field"><label>رقم الهاتف</label>
+          <input id="eaPhone" value="${esc(addr.phone||"")}"/></div>
+        <div id="eaErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" onclick="App._saveAddress('${id}')">💾 حفظ</button>
+      </div></div>`);
+  },
+
+  async _saveAddress(id) {
+    const label = $("eaLabel")?.value?.trim();
+    const gov   = $("eaGov")?.value;
+    if (!label||!gov) { $("eaErr").style.display="block"; $("eaErr").textContent="اسم العنوان والمحافظة مطلوبان"; return; }
+    try {
+      const uid = AppState.user.id;
+      await db.from("merchant_addresses").update({
+        label, governorate:gov,
+        street: $("eaStreet")?.value||"",
+        phone:  $("eaPhone")?.value||"",
+      }).eq("id",id);
+      AppState.merchantAddresses = await DB.loadMerchantAddresses(uid);
+      Modals.close(); rerenderContent(); toast("✅ تم تحديث العنوان");
+    } catch(e) { $("eaErr").style.display="block"; $("eaErr").textContent="خطأ: "+e.message; }
+  },
+
+  async editRecipient(id) {
+    const rec = (AppState.merchantRecipients||[]).find(r=>r.id===id);
+    if (!rec) { toast("المستلم غير موجود","error"); return; }
+    const govOpts = Object.keys(EGYPT_GOV).sort()
+      .map(g=>`<option value="${esc(g)}" ${rec.governorate===g?"selected":""}>${esc(g)}</option>`).join("");
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>👤 تعديل مستلم</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>الاسم *</label>
+          <input id="erName" value="${esc(rec.name||"")}"/></div>
+        <div class="field"><label>الهاتف *</label>
+          <input id="erPhone" value="${esc(rec.phone||"")}"/></div>
+        <div class="field"><label>المحافظة</label>
+          <select id="erGov" style="width:100%;padding:8px;border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            <option value="">اختر المحافظة</option>${govOpts}</select></div>
+        <div class="field"><label>العنوان</label>
+          <input id="erAddr" value="${esc(rec.address||"")}"/></div>
+        <div id="erErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" onclick="App._saveRecipient('${id}')">💾 حفظ</button>
+      </div></div>`);
+  },
+
+  async _saveRecipient(id) {
+    const name  = $("erName")?.value?.trim();
+    const phone = $("erPhone")?.value?.trim();
+    if (!name||!phone) { $("erErr").style.display="block"; $("erErr").textContent="الاسم والهاتف مطلوبان"; return; }
+    try {
+      await db.from("merchant_recipients").update({
+        name, phone,
+        governorate: $("erGov")?.value||"",
+        address:     $("erAddr")?.value||"",
+      }).eq("id",id);
+      AppState.merchantRecipients = await DB.loadMerchantRecipients(AppState.user.id);
+      Modals.close(); rerenderContent(); toast("✅ تم تحديث المستلم");
+    } catch(e) { $("erErr").style.display="block"; $("erErr").textContent="خطأ: "+e.message; }
+  },
+
+  async editProduct(id) {
+    const prod = (AppState.merchantProducts||[]).find(p=>p.id===id);
+    if (!prod) { toast("المنتج غير موجود","error"); return; }
+    Modals.open(`<div class="modal">
+      <div class="modal-header"><h3>🛍️ تعديل منتج</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button></div>
+      <div class="modal-body">
+        <div class="field"><label>اسم المنتج *</label>
+          <input id="epName" value="${esc(prod.name||"")}"/></div>
+        <div class="field"><label>الوصف</label>
+          <input id="epDesc" value="${esc(prod.description||"")}"/></div>
+        <div class="form-row">
+          <div class="field"><label>الوزن (كجم)</label>
+            <input id="epWeight" type="number" step="0.1" min="0" value="${prod.weight||0}"/></div>
+          <div class="field"><label>قيمة COD الافتراضية</label>
+            <input id="epPrice" type="number" step="0.01" min="0" value="${prod.default_cod||0}"/></div>
+        </div>
+        <div id="epErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button class="btn btn-primary" onclick="App._saveProduct('${id}')">💾 حفظ</button>
+      </div></div>`);
+  },
+
+  async _saveProduct(id) {
+    const name = $("epName")?.value?.trim();
+    if (!name) { $("epErr").style.display="block"; $("epErr").textContent="اسم المنتج مطلوب"; return; }
+    try {
+      await db.from("merchant_products").update({
+        name,
+        description:  $("epDesc")?.value||"",
+        weight:       parseFloat($("epWeight")?.value)||0,
+        default_cod:  parseFloat($("epPrice")?.value)||0,
+      }).eq("id",id);
+      AppState.merchantProducts = await DB.loadMerchantProducts(AppState.user.id);
+      Modals.close(); rerenderContent(); toast("✅ تم تحديث المنتج");
+    } catch(e) { $("epErr").style.display="block"; $("epErr").textContent="خطأ: "+e.message; }
+  },
+
+  async exportInvoiceExcel(invId) {
+    const inv = (AppState.invoices||[]).find(i=>i.id===invId);
+    if (!inv) { toast("الفاتورة غير موجودة","error"); return; }
+    try {
+      const rows = [
+        ["رقم الفاتورة", inv.invoice_number||invId],
+        ["التاجر",        inv.merchant_name||""],
+        ["التاريخ",       fmtDate(inv.created_at)],
+        ["الإجمالي",      money(inv.total_amount||0)],
+        ["الحالة",        inv.status||""],
+      ];
+      const csv = rows.map(r=>r.map(c=>`"${String(c).replace(/"/g,'""')}"`).join(",")).join("\n");
+      const blob = new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8"});
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href=url; a.download=`invoice_${inv.invoice_number||invId}.csv`;
+      a.click(); URL.revokeObjectURL(url);
+      toast("✅ تم تصدير الفاتورة");
+    } catch(e) { toast("فشل التصدير: "+e.message,"error"); }
+  },
+
   // ── BUG 6 FIX: Shipment creation proxies ─────────────────────
   // newShipment() and editShipment() live in the Modals object (historical).
   // All onclick="App.newShipment()" references proxy through here.
