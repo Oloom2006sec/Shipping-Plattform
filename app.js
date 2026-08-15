@@ -1428,21 +1428,28 @@ function startRealtime() {
   // Unique per-session key prevents stale entries accumulating under same key
   const _presenceKey = (AppState.user?.id||"anon") + "_" + Date.now();
 
-  const _presenceSyncHandler = () => {
+    const _presenceSyncHandler = () => {
     const state = AppState.presenceChannel?.presenceState() || {};
-    const TWO_MIN_AGO = Date.now() - 2 * 60 * 1000;
-    AppState.onlineCouriers = Object.values(state)
-      .flat()
-      .filter(p => p.role === "courier" &&
-        new Date(p.joinedAt).getTime() > TWO_MIN_AGO)
-      .map(p => p.courierId);
+    // Simply count all courier presence slots — Supabase removes them
+    // automatically when the browser disconnects (heartbeat ~30s).
+    // Do NOT filter by joinedAt — that removes currently-online couriers!
+    // Deduplicate by courierId in case of multiple tabs
+    const courierMap = new Map();
+    Object.values(state).flat()
+      .filter(p => p.role === "courier")
+      .forEach(p => courierMap.set(p.courierId, p));
+    AppState.onlineCouriers = [...courierMap.keys()];
+    // Trigger liveops re-render if currently viewing it
+    if (AppState.view === "liveops") rerenderContent();
   };
 
   // CRITICAL: .on() MUST be called BEFORE .subscribe() per Supabase spec
   AppState.presenceChannel = db.channel("presence_v2", {
     config: { presence: { key: _presenceKey } }
   });
-  AppState.presenceChannel.on("presence", { event: "sync" }, _presenceSyncHandler);
+  AppState.presenceChannel.on("presence", { event: "sync"  }, _presenceSyncHandler);
+  AppState.presenceChannel.on("presence", { event: "leave" }, _presenceSyncHandler);
+  AppState.presenceChannel.on("presence", { event: "join"  }, _presenceSyncHandler);
 
   if (role === "courier") {
     AppState.presenceChannel.subscribe(async status => {
@@ -5179,7 +5186,7 @@ function viewLiveOps() {
         <h3 class="card-title">🗺️ خريطة المناديب المباشرة</h3>
         <div style="display:flex;gap:6px;align-items:center;">
           <span style="font-size:12px;color:var(--gray-400);">
-            ${Object.values(AppState.driverLocations||{}).filter(l=>l.isOnline).length} متصل
+            ${(AppState.onlineCouriers||[]).length} متصل
           </span>
           <button class="btn btn-secondary btn-sm" onclick="App._renderLiveOpsMap()">🔄 تحديث</button>
         </div>
@@ -5201,7 +5208,7 @@ function viewLiveOps() {
         <h3 class="card-title">🗺️ خريطة المناديب المباشرة</h3>
         <div style="display:flex;gap:6px;align-items:center;">
           <span style="font-size:12px;color:var(--gray-400);">
-            ${Object.values(AppState.driverLocations||{}).filter(l=>l.isOnline).length} متصل
+            ${(AppState.onlineCouriers||[]).length} متصل
           </span>
           <button class="btn btn-secondary btn-sm" onclick="App._renderLiveOpsMap()">🔄 تحديث</button>
         </div>
