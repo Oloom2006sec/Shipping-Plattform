@@ -2176,7 +2176,11 @@ function postRender() {
   }
   if(AppState.view==="liveops"){
     // Load driver locations into AppState for the courier board map
-    DB.loadDriverLocations().then(locs=>{ AppState.driverLocations=locs; }).catch(()=>{});
+    DB.loadDriverLocations().then(locs=>{
+    AppState.driverLocations=locs;
+    // Re-render map with fresh GPS data
+    if(AppState.view==="liveops") setTimeout(()=>App.initLiveOpsMap(), 100);
+  }).catch(()=>{});
     // Init map after DOM is ready
     setTimeout(()=>App.initLiveOpsMap(), 50);
   }
@@ -5025,7 +5029,9 @@ function viewLiveOps() {
   // AppState.onlineCouriers is populated by startRealtime() presence channel
   // Falls back to driverLocations (GPS-reported online) if presence not yet ready
   // FIX: use ONLY presence (real browser sessions) — never driverLocations (stale DB rows)
-  const connectedCount = (AppState.onlineCouriers||[]).length;
+  // Count = couriers with active GPS broadcast (matches map markers)
+  const connectedCount = Object.values(AppState.driverLocations || {})
+    .filter(l => l.isOnline).length;
 
   return `<div>
     <!-- Connection + refresh header -->
@@ -5186,7 +5192,7 @@ function viewLiveOps() {
         <h3 class="card-title">🗺️ خريطة المناديب المباشرة</h3>
         <div style="display:flex;gap:6px;align-items:center;">
           <span style="font-size:12px;color:var(--gray-400);">
-            ${(AppState.onlineCouriers||[]).length} متصل
+            ${Object.values(AppState.driverLocations||{}).filter(l=>l.isOnline).length} متصل
           </span>
           <button class="btn btn-secondary btn-sm" onclick="App._renderLiveOpsMap()">🔄 تحديث</button>
         </div>
@@ -5208,7 +5214,7 @@ function viewLiveOps() {
         <h3 class="card-title">🗺️ خريطة المناديب المباشرة</h3>
         <div style="display:flex;gap:6px;align-items:center;">
           <span style="font-size:12px;color:var(--gray-400);">
-            ${(AppState.onlineCouriers||[]).length} متصل
+            ${Object.values(AppState.driverLocations||{}).filter(l=>l.isOnline).length} متصل
           </span>
           <button class="btn btn-secondary btn-sm" onclick="App._renderLiveOpsMap()">🔄 تحديث</button>
         </div>
@@ -8716,13 +8722,10 @@ const App={
       mapEl.innerHTML = "";
       delete mapEl._leaflet_id;
     }
-    // FIX: presence = truth for who is online; driverLocations = source of lat/lng
-  // This makes map markers count === connectedCount KPI (both from presence)
-  const presenceIds = new Set(AppState.onlineCouriers || []);
-  const allLocs     = Object.values(AppState.driverLocations || {});
-  const locs = presenceIds.size > 0
-    ? allLocs.filter(l => presenceIds.has(l.courierId) && l.lat && l.lng)
-    : allLocs.filter(l => l.isOnline && l.lat && l.lng);
+    // Map shows couriers with active GPS data (is_online=true in driver_locations)
+  // driverLocations is the authoritative source for WHO has GPS coords
+  const locs = Object.values(AppState.driverLocations || {})
+    .filter(l => l.isOnline && l.lat && l.lng);
 
     const center = locs.length
       ? [locs.reduce((a,l)=>a+l.lat,0)/locs.length,
