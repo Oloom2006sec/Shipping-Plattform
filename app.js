@@ -947,11 +947,15 @@ const DB = {
   // ── Driver Location Tracking ────────────────────────────────
   async loadDriverLocations() {
     const { data, error } = await db.from("driver_locations")
-      .select("*, profiles!driver_locations_courier_id_fkey(full_name,phone)")
+      .select("*, profiles!driver_locations_courier_id_fkey(full_name,phone,primary_role)")
+      .eq("is_online", true)          // only online couriers
       .order("last_seen_at", { ascending: false });
     if (error) { console.warn("loadDriverLocations:", error.message); return {}; }
     const map = {};
-    (data||[]).forEach(r => {
+    (data||[]).filter(r =>
+      // Only include actual couriers — exclude admin/merchant who may have DB rows
+      (r.profiles?.primary_role || "courier") === "courier"
+    ).forEach(r => {
       map[r.courier_id] = {
         courierId:   r.courier_id,
         courierName: r.profiles?.full_name || "—",
@@ -1125,6 +1129,8 @@ const DB = {
   },
 
   async markMyselfOffline() {
+    const role = AppState.user?.primary_role || AppState.user?.role || "";
+    if (role !== "courier") return; // only couriers have driver_location rows
     await db.rpc("mark_driver_offline", { p_courier_id: AppState.user.id })
       .then(()=>{}).catch(()=>{});
   },
@@ -2136,7 +2142,7 @@ function postRender() {
     });
   },200);
   const sel=AppState.shipments.find(s=>s.id===AppState.selectedShipment);
-  if(sel)loadTimeline(sel.id);
+  if(sel)DB.loadTimeline(sel.id);
   if(AppState.view==="audit")App.loadAudit();
   if(AppState.view==="finance"){
     const tab=AppState.financeTab||"overview";
@@ -8612,6 +8618,12 @@ const App={
 
   // ── P2: Driver Location Tracking ─────────────────────────────
   async startLocationBroadcast(fromRestore) {
+    // Only couriers can broadcast location — block admin/merchant silently
+    const role = AppState.user?.primary_role || AppState.user?.role || "";
+    if (role !== "courier") {
+      console.warn("startLocationBroadcast: not a courier, ignoring");
+      return;
+    }
     if (!navigator.geolocation) {
       toast("هذا الجهاز لا يدعم تحديد الموقع","warning"); return;
     }
