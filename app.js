@@ -258,6 +258,8 @@ const AppState = {
   selectedShipment:null,
   userFilter:"", auditFilter:"", auditCatFilter:"all", _auditLoaded:false,
   shipments:[], users:[], couriers:[], notifications:[],
+  // P6: Pagination
+  shipmentsTotal:0, shipmentsCursor:null, shipmentsHasMore:false, _loadingMore:false,
   realtimeChannel:null,
   // Phase 2A — merchant portal (own data)
   merchantAddresses:[], merchantRecipients:[], merchantProducts:[],
@@ -510,10 +512,16 @@ const DB = {
       return data;
     } catch(e) { return null; }
   },
-  async loadShipments() {
-    const role  = AppState.user?.primary_role||AppState.user?.role||"";
-    const phone = AppState.user?.phone||"";
-    let q = db.from("shipments").select("*").order("created_at",{ascending:false}).limit(500);
+  async loadShipments(opts={}) {
+    const role   = AppState.user?.primary_role||AppState.user?.role||"";
+    const phone  = AppState.user?.phone||"";
+    const limit  = opts.limit  || 100;
+    const cursor = opts.cursor || null; // ISO timestamp for cursor pagination
+    let q = db.from("shipments").select("*")
+      .order("created_at",{ascending:false})
+      .limit(limit);
+    // Cursor pagination — load rows older than cursor
+    if (cursor) q = q.lt("created_at", cursor);
     // Customer: filter at DB level by their phone — never fetch all shipments
     if (role==="customer" && phone) q = q.eq("customer_phone", phone);
     // Courier: filter at DB level by their ID
@@ -2024,13 +2032,20 @@ function renderView() {
   }
 }
 
+let _rerenderPending = false;
 function rerenderContent() {
-  const vc = $("viewContent");
-  if (!vc) { render(); return; }
-  vc.innerHTML = renderView();
-  // Bind only content-level events (not shell-level which are already bound)
-  bindContentEvents();
-  postRender();
+  // P6: collapse rapid re-render calls — only one DOM write per animation frame
+  if (_rerenderPending) return;
+  _rerenderPending = true;
+  requestAnimationFrame(() => {
+    _rerenderPending = false;
+    const vc = $("viewContent");
+    if (!vc) { render(); return; }
+    vc.innerHTML = renderView();
+    // Bind only content-level events (not shell-level which are already bound)
+    bindContentEvents();
+    postRender();
+  });
 }
 
 // Content-level events — safe to re-bind on every rerenderContent
@@ -2653,7 +2668,19 @@ function viewShipments() {
       ${advancedFilterPanel()}
       ${shipTableBulk(visible())}
     </div>
-    ${sel?detailPanel(sel):""}`;
+    ${AppState.shipmentsHasMore || AppState._loadingMore ? `
+    <div style="text-align:center;padding:16px 0;">
+      <button class="btn btn-secondary" onclick="App.loadMoreShipments()"
+        ${AppState._loadingMore?"disabled":""} style="min-width:220px;">
+        ${AppState._loadingMore
+          ? `<span class="spinner"></span> جاري تحميل المزيد...`
+          : `⬇️ تحميل المزيد — ${AppState.shipments.length} شحنة محملة`}
+      </button>
+    </div>` : AppState.shipments.length >= 100 ? `
+    <div style="text-align:center;padding:10px;font-size:12px;color:var(--gray-400);">
+      ✅ جميع الشحنات محملة (${AppState.shipments.length})
+    </div>` : ""}
+    ${sel?detailPanel(sel):""}` ;
 }
 
 // ── DETAIL PANEL ──────────────────────────────────────────
@@ -3715,8 +3742,14 @@ function viewAudit() {
 function bindDashboardEvents() {
   $$("[data-view]").forEach(btn=>{
     btn.addEventListener("click",()=>{
+      const prevView = AppState.view;
       AppState.view=btn.dataset.view;
-      saveNavState(btn.dataset.view); // BUG 2 FIX: persist nav state
+      saveNavState(btn.dataset.view);
+      // P6: Memory management — clear heavy tab data when leaving
+      if (prevView === "dispatch"  && AppState.view !== "dispatch")  AppState._dispatchDataLoaded=false;
+      if (prevView === "sla"       && AppState.view !== "sla")       AppState._slaDataLoaded=false;
+      if (prevView === "webhooks"  && AppState.view !== "webhooks")  AppState._webhooksDataLoaded=false;
+      if (prevView === "audit"     && AppState.view !== "audit")     AppState._auditLoaded=false;
       AppState.statusFilter="all";
       if(AppState.advancedFilter) AppState.advancedFilter.showAdvanced=false;
       // rerenderContent() only replaces #viewContent — it never
@@ -11536,6 +11569,31 @@ const App={
     }
   },
 
+  // ── P6: Scalability ─────────────────────────────────────────
+  async loadMoreShipments() {
+    if (AppState._loadingMore || !AppState.shipmentsHasMore) return;
+    AppState._loadingMore = true;
+    rerenderContent(); // show loading indicator
+    try {
+      const more = await DB.loadShipments({
+        limit:  100,
+        cursor: AppState.shipmentsCursor,
+      });
+      if (more.length > 0) {
+        // Merge avoiding duplicates
+        const existing = new Set(AppState.shipments.map(s=>s.id));
+        const newRows  = more.filter(s=>!existing.has(s.id));
+        AppState.shipments = [...AppState.shipments, ...newRows];
+        // Update cursor to oldest loaded row
+        AppState.shipmentsCursor = more[more.length-1].created_at;
+        AppState.shipmentsHasMore = more.length === 100;
+      } else {
+        AppState.shipmentsHasMore = false;
+      }
+    } catch(e) { toast("فشل تحميل المزيد: "+e.message,"error"); }
+    finally { AppState._loadingMore = false; rerenderContent(); }
+  },
+
   async loadAudit(){
     // FIX: store in AppState.auditLogs then rerenderContent — not innerHTML
     // This makes viewAudit() render correctly from AppState data
@@ -11643,13 +11701,16 @@ const App={
 
   // ── Load base data — each failure is isolated ────────────────
   const [ships, notifs, couriers] = await Promise.all([
-    DB.loadShipments().catch(e=>{console.warn("loadShipments:",e.message);return[];}),
+    DB.loadShipments({limit:100}).catch(e=>{console.warn("loadShipments:",e.message);return[];}),
     DB.loadNotifications(role).catch(()=>[]),
     DB.loadCouriers().catch(()=>[]),
   ]);
-  AppState.shipments     = ships;
-  AppState.notifications = notifs;
-  AppState.couriers      = couriers;
+  AppState.shipments       = ships;
+  AppState.notifications   = notifs;
+  AppState.couriers        = couriers;
+  // P6: Set initial cursor for pagination
+  AppState.shipmentsCursor  = ships.length > 0 ? ships[ships.length-1].created_at : null;
+  AppState.shipmentsHasMore = ships.length === 100;
 
   // ── Admin/ops: load management data ─────────────────────────
   if(role==="admin"||role==="operations_manager"){
