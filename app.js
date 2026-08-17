@@ -418,6 +418,20 @@ function toast(msg, type="success", duration=3500) {
 const SESSION_MAX_MS       = 12 * 60 * 60 * 1000;  // 12 hours absolute max
 const SESSION_INACTIVITY_MS =  2 * 60 * 60 * 1000;  // 2 hours inactivity
 const SESSION_KEY           = "nukhba_v6";
+
+// ── P7: Client-side rate limiter ─────────────────────────────
+// Prevents rapid repeated calls to sensitive operations.
+// Not a replacement for server-side rate limiting, but a UX guard.
+const _rateLimits = {};
+function rateLimit(key, limitMs=3000) {
+  const now = Date.now();
+  if (_rateLimits[key] && now - _rateLimits[key] < limitMs) {
+    toast("الرجاء الانتظار قبل المحاولة مجدداً","warning");
+    return false;
+  }
+  _rateLimits[key] = now;
+  return true;
+}
 const SESSION_NAV_KEY       = "nukhba_nav";           // BUG 2: nav state key
 const SESSION_BCAST_KEY     = "nukhba_bcast";         // BUG 3: broadcast key
 
@@ -757,7 +771,10 @@ const DB = {
   },
 
   async loadDriverBalance(driverId) {
-    const { data, error } = await db.rpc("get_driver_balance",{p_driver_id:driverId});
+    // P7: Courier can only fetch own balance; admin can fetch any
+    const role = AppState.user?.primary_role || AppState.user?.role || "";
+    const safeId = (role === "courier") ? AppState.user.id : driverId;
+    const { data, error } = await db.rpc("get_driver_balance",{p_driver_id:safeId});
     if (error) { console.warn("loadDriverBalance:", error.message); return 0; }
     return Number(data)||0;
   },
@@ -1722,6 +1739,7 @@ function renderAuth() {
 
 async function handleLogin(e) {
   e.preventDefault();
+  if (!rateLimit("login", 2000)) return; // P7: prevent rapid login attempts
   const fd  = new FormData(e.currentTarget);
   const btn = e.currentTarget.querySelector("button[type=submit]");
   const err = $("loginErr");
@@ -7580,6 +7598,7 @@ const App={
   },
 
   async deletePricingRule(id){
+    if(!can("pricing.manage")) { toast("غير مصرح","error"); return; }
     if(!confirm("حذف هذه القاعدة؟"))return;
     const{error}=await db.from("pricing_rules").update({is_active:false}).eq("id",id);
     if(error){toast("خطأ: "+error.message,"error");return;}
@@ -7731,8 +7750,10 @@ const App={
         </div>
 
         <div style="background:var(--warning-bg);border:1px solid var(--warning-border);border-radius:var(--radius);padding:12px;margin-top:12px;font-size:12px;">
-          ⚠️ <b>ملاحظة أمنية:</b> يتم حفظ الإعدادات في ذاكرة المتصفح فقط (لا يتم تخزينها في Supabase).
-          للاستخدام الدائم، ضع الإعدادات في <code>SMS_CONFIG</code> في أول ملف <code>app.js</code>.
+          ⚠️ <b>ملاحظة أمنية (P7):</b> بيانات SMS حساسة — لا تضعها في كود العميل.
+          الحل الآمن: استخدم Supabase Edge Function لإخفاء الـ credentials.
+          حالياً: الإعدادات في ذاكرة المتصفح فقط — تُفقد عند إغلاق التبويب.
+          للإنتاج: ضع الـ API keys في Supabase Secrets وادعُ Edge Function من الكود.
         </div>
 
         <!-- P4: SMS Trigger settings -->
@@ -7974,7 +7995,8 @@ const App={
 
   // Admin: broadcast a system notification to a role group
   async broadcastNotification() {
-    const roles = ["admin","merchant","courier","customer","all"];
+    if (!rateLimit("broadcast_notif", 10000)) return;
+        const roles = ["admin","merchant","courier","customer","all"];
     Modals.open(`<div class="modal" style="max-width:420px;">
       <div class="modal-header">
         <h3>📢 إشعار جماعي</h3>
@@ -8380,7 +8402,7 @@ const App={
       });
 
       await DB.addAudit("API_KEY_CREATE","",
-        `Label:${label} Prefix:${prefix} By:${AppState.user.name}`, "api");
+        `Label:${label} Prefix:${prefix} By:${AppState.user.name} [key-never-logged]`, "api");
       AppState.apiKeys = await DB.loadApiKeys(
         AppState.user?.primary_role==="merchant" ? AppState.user.id : null);
       AppState._webhooksDataLoaded = true;
@@ -9397,6 +9419,7 @@ const App={
   },
 
   async bulkUpdateStatus(status) {
+    if(!can("shipments.edit")) { toast("غير مصرح","error"); return; }
     const ids   = [...AppState.selectedShipments];
     const label = STATUS_MAP[status]?.label||status;
     if (!ids.length) return;
@@ -10492,6 +10515,7 @@ const App={
   },
 
   async requestSettlement() {
+    if (!rateLimit("settlement", 5000)) return; // P7: prevent duplicate settlement requests
     // BUG 10 FIX: Recalculate balance directly from loaded shipments instead
     // of relying solely on AppState.merchantBalance which may be stale or 0
     // if the RPC call failed or returned before shipments were loaded.
@@ -11510,6 +11534,7 @@ const App={
   },
 
   async toggleUser(id) {
+    if(!can("users.edit")) { toast("غير مصرح","error"); return; }
     const u = AppState.users.find(x => x.id === id);
     if (!u) return;
     const ns  = !(u.is_suspended || u.suspended);
@@ -11539,6 +11564,7 @@ const App={
   },
 
   async deleteUser(id) {
+    if(!can("users.delete")) { toast("غير مصرح","error"); return; }
     const u = AppState.users.find(x => x.id === id);
     if (!u) return;
     if (!confirm(`حذف ${u.name}؟ سيتم إخفاؤه من القوائم مع الحفاظ على السجلات التاريخية.`)) return;
