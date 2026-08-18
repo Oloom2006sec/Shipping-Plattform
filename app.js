@@ -113,7 +113,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","monitor","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","webhooks","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","accounts"] }
@@ -123,7 +123,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",  monitor:"المراقبة",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -260,6 +260,8 @@ const AppState = {
   shipments:[], users:[], couriers:[], notifications:[],
   // P6: Pagination
   shipmentsTotal:0, shipmentsCursor:null, shipmentsHasMore:false, _loadingMore:false,
+  // P8: Monitoring
+  _errors:[], _perfMetrics:[], _dbQueryLog:[], _healthStatus:{},
   realtimeChannel:null,
   // Phase 2A — merchant portal (own data)
   merchantAddresses:[], merchantRecipients:[], merchantProducts:[],
@@ -527,6 +529,7 @@ const DB = {
     } catch(e) { return null; }
   },
   async loadShipments(opts={}) {
+    const _t0 = performance.now();
     const role   = AppState.user?.primary_role||AppState.user?.role||"";
     const phone  = AppState.user?.phone||"";
     const limit  = opts.limit  || 100;
@@ -545,6 +548,9 @@ const DB = {
     // Admin/ops: fetch all (no filter)
     const{data,error}=await q.limit(role==="admin"||role==="operations_manager"?500:200);
     if(error)throw error;
+    const _elapsed = Math.round(performance.now() - _t0);
+    if (_elapsed > 2000) console.warn(`⚠️ Slow loadShipments: ${_elapsed}ms`);
+    App._trackMetric?.("loadShipments", _elapsed, (data||[]).length);
     return (data||[]).map(mapRow);
   },
   async loadCouriers() {
@@ -2042,6 +2048,7 @@ function renderView() {
     case"import":     return viewImport();
     case"dispatch":   return viewDispatch();
     case"sla":        return viewSLA();
+    case"monitor":    return viewMonitor();
     case"webhooks":   return viewWebhooks();
     case"liveops":    return viewLiveOps();
     default:
@@ -6059,6 +6066,199 @@ function viewSLA() {
   return "";
 }
 
+// ══════════════════════════════════════════════════════════════
+// P8: MONITORING VIEW
+// ══════════════════════════════════════════════════════════════
+function viewMonitor() {
+  const errors  = AppState._errors       || [];
+  const metrics = AppState._perfMetrics  || [];
+  const health  = AppState._healthStatus || {};
+  const tab     = AppState.monitorTab    || "health";
+
+  const tabBar = `<div style="display:flex;gap:0;overflow-x:auto;
+    border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+    ${[
+      {id:"health",  label:"الصحة العامة"},
+      {id:"errors",  label:`الأخطاء (${errors.length})`},
+      {id:"perf",    label:`الأداء (${metrics.length})`},
+      {id:"realtime",label:"Realtime"},
+    ].map(t=>`<button onclick="App.setMonitorTab('${t.id}')"
+      style="padding:10px 18px;border:none;background:none;font-size:13px;font-weight:500;
+        white-space:nowrap;cursor:pointer;
+        border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+        color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">${t.label}</button>`
+    ).join("")}
+  </div>`;
+
+  // ── Health tab ────────────────────────────────────────────
+  if (tab==="health") {
+    const rtOk   = AppState.rtStatus === "SUBSCRIBED";
+    const errRate = errors.filter(e=>
+      Date.now()-new Date(e.time).getTime() < 60*60*1000).length;
+    const avgQ = metrics.length
+      ? Math.round(metrics.reduce((a,m)=>a+m.ms,0)/metrics.length)
+      : null;
+    const slowQ = metrics.filter(m=>m.ms>2000).length;
+
+    const statusCard = (label, ok, detail) => `
+      <div style="display:flex;align-items:center;gap:12px;padding:12px 0;
+        border-bottom:1px solid var(--gray-100);">
+        <span style="font-size:20px;">${ok?"✅":"⚠️"}</span>
+        <div style="flex:1;">
+          <div style="font-weight:600;font-size:13px;">${label}</div>
+          <div style="font-size:12px;color:var(--gray-500);">${detail}</div>
+        </div>
+        <span class="badge ${ok?"badge-success":"badge-warning"}">
+          ${ok?"سليم":"تحقق"}
+        </span>
+      </div>`;
+
+    return `<div>
+      <div class="card-header" style="margin-bottom:16px;">
+        <h2 style="font-size:18px;font-weight:700;">🖥️ لوحة المراقبة</h2>
+        <button class="btn btn-secondary btn-sm" onclick="App.runHealthCheck()">
+          🔄 فحص شامل
+        </button>
+      </div>
+      <div class="kpi-grid" style="margin-bottom:20px;">
+        ${kpi("أخطاء آخر ساعة", errRate, "log",
+          errRate>0?"var(--danger)":"var(--success)",
+          errRate>0?"var(--danger-bg)":"var(--success-bg)")}
+        ${kpi("متوسط وقت الاستعلام", avgQ?avgQ+"ms":"—", "refresh",
+          avgQ&&avgQ>1000?"var(--warning)":"var(--success)",
+          avgQ&&avgQ>1000?"var(--warning-bg)":"var(--success-bg)")}
+        ${kpi("استعلامات بطيئة", slowQ, "log",
+          slowQ>0?"var(--warning)":"var(--success)",
+          slowQ>0?"var(--warning-bg)":"var(--success-bg)")}
+        ${kpi("حالة Realtime", rtOk?"متصل":"منقطع", "users",
+          rtOk?"var(--success)":"var(--danger)",
+          rtOk?"var(--success-bg)":"var(--danger-bg)")}
+      </div>
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:16px;">🏥 فحص الصحة</h3>
+        ${tabBar}
+        ${statusCard("Supabase Realtime", rtOk,
+          rtOk?"الاتصال نشط — الشحنات تتحدث لحظياً":"الاتصال منقطع — يُعاد الاتصال...")}
+        ${statusCard("قاعدة البيانات", health.dbOk!==false,
+          health.dbLatency?`زمن الاستجابة: ${health.dbLatency}ms`:"اضغط فحص شامل للاختبار")}
+        ${statusCard("الجلسة", !!AppState.user,
+          AppState.user?`مسجل كـ ${AppState.user.name} (${AppState.user.primary_role})`:"غير مسجل")}
+        ${statusCard("الشحنات المحملة", AppState.shipments.length>0,
+          `${AppState.shipments.length} شحنة في الذاكرة`)}
+        ${statusCard("الذاكرة المستخدمة",
+          !performance.memory || performance.memory.usedJSHeapSize < 100*1024*1024,
+          performance.memory
+            ? `${Math.round(performance.memory.usedJSHeapSize/1024/1024)}MB`
+            : "غير متاح في هذا المتصفح")}
+      </div>
+    </div>`;
+  }
+
+  // ── Errors tab ───────────────────────────────────────────
+  if (tab==="errors") return `<div>
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">🚨 سجل الأخطاء (آخر 50)</h3>
+        <button class="btn btn-secondary btn-sm"
+          onclick="AppState._errors=[];rerenderContent();">🗑️ مسح</button>
+      </div>
+      ${tabBar}
+      ${!errors.length
+        ? `<div class="empty"><div class="empty-icon">✅</div>
+            <h3>لا توجد أخطاء</h3><p>النظام يعمل بشكل سليم</p></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr>
+              <th>النوع</th><th>الرسالة</th><th>الصفحة</th>
+              <th>الدور</th><th>التوقيت</th>
+            </tr></thead>
+            <tbody>
+              ${errors.map(e=>`<tr>
+                <td><span class="badge ${e.type==="js_error"?"badge-danger":"badge-warning"}">
+                  ${e.type==="js_error"?"JS Error":"Promise"}</span></td>
+                <td style="font-size:12px;max-width:300px;overflow:hidden;
+                  text-overflow:ellipsis;white-space:nowrap;" title="${esc(e.message)}">
+                  ${esc(e.message.slice(0,80))}</td>
+                <td style="font-size:12px;">${esc(e.view||"—")}</td>
+                <td style="font-size:12px;">${esc(e.role||"—")}</td>
+                <td style="font-size:11px;color:var(--gray-400);">${fmtTime(e.time)}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+    </div></div>`;
+
+  // ── Performance tab ──────────────────────────────────────
+  if (tab==="perf") return `<div>
+    <div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">⚡ أداء الاستعلامات (آخر 20)</h3>
+        <button class="btn btn-secondary btn-sm"
+          onclick="AppState._perfMetrics=[];rerenderContent();">🗑️ مسح</button>
+      </div>
+      ${tabBar}
+      ${!metrics.length
+        ? `<div class="empty"><div class="empty-icon">📊</div>
+            <h3>لا توجد بيانات بعد</h3>
+            <p>ستظهر مقاييس الأداء بعد تحميل البيانات</p></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr>
+              <th>الاستعلام</th><th>الوقت</th><th>الصفوف</th>
+              <th>التقييم</th><th>التوقيت</th>
+            </tr></thead>
+            <tbody>
+              ${metrics.map(m=>`<tr>
+                <td style="font-family:monospace;font-size:12px;">${esc(m.fn)}</td>
+                <td style="font-weight:700;color:${
+                  m.ms>2000?"var(--danger)":m.ms>500?"var(--warning)":"var(--success)"};">
+                  ${m.ms}ms</td>
+                <td style="font-size:12px;">${m.rows??"-"}</td>
+                <td><span class="badge ${
+                  m.ms>2000?"badge-danger":m.ms>500?"badge-warning":"badge-success"}">
+                  ${m.ms>2000?"بطيء":m.ms>500?"متوسط":"سريع"}</span></td>
+                <td style="font-size:11px;color:var(--gray-400);">${fmtTime(m.time)}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+    </div></div>`;
+
+  // ── Realtime tab ─────────────────────────────────────────
+  if (tab==="realtime") {
+    const rtStatus = AppState.rtStatus || "CONNECTING";
+    const cfg = rtStatusConfig(rtStatus);
+    return `<div>
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:16px;">📡 حالة Realtime</h3>
+        ${tabBar}
+        <div style="display:flex;align-items:center;gap:16px;padding:20px;
+          background:var(--gray-50);border-radius:var(--radius);margin-bottom:20px;">
+          <div style="width:16px;height:16px;border-radius:50%;
+            background:${cfg.color};flex-shrink:0;"></div>
+          <div>
+            <div style="font-size:18px;font-weight:700;">${cfg.label}</div>
+            <div style="font-size:13px;color:var(--gray-500);">
+              ${rtStatus==="SUBSCRIBED"
+                ? "يتلقى تحديثات الشحنات والإشعارات لحظياً"
+                : "لا تتلقى تحديثات لحظية — يُعاد الاتصال تلقائياً"}
+            </div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+          ${[
+            ["قناة الشحنات",   AppState.realtimeChannel?"نشطة":"غير نشطة",   !!AppState.realtimeChannel],
+            ["قناة Presence",  AppState.presenceChannel?"نشطة":"غير نشطة",   !!AppState.presenceChannel],
+            ["مناديب متصلون",  (AppState.onlineCouriers||[]).length+" مندوب", true],
+            ["أحداث RT مستلمة",AppState.rtEventCount||0,                      true],
+          ].map(([label,val,ok])=>`
+            <div style="padding:14px;background:${ok?"var(--success-bg)":"var(--gray-50)"};
+              border-radius:var(--radius);border:1px solid ${ok?"var(--success-border,#bbf7d0)":"var(--gray-200)"};">
+              <div style="font-size:12px;color:var(--gray-500);">${label}</div>
+              <div style="font-size:16px;font-weight:700;margin-top:4px;">${val}</div>
+            </div>`).join("")}
+        </div>
+      </div></div>`;
+  }
+  return "";
+}
+
 function viewDispatch() {
   const rules   = AppState.dispatchRules  || [];
   const configs = AppState.courierConfigs || [];
@@ -8470,6 +8670,57 @@ const App={
     } catch(err) {
       console.warn("SMS failed for", shipment.id, err.message);
       // Don't block the UI — SMS failure is non-critical
+    }
+  },
+
+  // ── P8: Monitoring ───────────────────────────────────────────
+  setMonitorTab(tab) {
+    AppState.monitorTab = tab;
+    rerenderContent();
+  },
+
+  async runHealthCheck() {
+    toast("جاري الفحص...","info");
+    const t0 = performance.now();
+    try {
+      // Test DB connectivity with a lightweight query
+      const { data, error } = await db.from("profiles")
+        .select("id").limit(1).single();
+      const latency = Math.round(performance.now() - t0);
+      AppState._healthStatus = {
+        dbOk:      !error,
+        dbLatency: latency,
+        checkedAt: new Date().toISOString(),
+      };
+      const metric = { fn:"healthCheck", ms:latency, rows:data?1:0, time:new Date().toISOString() };
+      AppState._perfMetrics = [metric, ...(AppState._perfMetrics||[])].slice(0,20);
+      rerenderContent();
+      toast(error
+        ? `❌ فشل الاتصال بقاعدة البيانات: ${error.message}`
+        : `✅ قاعدة البيانات تستجيب (${latency}ms)`
+      );
+    } catch(err) {
+      AppState._healthStatus = { dbOk:false, dbLatency:null, checkedAt:new Date().toISOString() };
+      rerenderContent();
+      toast("❌ فشل الفحص: "+err.message,"error");
+    }
+  },
+
+  // Track a custom metric (called from any DB method)
+  _trackMetric(fn, ms, rows) {
+    const metric = { fn, ms:Math.round(ms), rows, time:new Date().toISOString() };
+    AppState._perfMetrics = [metric, ...(AppState._perfMetrics||[])].slice(0,20);
+    if (ms > 3000) {
+      console.warn(`⚠️ Slow query: ${fn} took ${Math.round(ms)}ms`);
+      // Add to errors for visibility
+      const err = {
+        type:    "slow_query",
+        message: `${fn} took ${Math.round(ms)}ms (>${3000}ms threshold)`,
+        time:    new Date().toISOString(),
+        view:    AppState.view||"",
+        role:    AppState.user?.primary_role||"",
+      };
+      AppState._errors = [err, ...(AppState._errors||[])].slice(0,50);
     }
   },
 
@@ -11681,10 +11932,28 @@ const App={
 (async()=>{
   // ── Global error handlers ────────────────────────────────────
   window.addEventListener("error", e=>{
+    const err = {
+      type:    "js_error",
+      message: e.message,
+      source:  e.filename?.split("/").pop()||"",
+      line:    e.lineno,
+      time:    new Date().toISOString(),
+      view:    AppState?.view||"unknown",
+      role:    AppState?.user?.primary_role||"anonymous",
+    };
+    AppState._errors = [err, ...(AppState._errors||[])].slice(0,50);
     console.error("Global error:", e.message, "line:", e.lineno);
-    if(AppState.page==="dashboard") toast("خطأ: "+e.message,"error");
+    if(AppState.page==="dashboard") toast("خطأ غير متوقع: "+e.message,"error");
   });
   window.addEventListener("unhandledrejection", e=>{
+    const err = {
+      type:    "promise_rejection",
+      message: String(e.reason?.message||e.reason||"Unknown"),
+      time:    new Date().toISOString(),
+      view:    AppState?.view||"unknown",
+      role:    AppState?.user?.primary_role||"anonymous",
+    };
+    AppState._errors = [err, ...(AppState._errors||[])].slice(0,50);
     console.error("Unhandled rejection:", e.reason);
   });
 
