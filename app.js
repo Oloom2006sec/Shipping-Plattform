@@ -116,14 +116,14 @@ const ROLE_MAP = {
   admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","monitor","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","webhooks","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
-  customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","accounts"] }
+  customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","feedback","accounts"] }
 };
 
 const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",  monitor:"المراقبة",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",  monitor:"المراقبة",  feedback:"تقييماتي",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -262,6 +262,8 @@ const AppState = {
   shipmentsTotal:0, shipmentsCursor:null, shipmentsHasMore:false, _loadingMore:false,
   // P8: Monitoring
   _errors:[], _perfMetrics:[], _dbQueryLog:[], _healthStatus:{},
+  // P9: Feedback
+  shipmentRatings:[], npsSummary:{}, _feedbackLoaded:false,
   realtimeChannel:null,
   // Phase 2A — merchant portal (own data)
   merchantAddresses:[], merchantRecipients:[], merchantProducts:[],
@@ -1002,6 +1004,48 @@ const DB = {
       };
     });
     return map;
+  },
+
+  // ── P9: Feedback & NPS ───────────────────────────────────────
+  async submitRating(payload) {
+    const { error } = await db.from("shipment_ratings").insert([payload]);
+    if (error) throw error;
+  },
+
+  async loadMyRatings(customerPhone) {
+    const { data, error } = await db.from("shipment_ratings")
+      .select("*, shipments(shipment_code,status,created_at)")
+      .eq("customer_phone", customerPhone)
+      .order("created_at", { ascending: false });
+    if (error) { console.warn("loadMyRatings:", error.message); return []; }
+    return data || [];
+  },
+
+  async loadAllRatings(limit=100) {
+    const { data, error } = await db.from("shipment_ratings")
+      .select("*, shipments(shipment_code)")
+      .order("created_at", { ascending: false })
+      .limit(limit);
+    if (error) { console.warn("loadAllRatings:", error.message); return []; }
+    return data || [];
+  },
+
+  async submitNPS(payload) {
+    const { error } = await db.from("nps_responses").insert([payload]);
+    if (error) throw error;
+  },
+
+  async getNPSSummary(days=30) {
+    const { data, error } = await db.rpc("get_nps_summary", { p_days: days });
+    if (error) { console.warn("getNPSSummary:", error.message); return {}; }
+    return data || {};
+  },
+
+  async getCourierRatings(courierId, days=30) {
+    const { data, error } = await db.rpc("get_courier_ratings",
+      { p_courier_id: courierId, p_days: days });
+    if (error) { console.warn("getCourierRatings:", error.message); return {}; }
+    return data || {};
   },
 
   // ── Webhooks & API Keys ──────────────────────────────────────
@@ -2049,6 +2093,7 @@ function renderView() {
     case"dispatch":   return viewDispatch();
     case"sla":        return viewSLA();
     case"monitor":    return viewMonitor();
+    case"feedback":   return viewFeedback();
     case"webhooks":   return viewWebhooks();
     case"liveops":    return viewLiveOps();
     default:
@@ -2215,6 +2260,10 @@ function postRender() {
   if(AppState.view==="audit"){
     AppState._auditLoaded = true;
     App.loadAudit();
+  }
+  if(AppState.view==="feedback" && !AppState._feedbackLoaded){
+    AppState._feedbackLoaded = true;
+    App.loadFeedbackData();
   }
   if(AppState.view==="webhooks" && !AppState._webhooksDataLoaded){
     AppState._webhooksDataLoaded = true;
@@ -6067,6 +6116,113 @@ function viewSLA() {
 }
 
 // ══════════════════════════════════════════════════════════════
+// P9: CUSTOMER FEEDBACK & NPS VIEW
+// ══════════════════════════════════════════════════════════════
+function viewFeedback() {
+  if (!AppState._feedbackLoaded) {
+    return `<div class="card" style="text-align:center;padding:60px 20px;">
+      <div class="spinner" style="margin:0 auto 16px;"></div>
+      <div style="color:var(--gray-500);">جاري تحميل التقييمات...</div>
+    </div>`;
+  }
+
+  const role     = AppState.user?.primary_role || AppState.user?.role || "";
+  const ratings  = AppState.shipmentRatings || [];
+  const nps      = AppState.npsSummary      || {};
+  const isAdmin  = role === "admin" || role === "operations_manager";
+  const isMerch  = role === "merchant";
+
+  const starBar = (rating) => {
+    if (!rating) return "—";
+    return [1,2,3,4,5].map(i=>
+      `<span style="color:${i<=rating?"#f59e0b":"var(--gray-200)"};font-size:16px;">★</span>`
+    ).join("");
+  };
+
+  // ── NPS Summary (admin/merchant) ─────────────────────────────
+  const npsSection = (isAdmin||isMerch) && nps.total > 0 ? `
+    <div class="card" style="margin-bottom:16px;">
+      <div class="card-header" style="margin-bottom:16px;">
+        <h3 class="card-title">📊 Net Promoter Score (NPS)</h3>
+        <span style="font-size:12px;color:var(--gray-400);">آخر ${nps.days||30} يوم</span>
+      </div>
+      <div class="kpi-grid" style="margin-bottom:16px;">
+        ${kpi("NPS Score", (nps.nps_score>=0?"+":"")+nps.nps_score, "chart",
+          nps.nps_score>=50?"var(--success)":nps.nps_score>=0?"var(--warning)":"var(--danger)",
+          nps.nps_score>=50?"var(--success-bg)":nps.nps_score>=0?"var(--warning-bg)":"var(--danger-bg)")}
+        ${kpi("المروّجون", nps.promoters||0,  "users", "var(--success)", "var(--success-bg)")}
+        ${kpi("المحايدون", nps.passives||0,   "users", "var(--warning)", "var(--warning-bg)")}
+        ${kpi("المنتقدون", nps.detractors||0, "users", "var(--danger)",  "var(--danger-bg)")}
+      </div>
+      <!-- NPS Bar -->
+      <div style="background:var(--gray-100);border-radius:8px;overflow:hidden;height:12px;display:flex;">
+        ${nps.total>0?`
+          <div style="width:${(nps.promoters/nps.total*100).toFixed(1)}%;background:#22c55e;"></div>
+          <div style="width:${(nps.passives/nps.total*100).toFixed(1)}%;background:#f59e0b;"></div>
+          <div style="width:${(nps.detractors/nps.total*100).toFixed(1)}%;background:#ef4444;"></div>`:""}
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:11px;
+        color:var(--gray-400);margin-top:6px;">
+        <span>🟢 مروّجون (9-10)</span><span>🟡 محايدون (7-8)</span><span>🔴 منتقدون (0-6)</span>
+      </div>
+    </div>` : "";
+
+  // ── Ratings table ─────────────────────────────────────────────
+  const ratingsSection = `
+    <div class="card">
+      <div class="card-header" style="margin-bottom:16px;">
+        <h3 class="card-title">⭐ ${isAdmin||isMerch?"تقييمات العملاء":"تقييماتي"}</h3>
+        <button class="btn btn-secondary btn-sm"
+          onclick="AppState._feedbackLoaded=false;App.loadFeedbackData()">🔄 تحديث</button>
+      </div>
+      ${!ratings.length
+        ? `<div class="empty">
+            <div class="empty-icon">⭐</div>
+            <h3>لا توجد تقييمات بعد</h3>
+            <p>${role==="customer"?"قيّم شحناتك المُسلَّمة":"لم يُقدَّم أي تقييم حتى الآن"}</p>
+            ${role==="customer"?`<button class="btn btn-primary"
+              onclick="App.openNPSModal()">تقييم عام</button>`:""}
+          </div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr>
+              <th>الشحنة</th><th>التقييم العام</th><th>السرعة</th>
+              <th>المندوب</th><th>التعليق</th><th>التاريخ</th>
+            </tr></thead>
+            <tbody>
+              ${ratings.map(r=>`<tr>
+                <td class="td-mono" style="font-size:12px;">
+                  ${esc(r.shipment_code||r.shipments?.shipment_code||"—")}
+                </td>
+                <td>${starBar(r.rating)}</td>
+                <td>${r.speed_rating?starBar(r.speed_rating):"—"}</td>
+                <td>${r.courier_rating?starBar(r.courier_rating):"—"}</td>
+                <td style="font-size:12px;max-width:200px;overflow:hidden;
+                  text-overflow:ellipsis;white-space:nowrap;"
+                  title="${esc(r.comment||"")}">
+                  ${esc((r.comment||"").slice(0,50))||"—"}
+                </td>
+                <td style="font-size:12px;color:var(--gray-400);">${fmtDate(r.created_at)}</td>
+              </tr>`).join("")}
+            </tbody>
+          </table></div>`}
+    </div>`;
+
+  return `<div>
+    ${npsSection}
+    ${role==="customer"?`
+    <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+      <button class="btn btn-primary" onclick="App.openRateShipmentModal()">
+        ⭐ تقييم شحنة
+      </button>
+      <button class="btn btn-secondary" onclick="App.openNPSModal()">
+        📊 تقييم عام للخدمة
+      </button>
+    </div>`:""}
+    ${ratingsSection}
+  </div>`;
+}
+
+// ══════════════════════════════════════════════════════════════
 // P8: MONITORING VIEW
 // ══════════════════════════════════════════════════════════════
 function viewMonitor() {
@@ -8670,6 +8826,245 @@ const App={
     } catch(err) {
       console.warn("SMS failed for", shipment.id, err.message);
       // Don't block the UI — SMS failure is non-critical
+    }
+  },
+
+  // ── P9: Customer Feedback & NPS ──────────────────────────────
+  async loadFeedbackData() {
+    const role  = AppState.user?.primary_role || AppState.user?.role || "";
+    const phone = AppState.user?.phone || "";
+    try {
+      if (role === "customer") {
+        AppState.shipmentRatings = await DB.loadMyRatings(phone);
+      } else {
+        const [ratings, nps] = await Promise.all([
+          DB.loadAllRatings(100),
+          DB.getNPSSummary(30),
+        ]);
+        AppState.shipmentRatings = ratings;
+        AppState.npsSummary      = nps;
+      }
+      AppState._feedbackLoaded = true;
+      rerenderContent();
+    } catch(err) {
+      console.warn("loadFeedbackData:", err.message);
+      AppState._feedbackLoaded = true;
+      rerenderContent();
+    }
+  },
+
+  openRateShipmentModal() {
+    // Only delivered shipments can be rated
+    const delivered = (AppState.shipments||[])
+      .filter(s=>s.status==="delivered"&&s.customerPhone===AppState.user?.phone);
+    // Exclude already-rated shipments
+    const ratedIds = new Set((AppState.shipmentRatings||[]).map(r=>r.shipment_id));
+    const eligible = delivered.filter(s=>!ratedIds.has(s.id));
+
+    if (!eligible.length) {
+      toast("لا توجد شحنات مُسلَّمة تحتاج تقييماً","info");
+      return;
+    }
+
+    Modals.open(`<div class="modal" style="max-width:440px;">
+      <div class="modal-header">
+        <h3>⭐ تقييم شحنة</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>اختر الشحنة *</label>
+          <select id="ratingShipId" style="width:100%;padding:8px;
+            border-radius:var(--radius);border:1.5px solid var(--gray-300);">
+            <option value="">-- اختر شحنة --</option>
+            ${eligible.map(s=>`
+              <option value="${s.id}|${esc(s.id)}">${esc(s.id)} — ${fmtDate(s.createdAt)}</option>
+            `).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label>التقييم العام *</label>
+          <div id="ratingStars" style="display:flex;gap:8px;font-size:32px;cursor:pointer;">
+            ${[1,2,3,4,5].map(i=>
+              `<span onclick="App._setRating(${i})" data-star="${i}"
+                style="color:var(--gray-200);transition:color .15s;">★</span>`
+            ).join("")}
+          </div>
+          <input type="hidden" id="ratingVal" value="0"/>
+        </div>
+        <div class="field">
+          <label>سرعة التوصيل</label>
+          <div id="speedStars" style="display:flex;gap:8px;font-size:24px;cursor:pointer;">
+            ${[1,2,3,4,5].map(i=>
+              `<span onclick="App._setSpeedRating(${i})" data-speed="${i}"
+                style="color:var(--gray-200);">★</span>`
+            ).join("")}
+          </div>
+          <input type="hidden" id="speedVal" value="0"/>
+        </div>
+        <div class="field">
+          <label>تقييم المندوب</label>
+          <div id="courierStars" style="display:flex;gap:8px;font-size:24px;cursor:pointer;">
+            ${[1,2,3,4,5].map(i=>
+              `<span onclick="App._setCourierRating(${i})" data-courier="${i}"
+                style="color:var(--gray-200);">★</span>`
+            ).join("")}
+          </div>
+          <input type="hidden" id="courierVal" value="0"/>
+        </div>
+        <div class="field">
+          <label>تعليق (اختياري)</label>
+          <textarea id="ratingComment" rows="3"
+            placeholder="شاركنا رأيك في تجربتك..."
+            style="width:100%;padding:8px;border-radius:var(--radius);
+              border:1.5px solid var(--gray-300);resize:vertical;"></textarea>
+        </div>
+        <div id="ratingErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="ratingSubmitBtn" class="btn btn-primary"
+          onclick="App.submitShipmentRating()">⭐ إرسال التقييم</button>
+      </div>
+    </div>`);
+  },
+
+  _setRating(val) {
+    $("ratingVal").value = val;
+    document.querySelectorAll("[data-star]").forEach(s=>{
+      s.style.color = parseInt(s.dataset.star)<=val?"#f59e0b":"var(--gray-200)";
+    });
+  },
+  _setSpeedRating(val) {
+    $("speedVal").value = val;
+    document.querySelectorAll("[data-speed]").forEach(s=>{
+      s.style.color = parseInt(s.dataset.speed)<=val?"#f59e0b":"var(--gray-200)";
+    });
+  },
+  _setCourierRating(val) {
+    $("courierVal").value = val;
+    document.querySelectorAll("[data-courier]").forEach(s=>{
+      s.style.color = parseInt(s.dataset.courier)<=val?"#f59e0b":"var(--gray-200)";
+    });
+  },
+
+  async submitShipmentRating() {
+    const shipParts = $("ratingShipId")?.value?.split("|")||[];
+    const shipId    = shipParts[0];
+    const rating    = parseInt($("ratingVal")?.value||"0");
+    const speed     = parseInt($("speedVal")?.value||"0")||null;
+    const courier   = parseInt($("courierVal")?.value||"0")||null;
+    const comment   = $("ratingComment")?.value?.trim()||null;
+    const errEl     = $("ratingErr");
+    const btn       = $("ratingSubmitBtn");
+
+    if (!shipId) { errEl.style.display="block"; errEl.textContent="اختر شحنة"; return; }
+    if (!rating) { errEl.style.display="block"; errEl.textContent="اختر تقييماً (1-5 نجوم)"; return; }
+
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      const ship = AppState.shipments.find(s=>s.id===shipId);
+      await DB.submitRating({
+        shipment_id:    shipId,
+        shipment_code:  ship?.id || "",
+        customer_phone: AppState.user.phone,
+        courier_id:     ship?.courierId || null,
+        merchant_id:    ship?.merchantId || null,
+        rating, speed_rating:speed, courier_rating:courier, comment,
+      });
+      await DB.addAudit("RATING_SUBMIT", shipId,
+        `Rating:${rating} By:${AppState.user.phone}`, "feedback");
+      AppState._feedbackLoaded = false;
+      await App.loadFeedbackData();
+      Modals.close();
+      toast("✅ شكراً لتقييمك! رأيك يساعدنا على التحسين");
+    } catch(err) {
+      if (err.message?.includes("unique")) {
+        errEl.style.display="block";
+        errEl.textContent="لقد قيّمت هذه الشحنة من قبل";
+      } else {
+        errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
+      }
+      btn.disabled=false; btn.textContent="⭐ إرسال التقييم";
+    }
+  },
+
+  openNPSModal() {
+    Modals.open(`<div class="modal" style="max-width:420px;">
+      <div class="modal-header">
+        <h3>📊 تقييم عام للخدمة</h3>
+        <button class="btn-icon" onclick="Modals.close()">${icon("close")}</button>
+      </div>
+      <div class="modal-body">
+        <div style="text-align:center;margin-bottom:20px;">
+          <div style="font-size:15px;font-weight:600;margin-bottom:8px;">
+            ما مدى احتمالية توصيتك بخدمتنا لصديق أو زميل؟
+          </div>
+          <div style="font-size:13px;color:var(--gray-500);">0 = لن أوصي أبداً · 10 = بالتأكيد سأوصي</div>
+        </div>
+        <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin-bottom:20px;">
+          ${[...Array(11)].map((_,i)=>`
+            <button onclick="App._setNPS(${i})" data-nps="${i}"
+              style="width:40px;height:40px;border-radius:8px;border:2px solid var(--gray-200);
+                background:white;font-weight:700;cursor:pointer;font-size:14px;
+                color:${i<=6?"var(--danger)":i<=8?"var(--warning)":"var(--success)"};">
+              ${i}
+            </button>`).join("")}
+        </div>
+        <input type="hidden" id="npsVal" value="-1"/>
+        <div class="field">
+          <label>ما الذي يمكننا تحسينه؟ (اختياري)</label>
+          <textarea id="npsComment" rows="3"
+            placeholder="أخبرنا برأيك..."
+            style="width:100%;padding:8px;border-radius:var(--radius);
+              border:1.5px solid var(--gray-300);resize:vertical;"></textarea>
+        </div>
+        <div id="npsErr" class="form-error" style="display:none;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="Modals.close()">إلغاء</button>
+        <button id="npsSubmitBtn" class="btn btn-primary"
+          onclick="App.submitNPS()">📊 إرسال</button>
+      </div>
+    </div>`);
+  },
+
+  _setNPS(val) {
+    $("npsVal").value = val;
+    document.querySelectorAll("[data-nps]").forEach(btn=>{
+      const n = parseInt(btn.dataset.nps);
+      btn.style.background  = n===val
+        ? (val<=6?"var(--danger)":val<=8?"var(--warning)":"var(--success)")
+        : "white";
+      btn.style.color = n===val ? "white"
+        : n<=6?"var(--danger)":n<=8?"var(--warning)":"var(--success)";
+      btn.style.borderColor = n===val
+        ? (val<=6?"var(--danger)":val<=8?"var(--warning)":"var(--success)")
+        : "var(--gray-200)";
+    });
+  },
+
+  async submitNPS() {
+    const score   = parseInt($("npsVal")?.value??"-1");
+    const comment = $("npsComment")?.value?.trim()||null;
+    const errEl   = $("npsErr");
+    const btn     = $("npsSubmitBtn");
+
+    if (score < 0 || score > 10) {
+      errEl.style.display="block"; errEl.textContent="اختر رقماً من 0 إلى 10"; return;
+    }
+    btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
+    try {
+      await DB.submitNPS({
+        user_id:        AppState.user.id,
+        customer_phone: AppState.user.phone||"",
+        score, comment, context: "post_delivery",
+      });
+      Modals.close();
+      toast("✅ شكراً جزيلاً على تقييمك! رأيك يعني لنا الكثير");
+    } catch(err) {
+      errEl.style.display="block"; errEl.textContent="خطأ: "+err.message;
+      btn.disabled=false; btn.textContent="📊 إرسال";
     }
   },
 
