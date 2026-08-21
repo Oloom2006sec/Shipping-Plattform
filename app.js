@@ -113,7 +113,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","monitor","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","monitor","ratings","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","webhooks","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","feedback","accounts"] }
@@ -123,7 +123,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",  monitor:"المراقبة",  feedback:"تقييماتي",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",  monitor:"المراقبة",  feedback:"تقييماتي",  ratings:"التقييمات والـ NPS",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -264,6 +264,7 @@ const AppState = {
   _errors:[], _perfMetrics:[], _dbQueryLog:[], _healthStatus:{},
   // P9: Feedback
   shipmentRatings:[], npsSummary:{}, _feedbackLoaded:false,
+  allRatings:[], courierRatingsMap:{}, _ratingsLoaded:false,
   realtimeChannel:null,
   // Phase 2A — merchant portal (own data)
   merchantAddresses:[], merchantRecipients:[], merchantProducts:[],
@@ -2094,6 +2095,7 @@ function renderView() {
     case"sla":        return viewSLA();
     case"monitor":    return viewMonitor();
     case"feedback":   return viewFeedback();
+    case"ratings":    return viewRatings();
     case"webhooks":   return viewWebhooks();
     case"liveops":    return viewLiveOps();
     default:
@@ -2264,6 +2266,10 @@ function postRender() {
   if(AppState.view==="feedback" && !AppState._feedbackLoaded){
     AppState._feedbackLoaded = true;
     App.loadFeedbackData();
+  }
+  if(AppState.view==="ratings" && !AppState._ratingsLoaded){
+    AppState._ratingsLoaded = true;
+    App.loadRatingsData();
   }
   if(AppState.view==="webhooks" && !AppState._webhooksDataLoaded){
     AppState._webhooksDataLoaded = true;
@@ -6116,6 +6122,200 @@ function viewSLA() {
 }
 
 // ══════════════════════════════════════════════════════════════
+// P9: ADMIN RATINGS + NPS DASHBOARD
+// Navigation: Admin → التقييمات والـ NPS
+// ══════════════════════════════════════════════════════════════
+function viewRatings() {
+  if (!AppState._ratingsLoaded) {
+    return `<div class="card" style="text-align:center;padding:60px 20px;">
+      <div class="spinner" style="margin:0 auto 16px;"></div>
+      <div style="color:var(--gray-500);">جاري تحميل بيانات التقييمات...</div>
+    </div>`;
+  }
+
+  const nps     = AppState.npsSummary      || {};
+  const ratings = AppState.allRatings      || [];
+  const tab     = AppState.ratingsTab      || "nps";
+
+  const starDisplay = (val) => val
+    ? [1,2,3,4,5].map(i=>`<span style="color:${i<=val?"#f59e0b":"var(--gray-200)}"}>★</span>`).join("")
+    : "—";
+
+  const tabBar = `<div style="display:flex;gap:0;overflow-x:auto;
+    border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+    ${[
+      {id:"nps",      label:"NPS Dashboard"},
+      {id:"ratings",  label:`تقييمات العملاء (${ratings.length})`},
+      {id:"couriers", label:"أداء المناديب"},
+    ].map(t=>`<button onclick="App.setRatingsTab('${t.id}')"
+      style="padding:10px 18px;border:none;background:none;font-size:13px;font-weight:500;
+        white-space:nowrap;cursor:pointer;
+        border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+        color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">${t.label}</button>`
+    ).join("")}
+  </div>`;
+
+  // ── NPS Tab ────────────────────────────────────────────────
+  if (tab==="nps") {
+    const hasNPS = nps.total > 0;
+    return `<div>
+      <div class="card-header" style="margin-bottom:16px;">
+        <h2 style="font-size:18px;font-weight:700;">⭐ التقييمات والـ NPS</h2>
+        <button class="btn btn-secondary btn-sm"
+          onclick="AppState._ratingsLoaded=false;App.loadRatingsData()">🔄 تحديث</button>
+      </div>
+      ${hasNPS ? `
+      <div class="kpi-grid" style="margin-bottom:20px;">
+        ${kpi("NPS Score",
+          (nps.nps_score>=0?"+":"")+nps.nps_score, "chart",
+          nps.nps_score>=50?"var(--success)":nps.nps_score>=0?"var(--warning)":"var(--danger)",
+          nps.nps_score>=50?"var(--success-bg)":nps.nps_score>=0?"var(--warning-bg)":"var(--danger-bg)")}
+        ${kpi("متوسط التقييم", (nps.avg_score||0)+" / 5", "chart", "var(--brand)", "var(--brand-light)")}
+        ${kpi("المروّجون", nps.promoters||0, "users", "var(--success)", "var(--success-bg)")}
+        ${kpi("المنتقدون", nps.detractors||0, "users", "var(--danger)",  "var(--danger-bg)")}
+      </div>
+      <div class="card" style="margin-bottom:16px;">
+        <h3 class="card-title" style="margin-bottom:12px;">📊 توزيع NPS (آخر ${nps.days||30} يوم)</h3>
+        ${tabBar}
+        <div style="margin-bottom:8px;font-size:13px;color:var(--gray-600);">
+          ${nps.total} استجابة إجمالية
+        </div>
+        <div style="background:var(--gray-100);border-radius:8px;
+          overflow:hidden;height:20px;display:flex;margin-bottom:8px;">
+          <div style="width:${((nps.promoters||0)/nps.total*100).toFixed(1)}%;
+            background:#22c55e;display:flex;align-items:center;justify-content:center;
+            font-size:10px;color:white;font-weight:700;">
+            ${((nps.promoters||0)/nps.total*100).toFixed(0)}%
+          </div>
+          <div style="width:${((nps.passives||0)/nps.total*100).toFixed(1)}%;
+            background:#f59e0b;display:flex;align-items:center;justify-content:center;
+            font-size:10px;color:white;font-weight:700;">
+            ${((nps.passives||0)/nps.total*100).toFixed(0)}%
+          </div>
+          <div style="flex:1;background:#ef4444;display:flex;align-items:center;
+            justify-content:center;font-size:10px;color:white;font-weight:700;">
+            ${((nps.detractors||0)/nps.total*100).toFixed(0)}%
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12px;color:var(--gray-500);">
+          <span>🟢 مروّجون (9-10): ${nps.promoters||0}</span>
+          <span>🟡 محايدون (7-8): ${nps.passives||0}</span>
+          <span>🔴 منتقدون (0-6): ${nps.detractors||0}</span>
+        </div>
+        <div style="margin-top:16px;padding:16px;background:var(--gray-50);
+          border-radius:var(--radius);text-align:center;">
+          <div style="font-size:13px;color:var(--gray-500);margin-bottom:4px;">صيغة NPS</div>
+          <div style="font-size:12px;font-family:monospace;color:var(--gray-600);">
+            NPS = ((${nps.promoters||0} - ${nps.detractors||0}) / ${nps.total}) × 100
+            = <b style="color:${nps.nps_score>=0?"var(--success)":"var(--danger)"};">
+              ${(nps.nps_score>=0?"+":"")+nps.nps_score}
+            </b>
+          </div>
+        </div>
+      </div>` : `
+      <div class="card" style="margin-bottom:16px;">
+        ${tabBar}
+        <div class="empty">
+          <div class="empty-icon">📊</div>
+          <h3>لا توجد بيانات NPS بعد</h3>
+          <p>ستظهر هنا بعد أن يُقدِّم العملاء تقييماتهم</p>
+        </div>
+      </div>`}
+    </div>`;
+  }
+
+  // ── Ratings Tab ───────────────────────────────────────────
+  if (tab==="ratings") {
+    const avgRating = ratings.length
+      ? (ratings.reduce((a,r)=>a+r.rating,0)/ratings.length).toFixed(1)
+      : null;
+    return `<div>
+      <div class="kpi-grid" style="margin-bottom:20px;">
+        ${kpi("إجمالي التقييمات", ratings.length, "chart", "var(--brand)", "var(--brand-light)")}
+        ${kpi("متوسط النجوم", avgRating?avgRating+" ★":"—", "chart", "var(--success)", "var(--success-bg)")}
+        ${kpi("5 نجوم", ratings.filter(r=>r.rating===5).length, "chart", "var(--success)", "var(--success-bg)")}
+        ${kpi("1 نجمة", ratings.filter(r=>r.rating===1).length, "log", "var(--danger)", "var(--danger-bg)")}
+      </div>
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px;">
+          <h3 class="card-title">⭐ تقييمات العملاء</h3>
+        </div>
+        ${tabBar}
+        ${!ratings.length
+          ? `<div class="empty"><div class="empty-icon">⭐</div>
+              <h3>لا توجد تقييمات بعد</h3></div>`
+          : `<div class="table-wrap"><table>
+              <thead><tr>
+                <th>الشحنة</th><th>التقييم</th><th>السرعة</th>
+                <th>المندوب</th><th>التعليق</th><th>التاريخ</th>
+              </tr></thead>
+              <tbody>
+                ${ratings.map(r=>`<tr>
+                  <td class="td-mono" style="font-size:12px;">
+                    ${esc(r.shipment_code||r.shipments?.shipment_code||"—")}</td>
+                  <td>${starDisplay(r.rating)}</td>
+                  <td>${r.speed_rating?starDisplay(r.speed_rating):"—"}</td>
+                  <td>${r.courier_rating?starDisplay(r.courier_rating):"—"}</td>
+                  <td style="font-size:12px;max-width:180px;overflow:hidden;
+                    text-overflow:ellipsis;white-space:nowrap;"
+                    title="${esc(r.comment||"")}">
+                    ${esc((r.comment||"").slice(0,50))||"—"}</td>
+                  <td style="font-size:12px;color:var(--gray-400);">${fmtDate(r.created_at)}</td>
+                </tr>`).join("")}
+              </tbody>
+            </table></div>`}
+      </div>
+    </div>`;
+  }
+
+  // ── Courier Performance Tab ───────────────────────────────
+  if (tab==="couriers") {
+    const courierMap = AppState.courierRatingsMap || {};
+    const couriers   = AppState.couriers || [];
+    const withRatings = couriers.filter(c=>courierMap[c.id]);
+    return `<div>
+      <div class="card">
+        <div class="card-header" style="margin-bottom:12px;">
+          <h3 class="card-title">🚚 أداء المناديب (تقييمات العملاء)</h3>
+          <button class="btn btn-secondary btn-sm"
+            onclick="App.loadCourierPerformance()">🔄 تحديث</button>
+        </div>
+        ${tabBar}
+        ${!withRatings.length
+          ? `<div class="empty">
+              <div class="empty-icon">🚚</div>
+              <h3>لا توجد تقييمات للمناديب بعد</h3>
+              <p>ستظهر هنا بعد أن يُقيِّم العملاء تجاربهم</p>
+            </div>`
+          : `<div class="table-wrap"><table>
+              <thead><tr>
+                <th>المندوب</th><th>متوسط التقييم</th><th>متوسط السرعة</th>
+                <th>تقييم المندوب</th><th>إجمالي التقييمات</th><th>5 نجوم</th>
+              </tr></thead>
+              <tbody>
+                ${couriers
+                  .filter(c=>courierMap[c.id])
+                  .sort((a,b)=>(courierMap[b.id]?.avg_rating||0)-(courierMap[a.id]?.avg_rating||0))
+                  .map(c=>{
+                    const r = courierMap[c.id];
+                    return `<tr>
+                      <td style="font-weight:600;">${esc(c.full_name||c.name||"—")}</td>
+                      <td>${r.avg_rating?`<span style="font-weight:700;color:${r.avg_rating>=4?"var(--success)":r.avg_rating>=3?"var(--warning)":"var(--danger)"};">${r.avg_rating} ★</span>`:"—"}</td>
+                      <td>${r.avg_speed||"—"}</td>
+                      <td>${r.avg_courier_rating||"—"}</td>
+                      <td>${r.total_ratings||0}</td>
+                      <td style="color:var(--success);font-weight:600;">${r.five_star||0}</td>
+                    </tr>`;
+                  }).join("")}
+              </tbody>
+            </table></div>`}
+      </div>
+    </div>`;
+  }
+  return "";
+}
+
+// ══════════════════════════════════════════════════════════════
 // P9: CUSTOMER FEEDBACK & NPS VIEW
 // ══════════════════════════════════════════════════════════════
 function viewFeedback() {
@@ -8826,6 +9026,53 @@ const App={
     } catch(err) {
       console.warn("SMS failed for", shipment.id, err.message);
       // Don't block the UI — SMS failure is non-critical
+    }
+  },
+
+  // ── P9: Admin Ratings & NPS ──────────────────────────────────
+  setRatingsTab(tab) {
+    AppState.ratingsTab = tab;
+    if (tab === "couriers" && !Object.keys(AppState.courierRatingsMap||{}).length) {
+      App.loadCourierPerformance();
+    }
+    rerenderContent();
+  },
+
+  async loadRatingsData() {
+    try {
+      const [ratings, nps] = await Promise.all([
+        DB.loadAllRatings(200),
+        DB.getNPSSummary(30),
+      ]);
+      AppState.allRatings      = ratings;
+      AppState.npsSummary      = nps;
+      AppState._ratingsLoaded  = true;
+      rerenderContent();
+    } catch(err) {
+      console.warn("loadRatingsData:", err.message);
+      AppState._ratingsLoaded = true;
+      rerenderContent();
+    }
+  },
+
+  async loadCourierPerformance() {
+    const couriers = AppState.couriers || [];
+    if (!couriers.length) return;
+    try {
+      const results = await Promise.all(
+        couriers.map(c =>
+          DB.getCourierRatings(c.id, 30)
+            .then(r => ({ id: c.id, data: r }))
+            .catch(() => ({ id: c.id, data: {} }))
+        )
+      );
+      const map = {};
+      results.forEach(r => { if (r.data?.total_ratings > 0) map[r.id] = r.data; });
+      AppState.courierRatingsMap = map;
+      rerenderContent();
+      toast(`✅ تم تحميل بيانات أداء ${Object.keys(map).length} مندوب`);
+    } catch(err) {
+      toast("فشل تحميل أداء المناديب: "+err.message,"error");
     }
   },
 
