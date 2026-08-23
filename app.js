@@ -113,7 +113,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","monitor","ratings","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","monitor","ratings","ai","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","webhooks","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","feedback","accounts"] }
@@ -123,7 +123,7 @@ const NAV_LABELS = {
   overview:"الرئيسية", shipments:"الشحنات", tasks:"مهامي",
   accounts:"الحساب",   reports:"التقارير",  users:"المستخدمين",
   audit:"سجل النشاط",  track:"تتبع",
-  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",  monitor:"المراقبة",  feedback:"تقييماتي",  ratings:"التقييمات والـ NPS",
+  merchants:"التجار",  finance:"المالية",  pricing:"الأسعار",  branches:"الفروع",  import:"الاستيراد",  cshipments:"شحناتي",  dispatch:"التوزيع التلقائي",  liveops:"العمليات المباشرة",  sla:"مستوى الخدمة SLA",  webhooks:"الربط والـ API",  monitor:"المراقبة",  feedback:"تقييماتي",  ratings:"التقييمات والـ NPS",  ai:"الذكاء الاصطناعي",
   addresses:"دفتر العناوين", recipients:"العملاء",
   products:"المنتجات",       pickup:"طلبات الاستلام"
 };
@@ -265,6 +265,8 @@ const AppState = {
   // P9: Feedback
   shipmentRatings:[], npsSummary:{}, _feedbackLoaded:false,
   allRatings:[], courierRatingsMap:{}, _ratingsLoaded:false,
+  // P10: AI & Automation
+  aiInsights:[], aiDigest:{}, _aiLoaded:false,
   realtimeChannel:null,
   // Phase 2A — merchant portal (own data)
   merchantAddresses:[], merchantRecipients:[], merchantProducts:[],
@@ -2096,6 +2098,7 @@ function renderView() {
     case"monitor":    return viewMonitor();
     case"feedback":   return viewFeedback();
     case"ratings":    return viewRatings();
+    case"ai":         return viewAI();
     case"webhooks":   return viewWebhooks();
     case"liveops":    return viewLiveOps();
     default:
@@ -2270,6 +2273,10 @@ function postRender() {
   if(AppState.view==="ratings" && !AppState._ratingsLoaded){
     AppState._ratingsLoaded = true;
     App.loadRatingsData();
+  }
+  if(AppState.view==="ai" && !AppState._aiLoaded){
+    AppState._aiLoaded = true;
+    App.runAIAnalysis();
   }
   if(AppState.view==="webhooks" && !AppState._webhooksDataLoaded){
     AppState._webhooksDataLoaded = true;
@@ -6122,6 +6129,175 @@ function viewSLA() {
 }
 
 // ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// P10: AI & AUTOMATION VIEW
+// ══════════════════════════════════════════════════════════════
+function viewAI() {
+  if (!AppState._aiLoaded) {
+    return `<div class="card" style="text-align:center;padding:60px 20px;">
+      <div class="spinner" style="margin:0 auto 16px;"></div>
+      <div style="color:var(--gray-500);">جاري تشغيل محرك الذكاء الاصطناعي...</div>
+    </div>`;
+  }
+
+  const insights = AppState.aiInsights || [];
+  const digest   = AppState.aiDigest   || {};
+  const tab      = AppState.aiTab      || "insights";
+
+  const SEVERITY = {
+    critical:{color:"var(--danger)", bg:"var(--danger-bg)", icon:"🔴",label:"حرج"},
+    warning: {color:"var(--warning)",bg:"var(--warning-bg)",icon:"🟡",label:"تحذير"},
+    info:    {color:"var(--brand)",  bg:"var(--brand-light)",icon:"🔵",label:"معلومة"},
+    success: {color:"var(--success)",bg:"var(--success-bg)",icon:"🟢",label:"إيجابي"},
+  };
+
+  const tabBar = `<div style="display:flex;gap:0;overflow-x:auto;
+    border-bottom:1px solid var(--gray-200);margin-bottom:20px;">
+    ${[
+      {id:"insights",label:`تنبيهات ذكية (${insights.length})`},
+      {id:"digest",  label:"الملخص اليومي"},
+      {id:"dispatch",label:"اقتراحات التوزيع"},
+      {id:"predict", label:"توقعات التسليم"},
+    ].map(t=>`<button onclick="App.setAITab('${t.id}')"
+      style="padding:10px 18px;border:none;background:none;font-size:13px;font-weight:500;
+        white-space:nowrap;cursor:pointer;
+        border-bottom:2px solid ${tab===t.id?"var(--brand)":"transparent"};
+        color:${tab===t.id?"var(--brand)":"var(--gray-500)"};">${t.label}</button>`
+    ).join("")}
+  </div>`;
+
+  if (tab==="insights") {
+    const critical=insights.filter(i=>i.severity==="critical");
+    const warnings=insights.filter(i=>i.severity==="warning");
+    return `<div>
+      <div class="card-header" style="margin-bottom:16px;">
+        <h2 style="font-size:18px;font-weight:700;">🤖 الذكاء الاصطناعي والأتمتة</h2>
+        <button class="btn btn-secondary btn-sm" onclick="App.runAIAnalysis()">🔄 تحليل جديد</button>
+      </div>
+      <div class="kpi-grid" style="margin-bottom:20px;">
+        ${kpi("تنبيهات حرجة",critical.length,"log",critical.length>0?"var(--danger)":"var(--success)",critical.length>0?"var(--danger-bg)":"var(--success-bg)")}
+        ${kpi("تحذيرات",warnings.length,"refresh",warnings.length>0?"var(--warning)":"var(--success)",warnings.length>0?"var(--warning-bg)":"var(--success-bg)")}
+        ${kpi("إجمالي الشحنات",AppState.shipments.length,"box","var(--brand)","var(--brand-light)")}
+        ${kpi("آخر تحليل",digest.generatedAt?fmtTime(digest.generatedAt):"—","chart","var(--gray-500)","var(--gray-50)")}
+      </div>
+      <div class="card">
+        <h3 class="card-title" style="margin-bottom:16px;">💡 تنبيهات ذكية</h3>
+        ${tabBar}
+        ${!insights.length
+          ? `<div class="empty"><div class="empty-icon">✅</div><h3>لا توجد تنبيهات</h3><p>النظام يعمل بشكل مثالي</p></div>`
+          : insights.map(ins=>{
+              const sev=SEVERITY[ins.severity]||SEVERITY.info;
+              return `<div style="display:flex;gap:12px;padding:14px;margin-bottom:10px;
+                border-radius:var(--radius);background:${sev.bg};border-right:4px solid ${sev.color};">
+                <span style="font-size:20px;flex-shrink:0;">${sev.icon}</span>
+                <div style="flex:1;">
+                  <div style="font-weight:700;font-size:13px;color:${sev.color};margin-bottom:4px;">${esc(ins.title)}</div>
+                  <div style="font-size:13px;color:var(--gray-700);margin-bottom:8px;">${esc(ins.description)}</div>
+                  ${ins.action?`<button class="btn btn-secondary btn-sm" onclick="${ins.action}">${esc(ins.actionLabel||"اتخاذ إجراء")}</button>`:""}
+                </div>
+                <span class="badge" style="background:${sev.color};color:white;font-size:10px;align-self:flex-start;">${sev.label}</span>
+              </div>`;
+            }).join("")}
+      </div></div>`;
+  }
+
+  if (tab==="digest") {
+    const d=digest;
+    return `<div><div class="card">
+      <div class="card-header" style="margin-bottom:16px;">
+        <h3 class="card-title">📋 الملخص اليومي الذكي</h3>
+        <span style="font-size:12px;color:var(--gray-400);">${d.generatedAt?`آخر تحديث: ${fmtTime(d.generatedAt)}`:""}</span>
+      </div>
+      ${tabBar}
+      ${!d.generatedAt
+        ? `<div class="empty"><div class="empty-icon">📋</div><h3>لم يُولَّد ملخص بعد</h3>
+            <button class="btn btn-primary" onclick="App.runAIAnalysis()">🤖 توليد الملخص</button></div>`
+        : `<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
+            <div style="padding:16px;background:var(--success-bg);border-radius:var(--radius);">
+              <div style="font-size:12px;color:var(--gray-500);margin-bottom:4px;">معدل التسليم اليوم</div>
+              <div style="font-size:28px;font-weight:800;color:var(--success);">${d.deliveryRate||0}%</div>
+              <div style="font-size:12px;color:var(--gray-500);">${d.delivered||0} من ${d.attempted||0} محاولة</div>
+            </div>
+            <div style="padding:16px;background:var(--warning-bg);border-radius:var(--radius);">
+              <div style="font-size:12px;color:var(--gray-500);margin-bottom:4px;">شحنات تحتاج انتباه</div>
+              <div style="font-size:28px;font-weight:800;color:var(--warning);">${d.needsAttention||0}</div>
+              <div style="font-size:12px;color:var(--gray-500);">متأخرة أو معلقة</div>
+            </div>
+          </div>
+          <div style="padding:16px;background:var(--gray-50);border-radius:var(--radius);margin-bottom:16px;">
+            <div style="font-weight:700;margin-bottom:10px;">📈 تحليل الاتجاهات</div>
+            ${(d.trends||[]).map(t=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;font-size:13px;"><span>${t.icon||"•"}</span><span>${esc(t.text)}</span></div>`).join("")}
+          </div>
+          ${d.topCouriers?.length?`<div style="padding:16px;background:var(--gray-50);border-radius:var(--radius);">
+            <div style="font-weight:700;margin-bottom:10px;">🏆 أفضل المناديب اليوم</div>
+            ${d.topCouriers.map((c,i)=>`<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
+              <span style="font-size:18px;">${["🥇","🥈","🥉"][i]||"•"}</span>
+              <span style="font-weight:600;">${esc(c.name)}</span>
+              <span style="font-size:12px;color:var(--gray-500);margin-right:auto;">${c.delivered} شحنة مُسلَّمة</span>
+            </div>`).join("")}
+          </div>`:""}
+        `}
+    </div></div>`;
+  }
+
+  if (tab==="dispatch") {
+    const suggestions=AppState.aiDispatchSuggestions||[];
+    return `<div><div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">⚡ اقتراحات التوزيع الذكي</h3>
+        <button class="btn btn-secondary btn-sm" onclick="App.generateDispatchSuggestions()">🤖 توليد اقتراحات</button>
+      </div>
+      ${tabBar}
+      <div style="font-size:13px;color:var(--gray-500);margin-bottom:16px;padding:12px;background:var(--gray-50);border-radius:var(--radius);">
+        💡 بناءً على تحليل الأحمال الحالية وأداء المناديب التاريخي
+      </div>
+      ${!suggestions.length
+        ? `<div class="empty"><div class="empty-icon">⚡</div><h3>اضغط "توليد اقتراحات" للبدء</h3></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr><th>الشحنة</th><th>المندوب المقترح</th><th>السبب</th><th>الثقة</th><th>تطبيق</th></tr></thead>
+            <tbody>${suggestions.map(s=>`<tr>
+              <td class="td-mono" style="font-size:12px;">${esc(s.shipmentCode)}</td>
+              <td style="font-weight:600;">${esc(s.courierName)}</td>
+              <td style="font-size:12px;color:var(--gray-600);">${esc(s.reason)}</td>
+              <td><div style="display:flex;align-items:center;gap:6px;">
+                <div style="width:60px;height:6px;background:var(--gray-100);border-radius:3px;">
+                  <div style="width:${s.confidence}%;height:100%;border-radius:3px;background:${s.confidence>=80?"var(--success)":s.confidence>=60?"var(--warning)":"var(--danger)"};"></div>
+                </div><span style="font-size:11px;">${s.confidence}%</span></div></td>
+              <td><button class="btn btn-primary btn-sm" onclick="App.applyAISuggestion('${s.shipmentId}','${s.courierId}')">تطبيق</button></td>
+            </tr>`).join("")}</tbody>
+          </table></div>`}
+    </div></div>`;
+  }
+
+  if (tab==="predict") {
+    const predictions=AppState.aiPredictions||[];
+    return `<div><div class="card">
+      <div class="card-header" style="margin-bottom:12px;">
+        <h3 class="card-title">🎯 توقعات التسليم</h3>
+        <button class="btn btn-secondary btn-sm" onclick="App.generateDeliveryPredictions()">🤖 توليد توقعات</button>
+      </div>
+      ${tabBar}
+      ${!predictions.length
+        ? `<div class="empty"><div class="empty-icon">🎯</div><h3>اضغط "توليد توقعات" للبدء</h3></div>`
+        : `<div class="table-wrap"><table>
+            <thead><tr><th>الشحنة</th><th>المنطقة</th><th>المندوب</th><th>احتمالية التسليم</th><th>ETA</th><th>المخاطرة</th></tr></thead>
+            <tbody>${predictions.map(p=>`<tr>
+              <td class="td-mono" style="font-size:12px;">${esc(p.shipmentCode)}</td>
+              <td style="font-size:12px;">${esc(p.governorate||"—")}</td>
+              <td style="font-size:12px;">${esc(p.courierName||"—")}</td>
+              <td><div style="display:flex;align-items:center;gap:6px;">
+                <div style="width:70px;height:8px;background:var(--gray-100);border-radius:4px;">
+                  <div style="width:${p.deliveryProb}%;height:100%;border-radius:4px;background:${p.deliveryProb>=80?"var(--success)":p.deliveryProb>=60?"var(--warning)":"var(--danger)"};"></div>
+                </div><span style="font-size:12px;font-weight:700;">${p.deliveryProb}%</span></div></td>
+              <td style="font-size:12px;">${p.eta||"—"}</td>
+              <td><span class="badge ${p.risk==="high"?"badge-danger":p.risk==="medium"?"badge-warning":"badge-success"}">${p.risk==="high"?"مرتفع":p.risk==="medium"?"متوسط":"منخفض"}</span></td>
+            </tr>`).join("")}</tbody>
+          </table></div>`}
+    </div></div>`;
+  }
+  return "";
+}
+
 // P9: ADMIN RATINGS + NPS DASHBOARD
 // Navigation: Admin → التقييمات والـ NPS
 // ══════════════════════════════════════════════════════════════
@@ -9027,6 +9203,283 @@ const App={
       console.warn("SMS failed for", shipment.id, err.message);
       // Don't block the UI — SMS failure is non-critical
     }
+  },
+
+  // ── P10: AI & Automation Engine ─────────────────────────────
+  setAITab(tab) {
+    AppState.aiTab = tab;
+    rerenderContent();
+  },
+
+  async runAIAnalysis() {
+    const ships    = AppState.shipments     || [];
+    const couriers = AppState.couriers      || [];
+    const slaBreaches = AppState.slaBreaches|| [];
+    const insights = [];
+    const now      = Date.now();
+
+    // ── 1. Anomaly Detection ─────────────────────────────────
+    // Shipments stuck in same status for too long
+    const stuckThreshold = 24 * 60 * 60 * 1000; // 24 hours
+    const stuck = ships.filter(s=>
+      !["delivered","returned","cancelled"].includes(s.status) &&
+      s.updatedAt && (now - new Date(s.updatedAt).getTime()) > stuckThreshold
+    );
+    if (stuck.length > 0) {
+      insights.push({
+        severity:    "critical",
+        title:       `${stuck.length} شحنة متوقفة منذ أكثر من 24 ساعة`,
+        description: `الشحنات: ${stuck.slice(0,3).map(s=>s.id).join("، ")}${stuck.length>3?` و${stuck.length-3} أخرى`:""}`,
+        action:      `AppState.view='shipments';AppState.statusFilter='${stuck[0]?.status||"all"}';rerenderContent()`,
+        actionLabel: "عرض الشحنات",
+      });
+    }
+
+    // ── 2. SLA Risk Detection ─────────────────────────────────
+    const openBreaches = slaBreaches.filter(b=>b.status==="open"&&b.breach_type==="delivery");
+    if (openBreaches.length > 0) {
+      insights.push({
+        severity:    "critical",
+        title:       `${openBreaches.length} شحنة تجاوزت مستوى الخدمة SLA`,
+        description: "تحتاج تدخلاً فورياً لتجنب تدهور رضا العملاء",
+        action:      "AppState.view='sla';AppState._slaDataLoaded=false;rerenderContent()",
+        actionLabel: "عرض خروقات SLA",
+      });
+    }
+
+    // SLA warnings (approaching breach)
+    const warnings = slaBreaches.filter(b=>b.status==="open"&&b.breach_type==="warning");
+    if (warnings.length > 0) {
+      insights.push({
+        severity:    "warning",
+        title:       `${warnings.length} شحنة تقترب من حد SLA`,
+        description: "تصرف الآن لتجنب الخرق",
+        action:      "AppState.view='sla';AppState.slaTab='warnings';rerenderContent()",
+        actionLabel: "عرض التحذيرات",
+      });
+    }
+
+    // ── 3. Courier Workload Imbalance ─────────────────────────
+    const courierLoads = {};
+    ships.filter(s=>s.status==="out_for_delivery"&&s.courierId)
+      .forEach(s=>{ courierLoads[s.courierId]=(courierLoads[s.courierId]||0)+1; });
+    const loads = Object.values(courierLoads);
+    if (loads.length >= 2) {
+      const maxLoad = Math.max(...loads);
+      const minLoad = Math.min(...loads);
+      if (maxLoad > minLoad * 2 && maxLoad > 5) {
+        const busyCourier = couriers.find(c=>courierLoads[c.id]===maxLoad);
+        insights.push({
+          severity:    "warning",
+          title:       "عدم توازن في أحمال المناديب",
+          description: `المندوب ${busyCourier?.full_name||"—"} لديه ${maxLoad} شحنة بينما أقل مندوب لديه ${minLoad}`,
+          action:      "AppState.view='dispatch';rerenderContent()",
+          actionLabel: "إعادة توزيع",
+        });
+      }
+    }
+
+    // ── 4. High Return Rate ───────────────────────────────────
+    const returned  = ships.filter(s=>s.status==="returned").length;
+    const delivered = ships.filter(s=>s.status==="delivered").length;
+    const total     = returned + delivered;
+    if (total > 10) {
+      const returnRate = Math.round((returned / total) * 100);
+      if (returnRate > 20) {
+        insights.push({
+          severity:    returnRate>30?"critical":"warning",
+          title:       `معدل الإرجاع مرتفع: ${returnRate}%`,
+          description: `${returned} شحنة مُرجَعة من أصل ${total} — المعدل الطبيعي أقل من 15%`,
+          action:      "AppState.statusFilter='returned';AppState.view='shipments';rerenderContent()",
+          actionLabel: "تحليل الإرجاعات",
+        });
+      } else if (returnRate < 10) {
+        insights.push({
+          severity:    "success",
+          title:       `معدل إرجاع ممتاز: ${returnRate}%`,
+          description: `أداء أفضل من المعدل — ${delivered} شحنة مُسلَّمة بنجاح`,
+        });
+      }
+    }
+
+    // ── 5. No Active Couriers ─────────────────────────────────
+    const activeCourierIds = new Set(
+      ships.filter(s=>s.status==="out_for_delivery").map(s=>s.courierId).filter(Boolean)
+    );
+    if (activeCourierIds.size === 0 && couriers.length > 0) {
+      const pending = ships.filter(s=>s.status==="created"||s.status==="received").length;
+      if (pending > 0) {
+        insights.push({
+          severity:    "warning",
+          title:       `${pending} شحنة معلقة بدون مندوب`,
+          description: "لا يوجد مناديب في مرحلة التوصيل حالياً",
+          action:      "AppState.view='dispatch';rerenderContent()",
+          actionLabel: "توزيع تلقائي",
+        });
+      }
+    }
+
+    // ── 6. Low Delivery Rate Today ────────────────────────────
+    const today = new Date().toDateString();
+    const todayShips = ships.filter(s=>new Date(s.createdAt||s.created_at).toDateString()===today);
+    const todayDelivered = todayShips.filter(s=>s.status==="delivered").length;
+    const todayAttempted = todayShips.filter(s=>["delivered","returned"].includes(s.status)).length;
+    if (todayAttempted >= 5) {
+      const todayRate = Math.round((todayDelivered/todayAttempted)*100);
+      if (todayRate < 70) {
+        insights.push({
+          severity:    "warning",
+          title:       `معدل تسليم منخفض اليوم: ${todayRate}%`,
+          description: `${todayDelivered} من ${todayAttempted} شحنة مُسلَّمة اليوم`,
+        });
+      }
+    }
+
+    // ── Generate Daily Digest ─────────────────────────────────
+    const courierShipCounts = {};
+    ships.filter(s=>s.status==="delivered"&&s.courierId)
+      .forEach(s=>{
+        if(!courierShipCounts[s.courierId]) courierShipCounts[s.courierId]={id:s.courierId,delivered:0};
+        courierShipCounts[s.courierId].delivered++;
+      });
+    const topCouriers = Object.values(courierShipCounts)
+      .sort((a,b)=>b.delivered-a.delivered).slice(0,3)
+      .map(c=>({
+        ...c,
+        name: couriers.find(x=>x.id===c.id)?.full_name||"—",
+      }));
+
+    const trends = [];
+    if (delivered > 0) trends.push({icon:"📦",text:`${delivered} شحنة مُسلَّمة إجمالاً`});
+    if (returned > 0)  trends.push({icon:"↩️",text:`${returned} شحنة مُرجَعة (${Math.round(returned/total*100)}%)`});
+    const pending = ships.filter(s=>!["delivered","returned","cancelled"].includes(s.status)).length;
+    if (pending > 0)   trends.push({icon:"🚚",text:`${pending} شحنة نشطة قيد التوصيل`});
+    if (couriers.length>0) trends.push({icon:"👥",text:`${couriers.length} مندوب في المنظومة`});
+
+    const digest = {
+      generatedAt:   new Date().toISOString(),
+      deliveryRate:  todayAttempted>0?Math.round(todayDelivered/todayAttempted*100):0,
+      delivered:     todayDelivered,
+      attempted:     todayAttempted,
+      needsAttention:pending,
+      trends,
+      topCouriers,
+    };
+
+    AppState.aiInsights  = insights;
+    AppState.aiDigest    = digest;
+    AppState._aiLoaded   = true;
+    rerenderContent();
+    toast(`✅ تم التحليل — ${insights.length} تنبيه`);
+  },
+
+  // Smart dispatch suggestions — rule-based
+  generateDispatchSuggestions() {
+    const ships    = AppState.shipments.filter(s=>
+      ["created","received"].includes(s.status) && !s.courierId);
+    const couriers = AppState.couriers.filter(c=>c.is_active);
+
+    if (!ships.length) { toast("لا توجد شحنات تحتاج توزيعاً","info"); return; }
+    if (!couriers.length){ toast("لا يوجد مناديب متاحون","warning"); return; }
+
+    // Count current loads
+    const loads = {};
+    AppState.shipments.filter(s=>s.status==="out_for_delivery"&&s.courierId)
+      .forEach(s=>{ loads[s.courierId]=(loads[s.courierId]||0)+1; });
+
+    const suggestions = ships.slice(0,20).map(ship=>{
+      // Find best courier: least loaded in same governorate first, then overall
+      const sameGov = couriers.filter(c=>
+        AppState.shipments.some(s=>s.courierId===c.id&&s.governorate===ship.governorate)
+      );
+      const pool = sameGov.length ? sameGov : couriers;
+      const best = pool.sort((a,b)=>(loads[a.id]||0)-(loads[b.id]||0))[0];
+      const load = loads[best?.id]||0;
+      const sameArea = sameGov.includes(best);
+      const confidence = sameArea
+        ? Math.max(60, 95 - load*5)
+        : Math.max(40, 75 - load*5);
+
+      return {
+        shipmentId:   ship.id,
+        shipmentCode: ship.id,
+        courierId:    best?.id||"",
+        courierName:  best?.full_name||"—",
+        reason:       sameArea
+          ? `خبرة في ${ship.governorate} — حمل حالي: ${load} شحنة`
+          : `الأقل حملاً — حمل حالي: ${load} شحنة`,
+        confidence:   Math.round(confidence),
+      };
+    });
+
+    AppState.aiDispatchSuggestions = suggestions;
+    rerenderContent();
+    toast(`✅ ${suggestions.length} اقتراح توزيع جاهز`);
+  },
+
+  async applyAISuggestion(shipmentId, courierId) {
+    const courier = AppState.couriers.find(c=>c.id===courierId);
+    if (!courier) { toast("المندوب غير موجود","error"); return; }
+    try {
+      await DB.updateShipment(shipmentId, {
+        courier_id:   courierId,
+        courier_name: courier.full_name||"",
+        status:       "received",
+      });
+      await DB.addAudit("AI_DISPATCH_APPLY", shipmentId,
+        `AI suggested courier ${courier.full_name}`, "dispatch");
+      const s = AppState.shipments.find(x=>x.id===shipmentId);
+      if (s) { s.courierId=courierId; s.courierName=courier.full_name; s.status="received"; }
+      // Remove from suggestions
+      AppState.aiDispatchSuggestions=(AppState.aiDispatchSuggestions||[])
+        .filter(x=>x.shipmentId!==shipmentId);
+      rerenderContent();
+      toast(`✅ تم تعيين ${courier.full_name} للشحنة`);
+    } catch(err) { toast("فشل التطبيق: "+err.message,"error"); }
+  },
+
+  // Delivery prediction — heuristic model
+  generateDeliveryPredictions() {
+    const active = AppState.shipments.filter(s=>s.status==="out_for_delivery");
+    if (!active.length) { toast("لا توجد شحنات نشطة","info"); return; }
+
+    // Build courier success rates from history
+    const courierStats = {};
+    AppState.shipments.filter(s=>["delivered","returned"].includes(s.status)&&s.courierId)
+      .forEach(s=>{
+        if (!courierStats[s.courierId]) courierStats[s.courierId]={delivered:0,total:0};
+        courierStats[s.courierId].total++;
+        if (s.status==="delivered") courierStats[s.courierId].delivered++;
+      });
+
+    const predictions = active.slice(0,30).map(s=>{
+      const stats    = courierStats[s.courierId];
+      const baseRate = stats
+        ? Math.round((stats.delivered/stats.total)*100)
+        : 75; // default if no history
+      // Adjust for SLA risk
+      const hoursElapsed = s.createdAt
+        ? (Date.now()-new Date(s.createdAt).getTime())/(1000*60*60)
+        : 0;
+      const slaAdj = hoursElapsed>48?-15:hoursElapsed>24?-5:0;
+      const prob   = Math.min(98,Math.max(10, baseRate+slaAdj));
+      const etaHours = Math.max(1, Math.round((48-hoursElapsed)));
+      const courier  = AppState.couriers.find(c=>c.id===s.courierId);
+
+      return {
+        shipmentCode:  s.id,
+        governorate:   s.governorate||"—",
+        courierId:     s.courierId,
+        courierName:   courier?.full_name||s.courierName||"غير محدد",
+        deliveryProb:  prob,
+        eta:           etaHours>0?`خلال ${etaHours} ساعة`:"قريباً",
+        risk:          prob<60?"high":prob<80?"medium":"low",
+      };
+    }).sort((a,b)=>a.deliveryProb-b.deliveryProb); // riskiest first
+
+    AppState.aiPredictions = predictions;
+    rerenderContent();
+    toast(`✅ ${predictions.length} توقع تسليم جاهز`);
   },
 
   // ── P9: Admin Ratings & NPS ──────────────────────────────────
