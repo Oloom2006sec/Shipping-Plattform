@@ -163,14 +163,12 @@ async function loadUserPermissions(userId) {
     if (perms.length === 0) throw new Error("empty permissions returned from DB");
     AppPerms.clear();
     perms.forEach(p => AppPerms.add(p.code));
-    console.log("[Auth] Permissions loaded from DB:", AppPerms.size, "for user", userId);
     return true;
   } catch(e) {
     console.warn("[Auth] loadUserPermissions fallback:", e.message);
     AppPerms.clear();
     const role = AppState.user?.primary_role || AppState.user?.role || "customer";
     (PERMS_FALLBACK[role] || PERMS_FALLBACK.customer).forEach(p => AppPerms.add(p));
-    console.log("[Auth] Using fallback permissions:", AppPerms.size, "for role:", role);
     return false;
   }
 }
@@ -570,7 +568,6 @@ const DB = {
       return [];
     }
     const result = data || [];
-    console.log("[Couriers] Loaded:", result.length);
     return result;
   },
   async loadUsers() {
@@ -674,7 +671,6 @@ const DB = {
 
     // ── Stub (dev/test mode) ──────────────────────────────
     if (!cfg.provider || cfg.provider === "stub") {
-      console.log(`[SMS STUB → ${normalised}]: ${message}`);
       return { success: true, provider: "stub", to: normalised };
     }
 
@@ -700,7 +696,6 @@ const DB = {
         console.error("Twilio SMS error:", data);
         throw new Error(data.message || "Twilio send failed");
       }
-      console.log(`[SMS via Twilio → ${normalised}] SID: ${data.sid}`);
       return { success: true, provider: "twilio", sid: data.sid, to: normalised };
     }
 
@@ -724,7 +719,6 @@ const DB = {
         console.error("Vonage SMS error:", msg);
         throw new Error(msg?.["error-text"] || "Vonage send failed");
       }
-      console.log(`[SMS via Vonage → ${normalised}] MsgID: ${msg["message-id"]}`);
       return { success: true, provider: "vonage", messageId: msg["message-id"], to: normalised };
     }
 
@@ -749,7 +743,6 @@ const DB = {
         console.error("HTTP Gateway SMS error:", data);
         throw new Error(JSON.stringify(data));
       }
-      console.log(`[SMS via HTTP Gateway → ${normalised}]`);
       return { success: true, provider: "http_gateway", to: normalised };
     }
 
@@ -2213,14 +2206,25 @@ if (typeof window !== "undefined") {
 }
 
 function render() {
-  const params=new URLSearchParams(window.location.search);
-  const trackId=params.get("track");
-  if(trackId){
-    AppState.selectedShipment=trackId;AppState.view="track";
-    if(!AppState.user)AppState.user={role:"customer",primary_role:"customer",id:"guest",name:"زائر"};
+  try {
+    const params=new URLSearchParams(window.location.search);
+    const trackId=params.get("track");
+    if(trackId){
+      AppState.selectedShipment=trackId;AppState.view="track";
+      if(!AppState.user)AppState.user={role:"customer",primary_role:"customer",id:"guest",name:"زائر"};
+    }
+    if(!AppState.user){AppState.page==="auth"?renderAuth():renderHomepage();}
+    else{renderDashboard();}
+  } catch(err) {
+    console.error("render() failed:", err.message);
+    const app = document.getElementById("app");
+    if (app) app.innerHTML = `<div style="padding:40px;text-align:center;color:#ef4444;">
+      <h2>خطأ في التطبيق</h2><p>${err.message}</p>
+      <button onclick="location.reload()" style="margin-top:16px;padding:10px 24px;
+        border-radius:8px;background:#6366f1;color:white;border:none;cursor:pointer;">
+        إعادة تحميل الصفحة
+      </button></div>`;
   }
-  if(!AppState.user){AppState.page==="auth"?renderAuth():renderHomepage();}
-  else{renderDashboard();}
 }
 
 function postRender() {
@@ -13006,15 +13010,26 @@ const App={
     db.auth.signOut().catch(()=>{});
     clearSession();
     Object.assign(AppState,{
-      page:"home",user:null,shipments:[],notifications:[],
-      auditLogs:[],_auditLoaded:false, auditFilter:"", auditCatFilter:"all",
-      selectedShipment:null,view:"overview",
-      rtStatus:"CONNECTING",rtEventCount:0,
-      locationBroadcasting:false,_locationWatchId:null,
-      onlineCouriers:[],presenceChannel:null,
-      dispatchRules:[],courierConfigs:[],_dispatchDataLoaded:false,
-      slaConfigs:[],slaBreaches:[],slaSummary:{},_slaDataLoaded:false,
-      webhooks:[],apiKeys:[],_webhooksDataLoaded:false,
+      page:"home", user:null,
+      shipments:[], users:[], couriers:[], notifications:[],
+      merchants:[], allMerchants:[], branches:[], warehouses:[],
+      pricingRules:[], pricingZones:[],
+      auditLogs:[], _auditLoaded:false, auditFilter:"", auditCatFilter:"all",
+      selectedShipment:null, view:"overview",
+      rtStatus:"CONNECTING", rtEventCount:0,
+      locationBroadcasting:false, _locationWatchId:null,
+      onlineCouriers:[], presenceChannel:null, realtimeChannel:null,
+      dispatchRules:[], courierConfigs:[], _dispatchDataLoaded:false,
+      slaConfigs:[], slaBreaches:[], slaSummary:{}, _slaDataLoaded:false,
+      webhooks:[], apiKeys:[], _webhooksDataLoaded:false,
+      shipmentRatings:[], npsSummary:{}, _feedbackLoaded:false,
+      allRatings:[], courierRatingsMap:{}, _ratingsLoaded:false,
+      aiInsights:[], aiDigest:{}, aiDispatchSuggestions:[], aiPredictions:[], _aiLoaded:false,
+      _errors:[], _perfMetrics:[], _healthStatus:{},
+      merchantBalance:0, merchantAddresses:[], merchantRecipients:[],
+      merchantProducts:[], pickupRequests:[], settlements:[],
+      myWalletBalance:0, myWalletTxns:[],
+      shipmentsCursor:null, shipmentsHasMore:false, _loadingMore:false,
     });
     AppPerms.clear();
     render();
