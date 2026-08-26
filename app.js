@@ -1952,7 +1952,17 @@ function renderAdminShell(navKeys,unread) {
   <div class="dash">
     <div class="sb-overlay" id="sbOverlay"></div>
     <aside class="sidebar" id="sidebar">
-      <div class="sb-brand">${icon("truck",22)}<div class="sb-brand-text"><strong>النخبة</strong><span>لوحة التحكم</span></div></div>
+      <div class="sb-brand" style="display:flex;align-items:center;justify-content:space-between;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${icon("truck",22)}<div class="sb-brand-text"><strong>النخبة</strong><span>لوحة التحكم</span></div>
+        </div>
+        <button onclick="App.toggleDarkMode()" id="darkModeBtn"
+          title="تبديل الوضع الليلي"
+          style="background:none;border:none;cursor:pointer;font-size:16px;
+            padding:4px 6px;border-radius:6px;line-height:1;">
+          ${document.documentElement.getAttribute("data-theme")==="dark"?"☀️":"🌙"}
+        </button>
+      </div>
       <nav class="sb-nav">
         <div class="sb-section-label">القائمة</div>
         ${navKeys.map(k=>`
@@ -9772,6 +9782,18 @@ const App={
     }
   },
 
+  // ── Dark Mode ────────────────────────────────────────────────
+  toggleDarkMode() {
+    const html    = document.documentElement;
+    const current = html.getAttribute("data-theme");
+    const next    = current === "dark" ? "light" : "dark";
+    html.setAttribute("data-theme", next);
+    localStorage.setItem("nukhba_theme", next);
+    // Update toggle button icon
+    const btn = document.getElementById("darkModeBtn");
+    if (btn) btn.textContent = next === "dark" ? "☀️" : "🌙";
+  },
+
   // ── P8: Monitoring ───────────────────────────────────────────
   setMonitorTab(tab) {
     AppState.monitorTab = tab;
@@ -13040,6 +13062,17 @@ const App={
 
 // ── Boot ─────────────────────────────────────────────────────
 (async()=>{
+  // ── Service Worker registration ───────────────────────────────
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js")
+      .then(reg => console.log("[SW] Registered:", reg.scope))
+      .catch(err => console.warn("[SW] Registration failed:", err.message));
+  }
+
+  // ── Dark mode persistence ─────────────────────────────────────
+  const savedTheme = localStorage.getItem("nukhba_theme");
+  if (savedTheme) document.documentElement.setAttribute("data-theme", savedTheme);
+
   // ── Global error handlers ────────────────────────────────────
   window.addEventListener("error", e=>{
     const err = {
