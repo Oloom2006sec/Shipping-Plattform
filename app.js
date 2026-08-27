@@ -10051,6 +10051,11 @@ const App={
       console.warn("startLocationBroadcast: not a courier, ignoring");
       return;
     }
+    // Prevent duplicate watchers — _locationWatchId is the truth source
+    if (AppState._locationWatchId !== null) {
+      if (!fromRestore) toast("بث الموقع نشط بالفعل","info");
+      return;
+    }
     if (!navigator.geolocation) {
       toast("هذا الجهاز لا يدعم تحديد الموقع","warning"); return;
     }
