@@ -1856,9 +1856,11 @@ async function handleLogin(e) {
     // Step 7: persist session AFTER permissions are confirmed
     saveSession(user);
 
-    // Step 8: start realtime BEFORE render (so first render shows live count)
+    // Step 8: load admin data BEFORE render — but start Realtime AFTER render
+    // BUGFIX: startRealtime() was previously called before render(), which allowed
+    // Realtime sync events to fire rerenderContent() and replace #viewContent
+    // between render() and the user's first click → "شحنة جديدة" did nothing.
     if (role === "admin") {
-      startRealtime();
       const [merchants, branches, warehouses] = await Promise.all([
         DB.loadAllMerchants(),
         DB.loadBranches(),
@@ -1879,9 +1881,14 @@ async function handleLogin(e) {
     // Step 9: audit (fire-and-forget, do not await — avoid delaying render)
     DB.addAudit("LOGIN", data.user.id, `role:${role} perms:${AppPerms.size}`, "auth");
 
-    // Step 10: single render — everything is ready
+    // Step 10: render FIRST so DOM is stable for user interaction
     render();
     toast(`أهلاً ${name}!`);
+
+    // Step 11: start Realtime 200ms after render — DOM is painted and stable.
+    // This prevents the first Realtime sync event from calling rerenderContent()
+    // before the user has a chance to click any button.
+    setTimeout(() => startRealtime(), 200);
 
   } catch(err2) {
     err.style.display = "block";
@@ -13203,9 +13210,8 @@ const App={
                 : role==="courier"  ? "tasks"
                 : savedNav || "overview";
 
-  // ── Start realtime once ──────────────────────────────────────
-  startRealtime();
-
-  // ── Single render ────────────────────────────────────────────
+  // ── Start realtime AFTER render — same fix as handleLogin ────
+  // render() first so DOM is stable, then Realtime after 200ms
   render();
+  setTimeout(() => startRealtime(), 200);
 })();
