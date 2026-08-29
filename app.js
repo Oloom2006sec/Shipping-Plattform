@@ -1883,6 +1883,7 @@ async function handleLogin(e) {
 
     // Step 10: render FIRST so DOM is stable for user interaction
     render();
+    markRenderStable(1000); // block Realtime rerenders for 1s after login render
     toast(`أهلاً ${name}!`);
 
     // Step 11: start Realtime 200ms after render — DOM is painted and stable.
@@ -2117,9 +2118,21 @@ function renderView() {
   }
 }
 
-let _rerenderPending = false;
+let _rerenderPending  = false;
+let _renderStableUntil = 0; // epoch ms — rerenderContent no-ops until this time
+
+// Call this after every render() to give DOM 1 second of stability
+// before Realtime events are allowed to replace #viewContent.
+function markRenderStable(ms = 1000) {
+  _renderStableUntil = Date.now() + ms;
+}
+
 function rerenderContent() {
   // P6: collapse rapid re-render calls — only one DOM write per animation frame
+  // P10 FIX: ignore rerender requests during the stability window after render().
+  // This prevents Realtime subscription events from replacing #viewContent
+  // before the user has a chance to interact (the "New Shipment first click" bug).
+  if (Date.now() < _renderStableUntil) return;
   if (_rerenderPending) return;
   _rerenderPending = true;
   requestAnimationFrame(() => {
@@ -3853,6 +3866,7 @@ function bindDashboardEvents() {
       const prevView = AppState.view;
       AppState.view=btn.dataset.view;
       saveNavState(btn.dataset.view);
+      markRenderStable(0); // user-initiated nav: allow rerenderContent immediately
       // P6: Memory management — clear heavy tab data when leaving
       if (prevView === "dispatch"  && AppState.view !== "dispatch")  AppState._dispatchDataLoaded=false;
       if (prevView === "sla"       && AppState.view !== "sla")       AppState._slaDataLoaded=false;
@@ -13213,5 +13227,6 @@ const App={
   // ── Start realtime AFTER render — same fix as handleLogin ────
   // render() first so DOM is stable, then Realtime after 200ms
   render();
+  markRenderStable(1000); // block Realtime rerenders for 1s after boot render
   setTimeout(() => startRealtime(), 200);
 })();
