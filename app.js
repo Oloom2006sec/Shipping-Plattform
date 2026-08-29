@@ -2267,7 +2267,7 @@ function postRender() {
   setTimeout(()=>{
     visible().forEach(s=>{
       const c=document.getElementById(`qr-${s.id}`);if(!c)return;
-      try{QRCode.toCanvas(c,`${location.origin}${location.pathname}?track=${s.id}`,{width:36,margin:1});}catch(e){}
+      try{QRCode.toCanvas(c,`${location.origin}${location.pathname}?track=${s.id}`,{width:80,margin:1});}catch(e){}
     });
   },200);
   const sel=AppState.shipments.find(s=>s.id===AppState.selectedShipment);
@@ -2528,7 +2528,7 @@ function viewOverview() {
             </span>`:""}
           </h3>
           <div style="display:flex;gap:8px;">
-            <button class="btn btn-secondary btn-sm" id="openScanner">${icon("qr",13)} QR</button>
+            <button class="btn btn-secondary btn-sm" id="openScanner" onclick="App.openManualTrack()">${icon("qr",13)} QR</button>
             ${can("create_shipment")?`<button class="btn btn-primary btn-sm btn-new-shipment" id="newShipBtn2" onclick="App.newShipment()">${icon("plus",13)} شحنة جديدة</button>`:""}
           </div>
         </div>
@@ -9811,10 +9811,14 @@ const App={
   // ── Dark Mode ────────────────────────────────────────────────
   toggleDarkMode() {
     const html    = document.documentElement;
-    const current = html.getAttribute("data-theme");
+    const current = html.getAttribute("data-theme") ||
+      (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     const next    = current === "dark" ? "light" : "dark";
     html.setAttribute("data-theme", next);
     localStorage.setItem("nukhba_theme", next);
+    // Update meta theme-color for mobile browser chrome
+    const metaTheme = document.querySelector('meta[name="theme-color"]');
+    if (metaTheme) metaTheme.content = next === "dark" ? "#0f172a" : "#6366f1";
     // Update toggle button icon
     const btn = document.getElementById("darkModeBtn");
     if (btn) btn.textContent = next === "dark" ? "☀️" : "🌙";
@@ -12353,6 +12357,8 @@ const App={
     if(error){toast("خطأ: "+error.message,"error");return;}
     await App.loadMerchantData();rerenderContent();toast("تم إلغاء الطلب","info");
   },
+  openManualTrack() { return App.manualTrack(); },
+
   manualTrack(){
     // Read from the tracking page search input if present; otherwise prompt
     const input = $("trackCodeInput");

@@ -1478,3 +1478,24 @@ body {
 @media (max-width: 380px) {
   .kpi-grid { grid-template-columns: 1fr 1fr !important; }
 }
+
+/* ── data-theme="dark" full overrides (mirrors @media prefers-color-scheme) ── */
+[data-theme="dark"] .card { background: var(--card-bg) !important; border-color: var(--border) !important; }
+[data-theme="dark"] input,
+[data-theme="dark"] select,
+[data-theme="dark"] textarea {
+  background: var(--input-bg) !important;
+  border-color: var(--input-border) !important;
+  color: var(--text) !important;
+}
+[data-theme="dark"] table thead { background: #334155 !important; }
+[data-theme="dark"] table tbody tr:hover { background: #334155 !important; }
+[data-theme="dark"] .btn-secondary {
+  background: #334155 !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+[data-theme="dark"] .sidebar { background: var(--sidebar-bg) !important; }
+[data-theme="dark"] .modal { background: var(--surface) !important; }
+[data-theme="dark"] body { background: var(--bg) !important; color: var(--text) !important; }
+[data-theme="dark"] #app { background: var(--bg) !important; }
