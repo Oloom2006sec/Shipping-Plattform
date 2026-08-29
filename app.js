@@ -2524,7 +2524,7 @@ function viewOverview() {
           </h3>
           <div style="display:flex;gap:8px;">
             <button class="btn btn-secondary btn-sm" id="openScanner">${icon("qr",13)} QR</button>
-            ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn">${icon("plus",13)} شحنة جديدة</button>`:""}
+            ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn2" onclick="App.newShipment()">${icon("plus",13)} شحنة جديدة</button>`:""}
           </div>
         </div>
         ${shipTable(AppState.statusFilter==="all"?list.slice(0,8):list)}
@@ -2769,7 +2769,7 @@ function viewShipments() {
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button class="btn btn-secondary btn-sm" onclick="App.manualTrack()">📦 تتبع</button>
           ${can("export_excel")?`<button class="btn btn-secondary btn-sm" onclick="App.exportExcel()">📊 Excel</button>`:""}
-          ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn">${icon("plus",13)} إضافة</button>`:""}
+          ${can("create_shipment")?`<button class="btn btn-primary btn-sm" id="newShipBtn" onclick="App.newShipment()">${icon("plus",13)} إضافة</button>`:""}
         </div>
       </div>
       <div class="filter-bar" style="margin-bottom:8px;">
