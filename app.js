@@ -975,9 +975,13 @@ const DB = {
 
   // ── Driver Location Tracking ────────────────────────────────
   async loadDriverLocations() {
+    // TTL: only show couriers active in last 10 minutes
+    // This handles browser crashes, mobile app kills, and missed beforeunload events
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     const { data, error } = await db.from("driver_locations")
       .select("*, profiles!driver_locations_courier_id_fkey(full_name,phone,primary_role)")
-      .eq("is_online", true)          // only online couriers
+      .eq("is_online", true)
+      .gte("last_seen_at", tenMinAgo)   // TTL: active in last 10 min
       .order("last_seen_at", { ascending: false });
     if (error) { console.warn("loadDriverLocations:", error.message); return {}; }
     const map = {};
@@ -10121,12 +10125,31 @@ const App={
     );
     AppState.locationBroadcasting = true;
     saveBroadcastState(true); // persist: survive page refresh
+
+    // Heartbeat: update last_seen_at every 2 min so TTL filter keeps courier visible
+    // even when stationary (watchPosition doesn't fire if location unchanged)
+    AppState._heartbeatInterval = setInterval(async () => {
+      if (AppState._locationWatchId === null) {
+        clearInterval(AppState._heartbeatInterval);
+        AppState._heartbeatInterval = null;
+        return;
+      }
+      try {
+        await db.from("driver_locations")
+          .update({ last_seen_at: new Date().toISOString() })
+          .eq("courier_id", AppState.user.id);
+      } catch {}
+    }, 2 * 60 * 1000); // every 2 minutes
+
     rerenderContent();
-    toast("✅ بث الموقع نشط — سيرى المدير موقعك على الخريطة");
+    if (!fromRestore) toast("✅ بث الموقع نشط — سيرى المدير موقعك على الخريطة");
     window.addEventListener("beforeunload", () => {
       DB.markMyselfOffline();
       if (AppState._locationWatchId !== null) {
         navigator.geolocation.clearWatch(AppState._locationWatchId);
+      }
+      if (AppState._heartbeatInterval) {
+        clearInterval(AppState._heartbeatInterval);
       }
     }, { once: true });
   },
@@ -10135,6 +10158,10 @@ const App={
     if (AppState._locationWatchId !== null) {
       navigator.geolocation.clearWatch(AppState._locationWatchId);
       AppState._locationWatchId = null;
+    }
+    if (AppState._heartbeatInterval) {
+      clearInterval(AppState._heartbeatInterval);
+      AppState._heartbeatInterval = null;
     }
     AppState.locationBroadcasting = false;
     saveBroadcastState(false); // BUG 3 FIX: clear persisted broadcast state
@@ -13054,6 +13081,10 @@ const App={
       navigator.geolocation.clearWatch(AppState._locationWatchId);
       AppState._locationWatchId = null;
     }
+    if (AppState._heartbeatInterval) {
+      clearInterval(AppState._heartbeatInterval);
+      AppState._heartbeatInterval = null;
+    }
     if (AppState.presenceChannel) {
       try {
         // Untrack first so Supabase removes this session from presence immediately
@@ -13076,7 +13107,7 @@ const App={
       auditLogs:[], _auditLoaded:false, auditFilter:"", auditCatFilter:"all",
       selectedShipment:null, view:"overview",
       rtStatus:"CONNECTING", rtEventCount:0,
-      locationBroadcasting:false, _locationWatchId:null,
+      locationBroadcasting:false, _locationWatchId:null, _heartbeatInterval:null,
       onlineCouriers:[], presenceChannel:null, realtimeChannel:null,
       dispatchRules:[], courierConfigs:[], _dispatchDataLoaded:false,
       slaConfigs:[], slaBreaches:[], slaSummary:{}, _slaDataLoaded:false,
