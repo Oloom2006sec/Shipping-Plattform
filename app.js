@@ -438,7 +438,13 @@ function rateLimit(key, limitMs=3000) {
   return true;
 }
 const SESSION_NAV_KEY       = "nukhba_nav";           // BUG 2: nav state key
-const SESSION_BCAST_KEY     = "nukhba_bcast";         // BUG 3: broadcast key
+// HP-1 FIX: Broadcast state is per-user — different users on same browser
+// never overwrite each other's state.
+// Key format: nukhba_bcast_<userId>
+// Falls back to nukhba_bcast for anonymous/pre-login state.
+function getBroadcastKey(userId) {
+  return userId ? "nukhba_bcast_" + userId : "nukhba_bcast";
+}
 
 function getSession() {
   try {
@@ -481,7 +487,8 @@ function touchSession() {
 function clearSession() {
   ["nukhba_v6","nukhba_v5","nukhba_session"].forEach(k=>localStorage.removeItem(k));
   localStorage.removeItem(SESSION_NAV_KEY);
-  localStorage.removeItem(SESSION_BCAST_KEY);
+  // HP-1: only clear THIS user's broadcast key — not other users'
+  localStorage.removeItem(getBroadcastKey(AppState.user?.id));
 }
 
 // BUG 2 FIX: nav state persistence
@@ -494,10 +501,12 @@ function getNavState() {
 
 // BUG 3 FIX: broadcast state persistence
 function saveBroadcastState(on) {
-  try { localStorage.setItem(SESSION_BCAST_KEY, on?"1":"0"); } catch {}
+  const key = getBroadcastKey(AppState.user?.id);
+  try { localStorage.setItem(key, on?"1":"0"); } catch {}
 }
 function getBroadcastState() {
-  try { return localStorage.getItem(SESSION_BCAST_KEY)==="1"; } catch { return false; }
+  const key = getBroadcastKey(AppState.user?.id);
+  try { return localStorage.getItem(key)==="1"; } catch { return false; }
 }
 
 // Activity tracking — resets inactivity timer on any user interaction
@@ -1493,11 +1502,37 @@ function rtStatusConfig(status) {
 }
 
 function startRealtime() {
-  if(AppState.realtimeChannel) return;
+  // ── Idempotent guard ─────────────────────────────────────────
+  // startRealtime() can be called from handleLogin() and boot session restore.
+  // This guard ensures only ONE active channel is ever created regardless of
+  // how many times startRealtime() is called.
+  //
+  // Channel state machine:
+  //   SUBSCRIBED   → already healthy, skip
+  //   CONNECTING   → in progress, skip (will complete)
+  //   CHANNEL_ERROR / CLOSED → stale, clean up then recreate
+  //   null / undefined → not started, proceed
+  if (AppState.realtimeChannel) {
+    const state = AppState.realtimeChannel.state;
+    if (state === "joined" || state === "joining") {
+      // Already active or connecting — do not create a second channel
+      return;
+    }
+    // Stale/errored channel — clean up before recreating
+    try { AppState.realtimeChannel.unsubscribe(); } catch {}
+    AppState.realtimeChannel = null;
+  }
+  if (AppState.presenceChannel) {
+    const pstate = AppState.presenceChannel.state;
+    if (pstate === "joined" || pstate === "joining") {
+      // Presence already active — only create RT channel
+    } else {
+      // Stale presence — clean up
+      try { AppState.presenceChannel.unsubscribe(); } catch {}
+      AppState.presenceChannel = null;
+    }
+  }
 
-  // BUG 8 FIX: Presence channel — tracks real browser sessions per role.
-  // Only couriers join presence; admins observe. This prevents admin sessions
-  // from being counted in the "connected couriers" display.
   const role = AppState.user?.primary_role||AppState.user?.role||"";
   // FIX: unsubscribe stale presence channel before creating a new one
   // Prevents "cannot add presence callbacks after subscribe" error on refresh
@@ -13076,7 +13111,10 @@ const App={
   logout(){
     const role = AppState.user?.primary_role||AppState.user?.role||"";
     // Clear broadcast state on logout so it doesn't restore on next login
-    if (role === "courier") saveBroadcastState(false);
+    // HP-1: courier logout does NOT clear broadcast state — preserve it for restore
+    // The state will be read on next login by the same courier.
+    // Only non-couriers clear their (irrelevant) key.
+    if (role !== "courier") saveBroadcastState(false);
     if (AppState._locationWatchId !== null) {
       navigator.geolocation.clearWatch(AppState._locationWatchId);
       AppState._locationWatchId = null;
@@ -13254,7 +13292,10 @@ const App={
       AppState.locationBroadcasting = false;
       App.startLocationBroadcast(true);
     }, 300);
-  } else if(role!=="courier"){
+  } else {
+    // Non-courier: clear only their own key (admin/merchant never broadcast)
+    // With user-specific keys, this is now safe — it only removes the
+    // nukhba_bcast_<adminUserId> key, not any courier's key
     saveBroadcastState(false);
     AppState.locationBroadcasting = false;
   }
