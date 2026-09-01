@@ -113,7 +113,7 @@ const STATUS_STEPS = [
 // STATUS_STEPS defined above in STATUS_MAP block
 
 const ROLE_MAP = {
-  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","tasks","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","monitor","ratings","ai","track"] },
+  admin:    { label:"إدارة",  badge:"badge-danger",  nav:["overview","shipments","accounts","finance","pricing","dispatch","branches","liveops","reports","sla","users","merchants","import","audit","monitor","ratings","ai","track"] },
   merchant: { label:"تاجر",  badge:"badge-success", nav:["overview","shipments","addresses","recipients","products","pickup","import","webhooks","accounts"] },
   courier:  { label:"مندوب", badge:"badge-brand",   nav:["tasks","accounts"] },
   customer: { label:"عميل",  badge:"badge-info",    nav:["overview","cshipments","track","feedback","accounts"] }
@@ -639,7 +639,7 @@ const DB = {
     if (!AppState.user) return;
     try {
       await db.from("audit_logs").insert([{
-        actor_id:    AppState.user.id,
+        actor_id:    AppState.user?.id,
         actor_name:  AppState.user.name,
         actor_role:  AppState.user.primary_role || (AppState.user.primary_role||AppState.user.role),
         action,
@@ -786,7 +786,7 @@ const DB = {
   async loadDriverBalance(driverId) {
     // P7: Courier can only fetch own balance; admin can fetch any
     const role = AppState.user?.primary_role || AppState.user?.role || "";
-    const safeId = (role === "courier") ? AppState.user.id : driverId;
+    const safeId = (role === "courier") ? AppState.user?.id : driverId;
     const { data, error } = await db.rpc("get_driver_balance",{p_driver_id:safeId});
     if (error) { console.warn("loadDriverBalance:", error.message); return 0; }
     return Number(data)||0;
@@ -933,7 +933,7 @@ const DB = {
       // INSERT — never send id field; let Postgres generate via gen_random_uuid()
       const { id: _drop, ...rest } = payload;
       const { error } = await db.from("dispatch_rules")
-        .insert([{ ...rest, created_by: AppState.user.id }]);
+        .insert([{ ...rest, created_by: AppState.user?.id }]);
       if (error) throw error;
     }
   },
@@ -956,7 +956,7 @@ const DB = {
 
   async saveCourierConfig(payload) {
     const { error } = await db.from("courier_configs")
-      .upsert([{ ...payload, updated_by: AppState.user.id, updated_at: new Date().toISOString() }],
+      .upsert([{ ...payload, updated_by: AppState.user?.id, updated_at: new Date().toISOString() }],
               { onConflict: "courier_id" });
     if (error) throw error;
   },
@@ -1074,7 +1074,7 @@ const DB = {
     } else {
       const { id: _drop, ...rest } = payload;
       const { error } = await db.from("webhooks")
-        .insert([{ ...rest, created_by: AppState.user.id }]);
+        .insert([{ ...rest, created_by: AppState.user?.id }]);
       if (error) throw error;
     }
   },
@@ -1107,7 +1107,7 @@ const DB = {
 
   async createApiKey(payload) {
     const { data, error } = await db.from("api_keys")
-      .insert([{ ...payload, created_by: AppState.user.id }])
+      .insert([{ ...payload, created_by: AppState.user?.id }])
       .select().single();
     if (error) throw error;
     return data;
@@ -1135,7 +1135,7 @@ const DB = {
     } else {
       const { id: _drop, ...rest } = payload;
       const { error } = await db.from("sla_configs")
-        .insert([{ ...rest, created_by: AppState.user.id }]);
+        .insert([{ ...rest, created_by: AppState.user?.id }]);
       if (error) throw error;
     }
   },
@@ -1179,7 +1179,7 @@ const DB = {
   async acknowledgeSLABreach(id) {
     const { error } = await db.from("sla_breaches").update({
       status:           "acknowledged",
-      acknowledged_by:  AppState.user.id,
+      acknowledged_by:  AppState.user?.id,
       acknowledged_at:  new Date().toISOString(),
     }).eq("id", id);
     if (error) throw error;
@@ -1201,7 +1201,7 @@ const DB = {
 
   async updateMyLocation(lat, lng, accuracy, speed, heading, battery) {
     const { error } = await db.rpc("update_driver_location", {
-      p_courier_id: AppState.user.id,
+      p_courier_id: AppState.user?.id,
       p_lat:        lat,
       p_lng:        lng,
       p_accuracy:   accuracy || null,
@@ -1215,7 +1215,7 @@ const DB = {
   async markMyselfOffline() {
     const role = AppState.user?.primary_role || AppState.user?.role || "";
     if (role !== "courier") return; // only couriers have driver_location rows
-    await db.rpc("mark_driver_offline", { p_courier_id: AppState.user.id })
+    await db.rpc("mark_driver_offline", { p_courier_id: AppState.user?.id })
       .then(()=>{}).catch(()=>{});
   },
 
@@ -1572,7 +1572,7 @@ function startRealtime() {
       if (status === "SUBSCRIBED") {
         try {
           await AppState.presenceChannel.track({
-            courierId:   AppState.user.id,
+            courierId:   AppState.user?.id,
             courierName: AppState.user.name,
             role:        "courier",
             joinedAt:    new Date().toISOString(),
@@ -4165,7 +4165,7 @@ const Modals={
       const wgt = Number($("fWeight")?.value) || 0;
       if (!gov) return;
       const result = await DB.calculateFee(
-        (AppState.user.primary_role||AppState.user.role)==="merchant" ? AppState.user.id : null,
+        (AppState.user.primary_role||AppState.user.role)==="merchant" ? AppState.user?.id : null,
         gov, svc, ord, wgt
       );
       const hint = $("fFeeHint");
@@ -7250,7 +7250,7 @@ function viewCustomerShipments() {
 
 function viewAddresses() {
   const addrs = AppState.merchantAddresses;
-  const uid   = AppState.user.id;
+  const uid   = AppState.user?.id;
   return `
     <div class="card">
       <div class="card-header">
@@ -7438,7 +7438,7 @@ const App={
     const gov   = $("eaGov")?.value;
     if (!label||!gov) { $("eaErr").style.display="block"; $("eaErr").textContent="اسم العنوان والمحافظة مطلوبان"; return; }
     try {
-      const uid = AppState.user.id;
+      const uid = AppState.user?.id;
       await db.from("merchant_addresses").update({
         label, governorate:gov,
         street: $("eaStreet")?.value||"",
@@ -7485,7 +7485,7 @@ const App={
         governorate: $("erGov")?.value||"",
         address:     $("erAddr")?.value||"",
       }).eq("id",id);
-      AppState.merchantRecipients = await DB.loadMerchantRecipients(AppState.user.id);
+      AppState.merchantRecipients = await DB.loadMerchantRecipients(AppState.user?.id);
       Modals.close(); rerenderContent(); toast("✅ تم تحديث المستلم");
     } catch(e) { $("erErr").style.display="block"; $("erErr").textContent="خطأ: "+e.message; }
   },
@@ -7525,7 +7525,7 @@ const App={
         weight:       parseFloat($("epWeight")?.value)||0,
         default_cod:  parseFloat($("epPrice")?.value)||0,
       }).eq("id",id);
-      AppState.merchantProducts = await DB.loadMerchantProducts(AppState.user.id);
+      AppState.merchantProducts = await DB.loadMerchantProducts(AppState.user?.id);
       Modals.close(); rerenderContent(); toast("✅ تم تحديث المنتج");
     } catch(e) { $("epErr").style.display="block"; $("epErr").textContent="خطأ: "+e.message; }
   },
@@ -7570,7 +7570,7 @@ const App={
 
   async loadImportBatches() {
     const role = AppState.user.primary_role||AppState.user.role;
-    const mid  = role==="merchant" ? AppState.user.id : null;
+    const mid  = role==="merchant" ? AppState.user?.id : null;
     AppState.importBatches = await DB.loadImportBatches(mid);
   },
 
@@ -7578,7 +7578,7 @@ const App={
     await loadEgyptData();
     AppState.importWizard = {
       step:1, file:null, rawRows:[], validatedRows:[],
-      merchantId: (AppState.user.primary_role||AppState.user.role)==="merchant" ? AppState.user.id : "",
+      merchantId: (AppState.user.primary_role||AppState.user.role)==="merchant" ? AppState.user?.id : "",
       merchantName: (AppState.user.primary_role||AppState.user.role)==="merchant" ? AppState.user.name : "",
       autoRecipients:false, autoAddresses:false,
       progress:{done:0,total:0,failed:0,skipped:0}, batch:null,
@@ -7708,7 +7708,7 @@ const App={
       const batch = await DB.createImportBatch({
         merchant_id:      wiz.merchantId,
         merchant_name:    wiz.merchantName||"",
-        created_by:       AppState.user.id,
+        created_by:       AppState.user?.id,
         created_by_role:  AppState.user.primary_role||AppState.user.role,
         filename:         wiz.file.name,
         file_row_count:   wiz.rawRows.length,
@@ -7751,7 +7751,7 @@ const App={
       await DB.insertImportRows(rowPayloads);
 
       // Import valid rows one by one (with progress updates)
-      const uid  = AppState.user.id;
+      const uid  = AppState.user?.id;
       const CHUNK = 10;
       for (let i=0; i<validRows.length; i++) {
         const r = validRows[i];
@@ -7883,7 +7883,7 @@ const App={
     await DB.updateImportBatch(batchId, {
       status:"cancelled",
       cancelled_at:new Date().toISOString(),
-      cancelled_by:AppState.user.id,
+      cancelled_by:AppState.user?.id,
     });
     await DB.addAudit("CANCEL_IMPORT",batchId,
       "By "+AppState.user.name,"import");
@@ -7957,7 +7957,7 @@ const App={
   },
 
   async loadMyWallet() {
-    const uid = AppState.user.id;
+    const uid = AppState.user?.id;
     const [bal, txns] = await Promise.all([
       DB.loadDriverBalance(uid),
       DB.loadDriverTransactions(uid),
@@ -8039,7 +8039,7 @@ const App={
           capacity:$("brCapacity")?.value?Number($("brCapacity").value):null,
           manager_id:mgrSel?.value||null,
           manager_name:mgrSel?.value?(mgrSel.options[mgrSel.selectedIndex]?.dataset.name||""):"",
-          created_by:AppState.user.id,
+          created_by:AppState.user?.id,
         }]);
         if(error)throw error;
         await DB.addAudit("ADD_BRANCH","",`${name} (${code}) by ${AppState.user.name}`,"setting");
@@ -8095,7 +8095,7 @@ const App={
   async deleteBranch(id){
     if(!confirm("حذف هذا الفرع؟"))return;
     const{error}=await db.from("branches").update({
-      is_deleted:true,deleted_at:new Date().toISOString(),deleted_by:AppState.user.id
+      is_deleted:true,deleted_at:new Date().toISOString(),deleted_by:AppState.user?.id
     }).eq("id",id);
     if(error){toast("خطأ: "+error.message,"error");return;}
     await DB.addAudit("DELETE_BRANCH",id,`By ${AppState.user.name}`,"setting");
@@ -8174,7 +8174,7 @@ const App={
           branch_id:brSel?.value||null,
           branch_name:brSel?.value?(brSel.options[brSel.selectedIndex]?.dataset.name||""):"",
           capacity:$("whCapacity")?.value?Number($("whCapacity").value):null,
-          created_by:AppState.user.id,
+          created_by:AppState.user?.id,
         }]);
         if(error)throw error;
         Modals.close();await App.loadBranchData();
@@ -8315,7 +8315,7 @@ const App={
           express_surcharge:(Number($("prExpress")?.value)||0)/100,
           priority:         Number($("prPriority")?.value)||10,
           notes:            $("prNotes")?.value.trim()||null,
-          created_by:       AppState.user.id,
+          created_by:       AppState.user?.id,
         }]);
         if(error)throw error;
         await DB.addAudit("ADD_PRICING_RULE","",
@@ -8887,7 +8887,7 @@ const App={
   },
 
   async loadWebhooksData() {
-    const mid = AppState.user?.primary_role==="merchant" ? AppState.user.id : null;
+    const mid = AppState.user?.primary_role==="merchant" ? AppState.user?.id : null;
     try {
       const [webhooks, apiKeys] = await Promise.all([
         DB.loadWebhooks(mid),
@@ -8969,8 +8969,8 @@ const App={
     btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
     try {
       const mid = AppState.user?.primary_role==="merchant"
-        ? AppState.user.id
-        : AppState.selectedMerchant || AppState.user.id;
+        ? AppState.user?.id
+        : AppState.selectedMerchant || AppState.user?.id;
       await DB.saveWebhook({
         id:           webhookId||undefined,
         merchant_id:  mid,
@@ -8980,7 +8980,7 @@ const App={
       await DB.addAudit(webhookId?"WEBHOOK_UPDATE":"WEBHOOK_CREATE",
         webhookId||"", `Label:${label} URL:${url} By:${AppState.user.name}`, "webhook");
       AppState.webhooks = await DB.loadWebhooks(
-        AppState.user?.primary_role==="merchant" ? AppState.user.id : null);
+        AppState.user?.primary_role==="merchant" ? AppState.user?.id : null);
       AppState._webhooksDataLoaded = true;
       Modals.close();
       rerenderContent();
@@ -9199,8 +9199,8 @@ const App={
         .map(b=>b.toString(16).padStart(2,"0")).join("");
 
       const mid = AppState.user?.primary_role==="merchant"
-        ? AppState.user.id
-        : AppState.selectedMerchant || AppState.user.id;
+        ? AppState.user?.id
+        : AppState.selectedMerchant || AppState.user?.id;
 
       await DB.createApiKey({
         merchant_id: mid,
@@ -9215,7 +9215,7 @@ const App={
       await DB.addAudit("API_KEY_CREATE","",
         `Label:${label} Prefix:${prefix} By:${AppState.user.name} [key-never-logged]`, "api");
       AppState.apiKeys = await DB.loadApiKeys(
-        AppState.user?.primary_role==="merchant" ? AppState.user.id : null);
+        AppState.user?.primary_role==="merchant" ? AppState.user?.id : null);
       AppState._webhooksDataLoaded = true;
       Modals.close();
 
@@ -9835,7 +9835,7 @@ const App={
     btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
     try {
       await DB.submitNPS({
-        user_id:        AppState.user.id,
+        user_id:        AppState.user?.id,
         customer_phone: AppState.user.phone||"",
         score, comment, context: "post_delivery",
       });
@@ -10146,8 +10146,8 @@ const App={
         } catch {}
         try {
           await DB.updateMyLocation(lat, lng, accuracy, speed, heading, battery);
-          AppState.driverLocations[AppState.user.id] = {
-            courierId:   AppState.user.id,
+          AppState.driverLocations[AppState.user?.id] = {
+            courierId:   AppState.user?.id,
             courierName: AppState.user.name,
             lat, lng, accuracy, speed, heading, battery,
             isOnline:    true,
@@ -10172,7 +10172,7 @@ const App={
       try {
         await db.from("driver_locations")
           .update({ last_seen_at: new Date().toISOString() })
-          .eq("courier_id", AppState.user.id);
+          .eq("courier_id", AppState.user?.id);
       } catch {}
     }, 2 * 60 * 1000); // every 2 minutes
 
@@ -10641,7 +10641,7 @@ const App={
         zone_tags:                [],
         service_capabilities:     ["standard"],
         is_available_for_dispatch:true,
-        updated_by:               AppState.user.id,
+        updated_by:               AppState.user?.id,
       })));
       AppState.courierConfigs = await DB.loadCourierConfigs();
       rerenderContent();
@@ -11027,14 +11027,14 @@ const App={
         full_name:  name,
         phone:      phone||null,
         updated_at: new Date().toISOString(),
-      }).eq("id", AppState.user.id);
+      }).eq("id", AppState.user?.id);
       if (error) throw error;
 
       // Update local state
       AppState.user.name  = name;
       AppState.user.phone = phone;
 
-      await DB.addAudit("PROFILE_UPDATE", AppState.user.id,
+      await DB.addAudit("PROFILE_UPDATE", AppState.user?.id,
         `Name: ${name} | Phone: ${phone||"—"} | By: ${name}`, "user");
 
       Modals.close();
@@ -11095,7 +11095,7 @@ const App={
       const { error } = await db.auth.updateUser({ password: pw1 });
       if (error) throw error;
 
-      await DB.addAudit("PASSWORD_CHANGE", AppState.user.id,
+      await DB.addAudit("PASSWORD_CHANGE", AppState.user?.id,
         `Password changed by ${AppState.user.name}`, "auth");
 
       Modals.close();
@@ -11517,7 +11517,7 @@ const App={
           balance_after:bal+amount,
           description:$("dtDesc")?.value.trim()||null,
           shipment_code:$("dtCode")?.value.trim()||null,
-          created_by:AppState.user.id,
+          created_by:AppState.user?.id,
         }]);
         if(error)throw error;
         await DB.addAudit("DRIVER_WALLET_ENTRY",driverId,
@@ -11566,7 +11566,7 @@ const App={
         const bal=await DB.loadDriverBalance(driverId);
         const{error}=await db.from("driver_transactions").insert([{
           driver_id:driverId,type,amount,balance_after:bal+amount,
-          description:$("dtDesc2")?.value.trim()||null,created_by:AppState.user.id,
+          description:$("dtDesc2")?.value.trim()||null,created_by:AppState.user?.id,
         }]);
         if(error)throw error;
         Modals.close();toast(`✅ تم تسجيل الحركة لـ ${driverName}`);
@@ -11627,7 +11627,7 @@ const App={
 
   async verifyCodRecon(id) {
     const{error}=await db.from("cod_reconciliation").update({
-      status:"verified",verified_by:AppState.user.id,verified_at:new Date().toISOString()
+      status:"verified",verified_by:AppState.user?.id,verified_at:new Date().toISOString()
     }).eq("id",id);
     if(error){toast("خطأ: "+error.message,"error");return;}
     App._loadFinanceTabData("cod");toast("✅ تم التحقق من المطابقة");
@@ -11675,7 +11675,7 @@ const App={
         const{error}=await db.from("expenses").insert([{
           category:cat,amount,description:desc,
           reference_name:$("expRef")?.value.trim()||null,
-          expense_date:date,created_by:AppState.user.id,
+          expense_date:date,created_by:AppState.user?.id,
         }]);
         if(error)throw error;
         await DB.addAudit("ADD_EXPENSE","",`${cat}: ${money(amount)} - ${desc} by ${AppState.user.name}`,"shipment");
@@ -11743,7 +11743,7 @@ const App={
           net_payable:netPayable,
           status:"draft",
           notes:$("invNotes")?.value.trim()||null,
-          created_by:AppState.user.id,
+          created_by:AppState.user?.id,
         }]);
         if(error)throw error;
         await DB.addAudit("CREATE_INVOICE",merchantId,
@@ -11919,7 +11919,7 @@ const App={
           balance_after: newBal,
           description:   $("lDesc")?.value.trim()||null,
           shipment_code: $("lShipCode")?.value.trim()||null,
-          created_by:    AppState.user.id,
+          created_by:    AppState.user?.id,
         }]);
         if(error)throw error;
         await DB.addAudit("ADMIN_LEDGER_ENTRY",merchantId,
@@ -11934,7 +11934,7 @@ const App={
   // Admin settlement management
   async approveSettlement(settlementId, merchantId) {
     const{error}=await db.from("settlements").update({
-      status:"approved", processed_by:AppState.user.id,
+      status:"approved", processed_by:AppState.user?.id,
       processed_at:new Date().toISOString()
     }).eq("id",settlementId);
     if(error){toast("خطأ: "+error.message,"error");return;}
@@ -11949,7 +11949,7 @@ const App={
     if (!reason) return;
     const{error}=await db.from("settlements").update({
       status:"rejected", rejection_reason:reason,
-      processed_by:AppState.user.id, processed_at:new Date().toISOString()
+      processed_by:AppState.user?.id, processed_at:new Date().toISOString()
     }).eq("id",settlementId);
     if(error){toast("خطأ: "+error.message,"error");return;}
     await DB.addAudit("REJECT_SETTLEMENT",settlementId,
@@ -11963,7 +11963,7 @@ const App={
     if (ref === null) return;
     const{error}=await db.from("settlements").update({
       status:"paid", payment_ref:ref||null,
-      processed_by:AppState.user.id, processed_at:new Date().toISOString()
+      processed_by:AppState.user?.id, processed_at:new Date().toISOString()
     }).eq("id",settlementId);
     if(error){toast("خطأ: "+error.message,"error");return;}
     // Record settlement in ledger
@@ -11974,7 +11974,7 @@ const App={
         merchant_id:merchantId, type:"settlement",
         amount:-Math.abs(sett.amount), balance_after:bal-Math.abs(sett.amount),
         description:`تسوية #${settlementId.slice(-6)}`, reference_id:settlementId,
-        created_by:AppState.user.id,
+        created_by:AppState.user?.id,
       }]);
     }
     await DB.addAudit("MARK_SETTLEMENT_PAID",settlementId,
@@ -12093,16 +12093,16 @@ const App={
     btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
     try {
       const { error } = await db.from("settlements").insert([{
-        merchant_id:    AppState.user.id,
+        merchant_id:    AppState.user?.id,
         amount:         amt,
         status:         "pending",
         payment_method: method,
       }]);
       if (error) throw error;
-      await DB.addAudit("REQUEST_SETTLEMENT", AppState.user.id,
+      await DB.addAudit("REQUEST_SETTLEMENT", AppState.user?.id,
         `Merchant ${AppState.user.name} requested ${money(amt)} via ${method}`, "finance");
       // Refresh settlements list
-      AppState.settlements = await DB.loadSettlements(AppState.user.id).catch(()=>[]);
+      AppState.settlements = await DB.loadSettlements(AppState.user?.id).catch(()=>[]);
       Modals.close();
       rerenderContent();
       toast(`✅ تم إرسال طلب التسوية بمبلغ ${money(amt)}`);
@@ -12114,7 +12114,7 @@ const App={
 
   // ── Phase 2A: Address Book ────────────────────────────────
   async loadMerchantData() {
-    const uid = AppState.user.id;
+    const uid = AppState.user?.id;
     const [addrs, recs, prods, reqs, rpcBal] = await Promise.all([
       DB.loadMerchantAddresses(uid),
       DB.loadMerchantRecipients(uid),
@@ -12187,7 +12187,7 @@ const App={
       const btn = $("saveAddrBtn"); btn.disabled=true; btn.innerHTML=`<span class="spinner"></span>`;
       try {
         const { error } = await db.from("merchant_addresses").insert([{
-          merchant_id:   AppState.user.id,
+          merchant_id:   AppState.user?.id,
           label,
           type:          $("aType")?.value||"pickup",
           governorate:   gov,
@@ -12206,7 +12206,7 @@ const App={
   },
 
   async setDefaultAddress(id) {
-    const uid = AppState.user.id;
+    const uid = AppState.user?.id;
     await db.from("merchant_addresses").update({is_default:false}).eq("merchant_id",uid);
     await db.from("merchant_addresses").update({is_default:true}).eq("id",id);
     await App.loadMerchantData(); rerenderContent();
@@ -12223,7 +12223,7 @@ const App={
 
   // ── Phase 2A: Recipients ──────────────────────────────────
   async searchRecipients(q) {
-    const uid = AppState.user.id;
+    const uid = AppState.user?.id;
     AppState.merchantRecipients = await DB.loadMerchantRecipients(uid, q);
     rerenderContent();
     $("recipientSearch")?.focus();
@@ -12265,7 +12265,7 @@ const App={
       const btn=$("saveRecBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
       try {
         const{error}=await db.from("merchant_recipients").insert([{
-          merchant_id:AppState.user.id,name,phone,
+          merchant_id:AppState.user?.id,name,phone,
           phone2:$("rPhone2")?.value.trim()||null,
           governorate:$("rGov")?.value||"",
           city:$("rCity")?.value||"",
@@ -12340,7 +12340,7 @@ const App={
       const btn=$("saveProdBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
       try{
         const{error}=await db.from("merchant_products").insert([{
-          merchant_id:AppState.user.id,name,
+          merchant_id:AppState.user?.id,name,
           sku:$("pSku")?.value.trim()||null,
           price:$("pPrice")?.value?Number($("pPrice").value):null,
           weight:$("pWeight")?.value?Number($("pWeight").value):null,
@@ -12397,7 +12397,7 @@ const App={
       const btn=$("savePickupBtn");btn.disabled=true;btn.innerHTML=`<span class="spinner"></span>`;
       try{
         const{error}=await db.from("pickup_requests").insert([{
-          merchant_id:AppState.user.id,
+          merchant_id:AppState.user?.id,
           address_id:addrId||null,
           status:"pending",
           shipment_count:count,
@@ -12405,7 +12405,7 @@ const App={
           notes,
         }]);
         if(error)throw error;
-        await DB.addAudit("CREATE_PICKUP_REQUEST",AppState.user.id,
+        await DB.addAudit("CREATE_PICKUP_REQUEST",AppState.user?.id,
           `Merchant ${AppState.user.name} requested pickup of ${count} shipments`,"shipment");
         await App.loadMerchantData();Modals.close();rerenderContent();
         toast("✅ تم إرسال طلب الاستلام");
